@@ -1,9 +1,40 @@
-import React from 'react';
-import { Button, Card, Form, Input, Typography } from 'antd';
+import React, { useState } from 'react';
+import { Button, Card, Form, Input, Typography, message } from 'antd';
+import { useNavigate, useLocation } from 'react-router-dom';
+import api from '../../services/api';
 
 const { Title, Text } = Typography;
 
 const Login: React.FC = () => {
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const onFinish = async (values: { username: string; password: string }) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.append('username', values.username);
+      params.append('password', values.password);
+
+      const res = await api.post('/auth/login', params, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+
+      localStorage.setItem('token', res.data.access_token);
+      localStorage.setItem('user', JSON.stringify(res.data.user));
+      message.success(`欢迎回来，${res.data.user.display_name || res.data.user.username}`);
+
+      const from = (location.state as { from?: { pathname: string } })?.from?.pathname || '/dashboard';
+      navigate(from, { replace: true });
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } };
+      message.error(error.response?.data?.detail || '登录失败，请检查用户名和密码');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -29,7 +60,7 @@ const Login: React.FC = () => {
           </Title>
           <Text type="secondary">登录以继续使用</Text>
         </div>
-        <Form layout="vertical" requiredMark={false}>
+        <Form layout="vertical" requiredMark={false} onFinish={onFinish}>
           <Form.Item
             label="用户名"
             name="username"
@@ -45,7 +76,7 @@ const Login: React.FC = () => {
             <Input.Password placeholder="密码" size="large" autoComplete="current-password" />
           </Form.Item>
           <Form.Item style={{ marginBottom: 0 }}>
-            <Button type="primary" htmlType="submit" block size="large">
+            <Button type="primary" htmlType="submit" block size="large" loading={loading}>
               登录
             </Button>
           </Form.Item>

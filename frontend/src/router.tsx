@@ -1,5 +1,5 @@
 import React, { lazy, Suspense } from 'react';
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { createBrowserRouter, Navigate, useLocation } from 'react-router-dom';
 import { Spin } from 'antd';
 import MainLayout from './layouts/MainLayout';
 
@@ -13,6 +13,15 @@ const lazyLoad = (factory: () => Promise<{ default: React.ComponentType }>) => (
   <Suspense fallback={<Loading />}>{React.createElement(lazy(factory))}</Suspense>
 );
 
+function AuthGuard({ children }: { children: React.ReactNode }) {
+  const location = useLocation();
+  const token = localStorage.getItem('token');
+  if (!token) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  return <>{children}</>;
+}
+
 const router = createBrowserRouter([
   {
     path: '/login',
@@ -20,7 +29,11 @@ const router = createBrowserRouter([
   },
   {
     path: '/',
-    element: <MainLayout />,
+    element: (
+      <AuthGuard>
+        <MainLayout />
+      </AuthGuard>
+    ),
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: lazyLoad(() => import('./pages/dashboard')) },
