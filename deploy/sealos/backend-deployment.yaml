@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resell-backend
+  namespace: resell-assistant
+  labels:
+    app: resell-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: resell-backend
+  template:
+    metadata:
+      labels:
+        app: resell-backend
+    spec:
+      containers:
+        - name: backend
+          image: crpi-ryxzfb3l96vqk28a.cn-shenzhen.personal.cr.aliyuncs.com/resell-assistant/backend:latest
+          command: ["bash", "/app/entrypoint.sh"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: resell-secret
+            - configMapRef:
+                name: resell-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: playwright-states
+              mountPath: /app/playwright_states
+            - name: image-storage
+              mountPath: /app/storage/images
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: playwright-states
+          persistentVolumeClaim:
+            claimName: playwright-states-pvc
+        - name: image-storage
+          persistentVolumeClaim:
+            claimName: image-storage-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: resell-assistant
+spec:
+  selector:
+    app: resell-backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP

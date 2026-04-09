@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+echo "=== Resell Assistant Backend ==="
+echo "Running database migrations..."
+alembic upgrade head || echo "Migration skipped (may already be up to date)"
+
+echo "Starting server..."
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1

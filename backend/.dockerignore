@@ -1,0 +1,9 @@
+__pycache__
+*.pyc
+*.pyo
+.env
+.git
+.vscode
+playwright_states/*.json
+storage/images/*
+alembic/versions/__pycache__

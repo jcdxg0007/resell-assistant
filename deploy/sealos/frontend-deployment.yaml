@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resell-frontend
+  namespace: resell-assistant
+  labels:
+    app: resell-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: resell-frontend
+  template:
+    metadata:
+      labels:
+        app: resell-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: crpi-ryxzfb3l96vqk28a.cn-shenzhen.personal.cr.aliyuncs.com/resell-assistant/frontend:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: resell-assistant
+spec:
+  selector:
+    app: resell-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP

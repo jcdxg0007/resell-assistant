@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resell-celery
+  namespace: resell-assistant
+  labels:
+    app: resell-celery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: resell-celery
+  template:
+    metadata:
+      labels:
+        app: resell-celery
+    spec:
+      containers:
+        - name: celery
+          image: crpi-ryxzfb3l96vqk28a.cn-shenzhen.personal.cr.aliyuncs.com/resell-assistant/backend:latest
+          command:
+            - celery
+            - -A
+            - app.core.celery_app:celery_app
+            - worker
+            - --beat
+            - --loglevel=info
+            - --concurrency=2
+          envFrom:
+            - secretRef:
+                name: resell-secret
+            - configMapRef:
+                name: resell-config
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: playwright-states
+              mountPath: /app/playwright_states
+            - name: image-storage
+              mountPath: /app/storage/images
+      volumes:
+        - name: playwright-states
+          persistentVolumeClaim:
+            claimName: playwright-states-pvc
+        - name: image-storage
+          persistentVolumeClaim:
+            claimName: image-storage-pvc

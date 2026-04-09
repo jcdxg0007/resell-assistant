@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: resell-backend
+    entrypoint: ["bash", "/app/entrypoint.sh"]
+    env_file: ./backend/.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - playwright_states:/app/playwright_states
+      - image_storage:/app/storage/images
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    container_name: resell-celery
+    env_file: ./backend/.env
+    volumes:
+      - playwright_states:/app/playwright_states
+      - image_storage:/app/storage/images
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: resell-frontend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+volumes:
+  playwright_states:
+  image_storage:
