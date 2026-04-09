@@ -9,8 +9,8 @@ server {
     gzip_min_length 1000;
 
     location /api/ {
-        resolver 10.96.0.10 valid=30s ipv6=off;
-        set $backend "http://backend:8000";
+        resolver ${DNS_RESOLVER} valid=30s ipv6=off;
+        set $backend "${BACKEND_URL}";
         proxy_pass $backend;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -20,8 +20,8 @@ server {
     }
 
     location /health {
-        resolver 10.96.0.10 valid=30s ipv6=off;
-        set $backend "http://backend:8000";
+        resolver ${DNS_RESOLVER} valid=30s ipv6=off;
+        set $backend "${BACKEND_URL}";
         proxy_pass $backend;
     }
 
