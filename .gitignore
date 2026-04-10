@@ -31,3 +31,4 @@ backend/playwright_states/
 # Storage
 backend/storage/images/*
 !backend/storage/images/.gitkeep
+kubectl
