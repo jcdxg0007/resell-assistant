@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Table, Card, Button, Space, Tag, Modal, Form,
-  Input, Select, message, Popconfirm, Progress, Row, Col, Statistic,
+  Input, Select, InputNumber, message, Popconfirm, Progress, Row, Col, Statistic,
 } from 'antd';
 import {
-  PlusOutlined, ReloadOutlined, PauseCircleOutlined, PlayCircleOutlined,
+  PlusOutlined, ReloadOutlined, PauseCircleOutlined, PlayCircleOutlined, EditOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -52,8 +52,11 @@ const Accounts: React.FC = () => {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<AccountItem | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm();
+  const [editForm] = Form.useForm();
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
@@ -85,6 +88,52 @@ const Accounts: React.FC = () => {
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } }; errorFields?: unknown };
       if (error.response) message.error(error.response.data?.detail || '创建失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openEdit = (record: AccountItem) => {
+    setEditingAccount(record);
+    editForm.setFieldsValue({
+      proxy_url: record.proxy_url || '',
+      user_agent: '',
+      niche: record.niche || '',
+      lifecycle_stage: record.lifecycle_stage,
+      daily_publish_limit: record.daily_publish_limit,
+    });
+    setEditModalOpen(true);
+  };
+
+  const handleEdit = async () => {
+    if (!editingAccount) return;
+    try {
+      const values = await editForm.validateFields();
+      setSubmitting(true);
+      const payload: Record<string, unknown> = {};
+      if (values.proxy_url !== undefined && values.proxy_url !== (editingAccount.proxy_url || ''))
+        payload.proxy_url = values.proxy_url || null;
+      if (values.niche !== undefined && values.niche !== (editingAccount.niche || ''))
+        payload.niche = values.niche || null;
+      if (values.lifecycle_stage && values.lifecycle_stage !== editingAccount.lifecycle_stage)
+        payload.lifecycle_stage = values.lifecycle_stage;
+      if (values.daily_publish_limit !== undefined && values.daily_publish_limit !== editingAccount.daily_publish_limit)
+        payload.daily_publish_limit = values.daily_publish_limit;
+      if (values.user_agent) payload.user_agent = values.user_agent;
+
+      if (Object.keys(payload).length === 0) {
+        message.info('没有修改任何内容');
+        return;
+      }
+      await api.put(`/accounts/${editingAccount.id}`, payload);
+      message.success('账号信息已更新');
+      setEditModalOpen(false);
+      setEditingAccount(null);
+      editForm.resetFields();
+      fetchAccounts();
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } }; errorFields?: unknown };
+      if (error.response) message.error(error.response.data?.detail || '更新失败');
     } finally {
       setSubmitting(false);
     }
@@ -129,15 +178,19 @@ const Accounts: React.FC = () => {
         />
       ),
     },
-    { title: '代理 IP', dataIndex: 'proxy_url', ellipsis: true, width: 160, render: (v: string) => v || '未配置' },
+    {
+      title: '代理 IP', dataIndex: 'proxy_url', ellipsis: true, width: 160,
+      render: (v: string) => v ? <Tag color="blue">{v}</Tag> : <Tag color="warning">未配置</Tag>,
+    },
     {
       title: '状态', dataIndex: 'is_active', width: 80,
       render: (v: boolean) => v ? <Tag color="success">正常</Tag> : <Tag color="error">暂停</Tag>,
     },
     {
-      title: '操作', width: 120, fixed: 'right',
+      title: '操作', width: 160, fixed: 'right',
       render: (_: unknown, record: AccountItem) => (
         <Space size="small">
+          <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(record)}>编辑</Button>
           {record.is_active ? (
             <Popconfirm title="确认暂停该账号？" onConfirm={() => handleSuspend(record.id)}>
               <Button size="small" icon={<PauseCircleOutlined />} danger>暂停</Button>
@@ -185,11 +238,12 @@ const Accounts: React.FC = () => {
           dataSource={accounts}
           loading={loading}
           pagination={false}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1300 }}
           locale={{ emptyText: '暂无账号，请点击「添加账号」录入' }}
         />
       </Card>
 
+      {/* 添加账号弹窗 */}
       <Modal
         title="添加账号"
         open={modalOpen}
@@ -220,6 +274,39 @@ const Accounts: React.FC = () => {
           </Form.Item>
           <Form.Item name="user_agent" label="User-Agent">
             <Input.TextArea rows={2} placeholder="留空则自动生成" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 编辑账号弹窗 */}
+      <Modal
+        title={`编辑账号 - ${editingAccount?.account_name || ''}`}
+        open={editModalOpen}
+        onOk={handleEdit}
+        onCancel={() => { setEditModalOpen(false); setEditingAccount(null); editForm.resetFields(); }}
+        confirmLoading={submitting}
+        okText="保存"
+      >
+        <Form form={editForm} layout="vertical">
+          <Form.Item name="proxy_url" label="代理 IP">
+            <Input placeholder="例如：socks5://user:pass@ip:port" allowClear />
+          </Form.Item>
+          <Form.Item name="niche" label="品类定位">
+            <Input placeholder="例如：3C数码、小家具" allowClear />
+          </Form.Item>
+          <Form.Item name="lifecycle_stage" label="生命周期">
+            <Select>
+              <Select.Option value="nurturing">养号期</Select.Option>
+              <Select.Option value="cold_start">冷启动</Select.Option>
+              <Select.Option value="growing">成长期</Select.Option>
+              <Select.Option value="mature">成熟期</Select.Option>
+            </Select>
+          </Form.Item>
+          <Form.Item name="daily_publish_limit" label="每日发布上限">
+            <InputNumber min={1} max={50} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="user_agent" label="User-Agent">
+            <Input.TextArea rows={2} placeholder="留空不修改" />
           </Form.Item>
         </Form>
       </Modal>
