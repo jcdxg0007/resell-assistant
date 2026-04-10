@@ -21,24 +21,66 @@ LOGIN_URLS = {
     "douyin": "https://creator.douyin.com/",
 }
 
+# Buttons/tabs to click to switch to QR code login mode
+QR_SWITCH_SELECTORS = {
+    "xianyu": [
+        'text="扫码登录"',
+        'a:has-text("扫码登录")',
+        'div:has-text("扫码登录")',
+        '.qrcode-login',
+        '.login-switch:has-text("扫码")',
+        '#login >> text="扫码登录"',
+        'span:has-text("扫码登录")',
+        '.icon-qrcode',
+        '[data-action="qrcode_login"]',
+    ],
+    "xiaohongshu": [
+        'text="扫码登录"',
+        'div:has-text("扫码登录")',
+        'span:has-text("扫码登录")',
+        '.qrcode-tab',
+        'text="二维码登录"',
+    ],
+    "douyin": [
+        'text="扫码登录"',
+        'div:has-text("扫码登录")',
+        '.web-login-scan-code',
+    ],
+}
+
 QR_SELECTORS = {
     "xianyu": [
-        'canvas[id="login-qrcode-img"]',
-        'img[id="login-qrcode-img"]',
+        '#login-qrcode-img',
+        'img[id*="qrcode"]',
+        'canvas[id*="qrcode"]',
         'div.qrcode-img img',
-        '#login img[src*="qrcode"]',
+        'div.qrcode-img canvas',
+        '#login img[src*="qr"]',
+        'img[src*="qrcode"]',
+        'img[src*="taobao"][src*="qr"]',
+        '.qrcode-img',
+        'div[class*="qrcode"] img',
+        'div[class*="qrcode"] canvas',
+        'div[class*="QRCode"] img',
+        'div[class*="QRCode"] canvas',
         'canvas',
     ],
     "xiaohongshu": [
         'img.qrcode-img',
-        'div.qrcode img',
         'img[class*="qr"]',
-        'canvas.qr',
+        'img[class*="QR"]',
+        'div.qrcode img',
+        'div[class*="qrcode"] img',
+        'div[class*="qrcode"] canvas',
+        'canvas[class*="qr"]',
+        'img[src*="qr"]',
     ],
     "douyin": [
         'img.qrcode-image',
+        'img[class*="qr"]',
         'div.qrcode img',
         '#login-qrcode img',
+        'img[src*="qr"]',
     ],
 }
 
@@ -111,15 +153,19 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
             session.page = None
             return session
 
+        await _switch_to_qr_mode(page, platform)
+        await asyncio.sleep(2)
+
         qr_b64 = await _capture_qr_code(page, platform)
         if qr_b64:
             session.qr_image_b64 = qr_b64
             session.status = LoginStatus.QR_READY
+            logger.info(f"QR code captured for {platform} account {account_id}")
         else:
-            screenshot = await page.screenshot(type="png")
+            screenshot = await page.screenshot(type="png", full_page=False)
             session.qr_image_b64 = base64.b64encode(screenshot).decode()
             session.status = LoginStatus.QR_READY
-            logger.warning(f"QR element not found for {platform}, using full page screenshot")
+            logger.warning(f"QR element not found for {platform}, using viewport screenshot")
 
     except Exception as e:
         logger.error(f"Login start failed for {account_id}: {e}")
@@ -165,10 +211,8 @@ async def poll_login_status(account_id: str) -> dict:
             session.page = None
             return _session_to_dict(session)
 
-        qr_b64 = await _capture_qr_code(session.page, session.platform)
-        if qr_b64 and qr_b64 != session.qr_image_b64:
-            session.qr_image_b64 = qr_b64
-
+        screenshot = await session.page.screenshot(type="png", full_page=False)
+        session.qr_image_b64 = base64.b64encode(screenshot).decode()
         session.status = LoginStatus.WAITING_SCAN
 
     except Exception as e:
@@ -195,7 +239,7 @@ async def get_login_screenshot(account_id: str) -> str | None:
     if not session or not session.page or session.page.is_closed():
         return None
     try:
-        screenshot = await session.page.screenshot(type="png")
+        screenshot = await session.page.screenshot(type="png", full_page=False)
         return base64.b64encode(screenshot).decode()
     except Exception:
         return None
@@ -206,15 +250,34 @@ def _check_login_success(url: str, platform: str) -> bool:
     return any(ind in url for ind in indicators)
 
 
+async def _switch_to_qr_mode(page: Any, platform: str):
+    """Try to click the QR code login tab/button to switch to QR scan mode."""
+    selectors = QR_SWITCH_SELECTORS.get(platform, [])
+    for selector in selectors:
+        try:
+            el = page.locator(selector).first
+            if await el.is_visible(timeout=1500):
+                await el.click()
+                logger.info(f"Switched to QR login mode via: {selector}")
+                await asyncio.sleep(1.5)
+                return
+        except Exception:
+            continue
+    logger.info(f"No QR switch button found for {platform}, page may already show QR")
+
+
 async def _capture_qr_code(page: Any, platform: str) -> str | None:
     """Try to locate and screenshot the QR code element."""
     selectors = QR_SELECTORS.get(platform, [])
     for selector in selectors:
         try:
             el = page.locator(selector).first
-            if await el.is_visible(timeout=2000):
-                screenshot = await el.screenshot(type="png")
-                return base64.b64encode(screenshot).decode()
+            if await el.is_visible(timeout=1500):
+                box = await el.bounding_box()
+                if box and box['width'] > 50 and box['height'] > 50:
+                    screenshot = await el.screenshot(type="png")
+                    logger.info(f"QR captured via selector: {selector} ({box['width']}x{box['height']})")
+                    return base64.b64encode(screenshot).decode()
         except Exception:
             continue
     return None
