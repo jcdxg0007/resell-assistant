@@ -59,7 +59,7 @@ const Accounts: React.FC = () => {
     setLoading(true);
     try {
       const [listRes, summaryRes] = await Promise.all([
-        api.get('/accounts', { params: { is_active: null, page_size: 100 } }),
+        api.get('/accounts/', { params: { page_size: 100 } }),
         api.get('/accounts/stats/summary').catch(() => ({ data: null })),
       ]);
       setAccounts(listRes.data.items || []);
@@ -77,7 +77,7 @@ const Accounts: React.FC = () => {
     try {
       const values = await form.validateFields();
       setSubmitting(true);
-      await api.post('/accounts', values);
+      await api.post('/accounts/', values);
       message.success('账号创建成功');
       setModalOpen(false);
       form.resetFields();

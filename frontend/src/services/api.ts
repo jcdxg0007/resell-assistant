@@ -1,9 +1,7 @@
 import axios from 'axios';
 
-const BACKEND_BASE = import.meta.env.VITE_API_BASE_URL || '';
-
 const api = axios.create({
-  baseURL: `${BACKEND_BASE}/api/v1`,
+  baseURL: 'https://jbbobxkpstwp.sealosbja.site/api/v1',
   timeout: 30000,
 });
 
