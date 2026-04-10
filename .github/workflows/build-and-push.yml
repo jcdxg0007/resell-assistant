@@ -1,4 +1,4 @@
-name: Build & Push Images
+name: Build & Push & Deploy
 
 on:
   push:
@@ -8,6 +8,8 @@ on:
 env:
   REGISTRY: crpi-ryxzfb3l96vqk28a.cn-shenzhen.personal.cr.aliyuncs.com
   NAMESPACE: resell-assistant
+  KUBE_SERVER: https://bja.sealos.run:6443
+  KUBE_NS: ns-3zn44u6p
 
 jobs:
   build-backend:
@@ -53,3 +55,24 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/frontend:latest
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/frontend:${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend]
+    steps:
+      - name: Restart Sealos Deployments
+        run: |
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          for APP in backend celery frontend; do
+            echo "Restarting $APP..."
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" -X PATCH \
+              -H "Authorization: Bearer ${{ secrets.KUBE_TOKEN }}" \
+              -H "Content-Type: application/strategic-merge-patch+json" \
+              "${{ env.KUBE_SERVER }}/apis/apps/v1/namespaces/${{ env.KUBE_NS }}/deployments/$APP" \
+              -d "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}}}}}")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ $APP restarted successfully"
+            else
+              echo "❌ $APP restart failed (HTTP $STATUS)"
+            fi
+          done
