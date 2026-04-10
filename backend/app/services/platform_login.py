@@ -23,8 +23,22 @@ LOGIN_URLS = {
 
 SUCCESS_INDICATORS = {
     "xianyu": ["goofish.com", "idle.taobao.com", "xianyu.com", "my.taobao.com"],
-    "xiaohongshu": ["creator.xiaohongshu.com/creator", "creator.xiaohongshu.com/publish"],
-    "douyin": ["creator.douyin.com/creator-micro"],
+    "xiaohongshu": [
+        "creator.xiaohongshu.com/creator",
+        "creator.xiaohongshu.com/publish",
+        "creator.xiaohongshu.com/home",
+        "creator.xiaohongshu.com/note",
+        "creator.xiaohongshu.com/statistics",
+        "creator.xiaohongshu.com/",
+    ],
+    "douyin": ["creator.douyin.com/creator-micro", "creator.douyin.com/"],
+}
+
+# URLs that indicate we're still on the login page (NOT logged in)
+LOGIN_PAGE_INDICATORS = {
+    "xianyu": ["login.taobao.com"],
+    "xiaohongshu": ["creator.xiaohongshu.com/login"],
+    "douyin": ["creator.douyin.com/login"],
 }
 
 PHONE_INPUT_JS = """() => {
@@ -602,8 +616,23 @@ async def _click_login_button(page: Any) -> bool:
 
 
 def _check_login_success(url: str, platform: str) -> bool:
+    # First check: if URL matches any known success pattern
     indicators = SUCCESS_INDICATORS.get(platform, [])
-    return any(ind in url for ind in indicators)
+    if any(ind in url for ind in indicators):
+        # But make sure we're not still on the login page
+        login_indicators = LOGIN_PAGE_INDICATORS.get(platform, [])
+        if any(li in url for li in login_indicators):
+            return False
+        return True
+    # Second check: if we've left the login page, we're likely logged in
+    login_indicators = LOGIN_PAGE_INDICATORS.get(platform, [])
+    if login_indicators and not any(li in url for li in login_indicators):
+        if any(base_domain in url for base_domain in [
+            "goofish.com", "taobao.com", "xianyu.com",
+            "xiaohongshu.com", "douyin.com",
+        ]):
+            return True
+    return False
 
 
 async def _switch_to_sms_mode(page: Any, platform: str):
