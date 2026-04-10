@@ -64,10 +64,16 @@ const Accounts: React.FC = () => {
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [loginAccount, setLoginAccount] = useState<AccountItem | null>(null);
   const [loginStatus, setLoginStatus] = useState<string>('idle');
-  const [qrImage, setQrImage] = useState<string | null>(null);
+  const [screenshot, setScreenshot] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [loginElapsed, setLoginElapsed] = useState(0);
+  const [phone, setPhone] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [submittingCode, setSubmittingCode] = useState(false);
+  const [countdown, setCountdown] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
@@ -166,31 +172,29 @@ const Accounts: React.FC = () => {
     fetchAccounts();
   };
 
-  // ─── Login Flow ─────────────────────────────────────────────
+  // ─── Login Flow (Phone + SMS Code) ──────────────────────────
 
   const startLogin = async (record: AccountItem) => {
     setLoginAccount(record);
     setLoginStatus('loading');
-    setQrImage(null);
+    setScreenshot(null);
     setLoginError(null);
-    setLoginElapsed(0);
+    setPhone('');
+    setSmsCode('');
+    setCodeSent(false);
+    setCountdown(0);
     setLoginModalOpen(true);
 
     try {
       const res = await api.post(`/accounts/${record.id}/login`);
-      const { status, qr_image, error } = res.data;
+      const { status, screenshot: img, error } = res.data;
       setLoginStatus(status);
-      if (qr_image) setQrImage(qr_image);
+      if (img) setScreenshot(img);
       if (error) setLoginError(error);
 
       if (status === 'success') {
         message.success('该账号已登录，无需重复操作');
         fetchAccounts();
-        return;
-      }
-
-      if (status === 'qr_ready' || status === 'waiting_scan') {
-        startPolling(record.id);
       }
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } } };
@@ -199,47 +203,89 @@ const Accounts: React.FC = () => {
     }
   };
 
-  const startPolling = (accountId: string) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await api.get(`/accounts/${accountId}/login/status`);
-        const { status, qr_image, error, elapsed } = res.data;
-        setLoginStatus(status);
-        if (qr_image) setQrImage(qr_image);
-        if (error) setLoginError(error);
-        if (elapsed) setLoginElapsed(elapsed);
-
-        if (status === 'success') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          message.success('登录成功！会话已保存');
-          fetchAccounts();
-        } else if (status === 'failed' || status === 'expired') {
-          if (pollRef.current) clearInterval(pollRef.current);
-        }
-      } catch {
-        // ignore polling errors
+  const handleSendCode = async () => {
+    if (!loginAccount || !phone.trim()) {
+      message.warning('请输入手机号');
+      return;
+    }
+    setSendingCode(true);
+    setLoginError(null);
+    try {
+      const res = await api.post(`/accounts/${loginAccount.id}/login/send-code`, { phone: phone.trim() });
+      if (res.data.success) {
+        message.success('验证码已发送，请查收短信');
+        setCodeSent(true);
+        if (res.data.screenshot) setScreenshot(res.data.screenshot);
+        setCountdown(60);
+        if (countdownRef.current) clearInterval(countdownRef.current);
+        countdownRef.current = setInterval(() => {
+          setCountdown((prev) => {
+            if (prev <= 1) {
+              if (countdownRef.current) clearInterval(countdownRef.current);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      } else {
+        setLoginError(res.data.error || '发送验证码失败');
+        if (res.data.screenshot) setScreenshot(res.data.screenshot);
       }
-    }, 3000);
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } };
+      setLoginError(error.response?.data?.detail || '发送验证码失败');
+    } finally {
+      setSendingCode(false);
+    }
+  };
+
+  const handleSubmitCode = async () => {
+    if (!loginAccount || !smsCode.trim()) {
+      message.warning('请输入验证码');
+      return;
+    }
+    setSubmittingCode(true);
+    setLoginError(null);
+    try {
+      const res = await api.post(`/accounts/${loginAccount.id}/login/verify`, { code: smsCode.trim() });
+      if (res.data.success && res.data.status === 'success') {
+        setLoginStatus('success');
+        message.success('登录成功！会话已保存');
+        fetchAccounts();
+      } else {
+        setLoginError(res.data.error || '登录未成功，请检查验证码');
+        if (res.data.screenshot) setScreenshot(res.data.screenshot);
+      }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } };
+      setLoginError(error.response?.data?.detail || '提交登录失败');
+    } finally {
+      setSubmittingCode(false);
+    }
   };
 
   const closeLogin = async () => {
     if (pollRef.current) clearInterval(pollRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
     if (loginAccount && loginStatus !== 'success') {
       await api.post(`/accounts/${loginAccount.id}/login/cancel`).catch(() => {});
     }
     setLoginModalOpen(false);
     setLoginAccount(null);
-    setQrImage(null);
+    setScreenshot(null);
     setLoginStatus('idle');
     setLoginError(null);
+    setPhone('');
+    setSmsCode('');
+    setCodeSent(false);
+    setCountdown(0);
   };
 
   const refreshScreenshot = async () => {
     if (!loginAccount) return;
     try {
       const res = await api.get(`/accounts/${loginAccount.id}/login/screenshot`);
-      if (res.data.screenshot) setQrImage(res.data.screenshot);
+      if (res.data.screenshot) setScreenshot(res.data.screenshot);
     } catch {
       message.error('获取截图失败');
     }
@@ -414,9 +460,9 @@ const Accounts: React.FC = () => {
         </Form>
       </Modal>
 
-      {/* 扫码登录弹窗 */}
+      {/* 手机号验证码登录弹窗 */}
       <Modal
-        title={`扫码登录 - ${loginAccount?.account_name || ''} (${PLATFORM_MAP[loginAccount?.platform || '']?.label || ''})`}
+        title={`登录 - ${loginAccount?.account_name || ''} (${PLATFORM_MAP[loginAccount?.platform || '']?.label || ''})`}
         open={loginModalOpen}
         onCancel={closeLogin}
         footer={[
@@ -425,49 +471,99 @@ const Accounts: React.FC = () => {
               重新登录
             </Button>
           ) : null,
-          <Button key="screenshot" onClick={refreshScreenshot} disabled={!loginAccount || loginStatus === 'success'}>
-            刷新截图
+          <Button key="close" onClick={closeLogin}>
+            {loginStatus === 'success' ? '完成' : '关闭'}
           </Button>,
-          <Button key="close" onClick={closeLogin}>关闭</Button>,
         ]}
-        width={480}
+        width={520}
       >
-        <div style={{ textAlign: 'center', minHeight: 300 }}>
+        <div style={{ minHeight: 200 }}>
           {loginStatus === 'loading' && (
-            <div style={{ padding: '80px 0' }}>
+            <div style={{ padding: '80px 0', textAlign: 'center' }}>
               <Spin size="large" />
               <div style={{ marginTop: 16 }}><Text type="secondary">正在打开登录页面...</Text></div>
             </div>
           )}
 
           {loginStatus === 'success' && (
-            <div style={{ padding: '60px 0' }}>
+            <div style={{ padding: '60px 0', textAlign: 'center' }}>
               <CheckCircleOutlined style={{ fontSize: 64, color: '#52c41a' }} />
               <div style={{ marginTop: 16 }}><Title level={4}>登录成功</Title></div>
               <Text type="secondary">会话已保存，后续自动化操作将使用此会话</Text>
             </div>
           )}
 
-          {(loginStatus === 'qr_ready' || loginStatus === 'waiting_scan') && (
+          {(loginStatus === 'page_ready' || loginStatus === 'code_sent') && (
             <>
-              <Alert
-                message="请用手机 App 扫描下方二维码完成登录"
-                type="info"
-                showIcon
-                style={{ marginBottom: 16, textAlign: 'left' }}
-              />
-              {qrImage && (
-                <img
-                  src={`data:image/png;base64,${qrImage}`}
-                  alt="QR Code"
-                  style={{ maxWidth: '100%', maxHeight: 350, border: '1px solid #f0f0f0', borderRadius: 8 }}
+              {loginError && (
+                <Alert
+                  message={loginError}
+                  type="error"
+                  showIcon
+                  closable
+                  onClose={() => setLoginError(null)}
+                  style={{ marginBottom: 16 }}
                 />
               )}
-              <div style={{ marginTop: 12 }}>
-                <Text type="secondary">
-                  等待扫码中... ({loginElapsed}s / 300s)
-                </Text>
+
+              <div style={{ marginBottom: 16 }}>
+                <Text strong>第 1 步：输入手机号并发送验证码</Text>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <Input
+                    placeholder="请输入手机号"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    style={{ flex: 1 }}
+                    maxLength={11}
+                    disabled={codeSent && countdown > 0}
+                  />
+                  <Button
+                    type="primary"
+                    onClick={handleSendCode}
+                    loading={sendingCode}
+                    disabled={!phone.trim() || (countdown > 0)}
+                  >
+                    {countdown > 0 ? `${countdown}s 后重发` : '发送验证码'}
+                  </Button>
+                </div>
               </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <Text strong>第 2 步：输入短信验证码并登录</Text>
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <Input
+                    placeholder="请输入验证码"
+                    value={smsCode}
+                    onChange={(e) => setSmsCode(e.target.value)}
+                    style={{ flex: 1 }}
+                    maxLength={6}
+                    disabled={!codeSent}
+                    onPressEnter={handleSubmitCode}
+                  />
+                  <Button
+                    type="primary"
+                    onClick={handleSubmitCode}
+                    loading={submittingCode}
+                    disabled={!codeSent || !smsCode.trim()}
+                  >
+                    登录
+                  </Button>
+                </div>
+              </div>
+
+              {screenshot && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <Text type="secondary">页面预览</Text>
+                    <Button size="small" onClick={refreshScreenshot}>刷新截图</Button>
+                  </div>
+                  <img
+                    src={`data:image/png;base64,${screenshot}`}
+                    alt="Login Page"
+                    style={{ width: '100%', border: '1px solid #f0f0f0', borderRadius: 8 }}
+                  />
+                </div>
+              )}
             </>
           )}
 

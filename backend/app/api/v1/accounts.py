@@ -173,14 +173,23 @@ async def accounts_summary(
     }
 
 
-# ─── Platform Login ───────────────────────────────────────────
+# ─── Platform Login (Phone + SMS Code) ────────────────────────
 
 from app.services.platform_login import (
-    start_login, poll_login_status, cancel_login, get_login_screenshot,
+    start_login, send_sms_code, submit_login_code,
+    poll_login_status, cancel_login, get_login_screenshot,
 )
 
 
-@router.post("/{account_id}/login", summary="发起平台扫码登录")
+class PhoneLoginRequest(BaseModel):
+    phone: str
+
+
+class CodeLoginRequest(BaseModel):
+    code: str
+
+
+@router.post("/{account_id}/login", summary="发起平台登录（打开登录页）")
 async def initiate_login(
     account_id: str,
     db: AsyncSession = Depends(get_db),
@@ -203,10 +212,30 @@ async def initiate_login(
     session = await start_login(str(account.id), account.platform, account_config)
     return {
         "status": session.status.value,
-        "qr_image": session.qr_image_b64,
+        "screenshot": session.screenshot_b64,
         "error": session.error,
         "platform": account.platform,
     }
+
+
+@router.post("/{account_id}/login/send-code", summary="填写手机号并发送验证码")
+async def login_send_code(
+    account_id: str,
+    req: PhoneLoginRequest,
+    user: User = Depends(get_current_user),
+):
+    result = await send_sms_code(account_id, req.phone)
+    return result
+
+
+@router.post("/{account_id}/login/verify", summary="填写验证码并登录")
+async def login_verify_code(
+    account_id: str,
+    req: CodeLoginRequest,
+    user: User = Depends(get_current_user),
+):
+    result = await submit_login_code(account_id, req.code)
+    return result
 
 
 @router.get("/{account_id}/login/status", summary="查询登录状态")

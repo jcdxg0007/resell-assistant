@@ -1,6 +1,6 @@
 """
-Platform login service.
-Opens browser to platform login page, captures QR code, polls for success.
+Platform login service — interactive phone + SMS code flow.
+Opens browser to login page, fills phone / code via Playwright, polls for success.
 """
 import asyncio
 import base64
@@ -21,81 +21,114 @@ LOGIN_URLS = {
     "douyin": "https://creator.douyin.com/",
 }
 
-# Buttons/tabs to click to switch to QR code login mode
-QR_SWITCH_SELECTORS = {
-    "xianyu": [
-        'text="扫码登录"',
-        'a:has-text("扫码登录")',
-        'div:has-text("扫码登录")',
-        '.qrcode-login',
-        '.login-switch:has-text("扫码")',
-        '#login >> text="扫码登录"',
-        'span:has-text("扫码登录")',
-        '.icon-qrcode',
-        '[data-action="qrcode_login"]',
-    ],
-    "xiaohongshu": [
-        'text="扫码登录"',
-        'div:has-text("扫码登录")',
-        'span:has-text("扫码登录")',
-        '.qrcode-tab',
-        'text="二维码登录"',
-    ],
-    "douyin": [
-        'text="扫码登录"',
-        'div:has-text("扫码登录")',
-        '.web-login-scan-code',
-    ],
-}
-
-QR_SELECTORS = {
-    "xianyu": [
-        '#login-qrcode-img',
-        'img[id*="qrcode"]',
-        'canvas[id*="qrcode"]',
-        'div.qrcode-img img',
-        'div.qrcode-img canvas',
-        '#login img[src*="qr"]',
-        'img[src*="qrcode"]',
-        'img[src*="taobao"][src*="qr"]',
-        '.qrcode-img',
-        'div[class*="qrcode"] img',
-        'div[class*="qrcode"] canvas',
-        'div[class*="QRCode"] img',
-        'div[class*="QRCode"] canvas',
-        'canvas',
-    ],
-    "xiaohongshu": [
-        'img.qrcode-img',
-        'img[class*="qr"]',
-        'img[class*="QR"]',
-        'div.qrcode img',
-        'div[class*="qrcode"] img',
-        'div[class*="qrcode"] canvas',
-        'canvas[class*="qr"]',
-        'img[src*="qr"]',
-    ],
-    "douyin": [
-        'img.qrcode-image',
-        'img[class*="qr"]',
-        'div.qrcode img',
-        '#login-qrcode img',
-        'img[src*="qr"]',
-    ],
-}
-
 SUCCESS_INDICATORS = {
     "xianyu": ["goofish.com", "idle.taobao.com", "xianyu.com", "my.taobao.com"],
     "xiaohongshu": ["creator.xiaohongshu.com/creator", "creator.xiaohongshu.com/publish"],
     "douyin": ["creator.douyin.com/creator-micro"],
 }
 
+PHONE_INPUT_JS = """() => {
+    const inputs = document.querySelectorAll('input');
+    for (const inp of inputs) {
+        const ph = (inp.placeholder || '').toLowerCase();
+        const name = (inp.name || '').toLowerCase();
+        const type = (inp.type || '').toLowerCase();
+        const id = (inp.id || '').toLowerCase();
+        const label = (inp.getAttribute('aria-label') || '').toLowerCase();
+        if (type === 'tel') return inp;
+        if (ph.includes('手机') || ph.includes('phone') || ph.includes('号码')) return inp;
+        if (name.includes('phone') || name.includes('mobile') || name.includes('tel')) return inp;
+        if (id.includes('phone') || id.includes('mobile') || id.includes('tel')) return inp;
+        if (label.includes('手机') || label.includes('phone')) return inp;
+    }
+    // fallback: first visible text/tel/number input
+    for (const inp of inputs) {
+        const type = (inp.type || 'text').toLowerCase();
+        if (['text', 'tel', 'number'].includes(type)) {
+            const rect = inp.getBoundingClientRect();
+            if (rect.width > 50 && rect.height > 0) return inp;
+        }
+    }
+    return null;
+}"""
+
+SEND_CODE_JS = """() => {
+    const keywords = ['发送验证码', '获取验证码', '发送', 'send', '获取短信'];
+    const allEls = document.querySelectorAll('button, a, div, span, [role="button"]');
+    for (const el of allEls) {
+        const text = (el.textContent || '').trim();
+        for (const kw of keywords) {
+            if (text.includes(kw)) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    el.click();
+                    return `Clicked: "${text}"`;
+                }
+            }
+        }
+    }
+    return null;
+}"""
+
+CODE_INPUT_JS = """() => {
+    const inputs = document.querySelectorAll('input');
+    const candidates = [];
+    for (const inp of inputs) {
+        const ph = (inp.placeholder || '').toLowerCase();
+        const name = (inp.name || '').toLowerCase();
+        const id = (inp.id || '').toLowerCase();
+        const label = (inp.getAttribute('aria-label') || '').toLowerCase();
+        const type = (inp.type || 'text').toLowerCase();
+        if (ph.includes('验证码') || ph.includes('code') || ph.includes('verification')) return inp;
+        if (name.includes('code') || name.includes('captcha') || name.includes('sms')) return inp;
+        if (id.includes('code') || id.includes('captcha') || id.includes('sms')) return inp;
+        if (label.includes('验证码') || label.includes('code')) return inp;
+        // Collect numeric-looking inputs as fallback
+        if (['text', 'tel', 'number', 'password'].includes(type)) {
+            const rect = inp.getBoundingClientRect();
+            if (rect.width > 30 && rect.height > 0) candidates.push(inp);
+        }
+    }
+    // Return the second visible input (first is usually phone)
+    return candidates.length >= 2 ? candidates[1] : null;
+}"""
+
+LOGIN_BUTTON_JS = """() => {
+    const buttons = document.querySelectorAll('button, [role="button"], input[type="submit"]');
+    for (const btn of buttons) {
+        const text = (btn.textContent || btn.value || '').trim();
+        const cls = (btn.className || '').toString().toLowerCase();
+        if ((text === '登录' || text === '登 录' || text.toLowerCase() === 'log in' || text.toLowerCase() === 'login' || text === '注册/登录')
+            && !cls.includes('disabled')) {
+            const rect = btn.getBoundingClientRect();
+            if (rect.width > 50 && rect.height > 20) {
+                btn.click();
+                return `Clicked: "${text}"`;
+            }
+        }
+    }
+    // broader search
+    const allEls = document.querySelectorAll('button, a, div, [role="button"]');
+    for (const el of allEls) {
+        const text = (el.textContent || '').trim();
+        if (text === '登录' || text === '登 录') {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 50 && rect.height > 20 && rect.width < 400) {
+                el.click();
+                return `Clicked (broad): "${text}"`;
+            }
+        }
+    }
+    return null;
+}"""
+
 
 class LoginStatus(str, Enum):
     IDLE = "idle"
     LOADING = "loading"
-    QR_READY = "qr_ready"
-    WAITING_SCAN = "waiting_scan"
+    PAGE_READY = "page_ready"
+    CODE_SENT = "code_sent"
+    SUBMITTING = "submitting"
     SUCCESS = "success"
     FAILED = "failed"
     EXPIRED = "expired"
@@ -106,7 +139,7 @@ class LoginSession:
         self.account_id = account_id
         self.platform = platform
         self.status = LoginStatus.IDLE
-        self.qr_image_b64: str | None = None
+        self.screenshot_b64: str | None = None
         self.page: Any = None
         self.error: str | None = None
         self.created_at = time.time()
@@ -116,7 +149,7 @@ _active_sessions: dict[str, LoginSession] = {}
 
 
 async def start_login(account_id: str, platform: str, account_config: dict) -> LoginSession:
-    """Start a login flow: open browser, navigate to login page, capture QR."""
+    """Open browser and navigate to platform login page."""
     if account_id in _active_sessions:
         old = _active_sessions[account_id]
         if old.page:
@@ -153,28 +186,14 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
             session.page = None
             return session
 
-        await _switch_to_qr_mode(page, platform)
-        await asyncio.sleep(2)
+        # Ensure we're on SMS login tab (for platforms that default elsewhere)
+        await _switch_to_sms_mode(page, platform)
+        await asyncio.sleep(1)
 
-        qr_b64 = await _capture_qr_code(page, platform)
-        if not qr_b64:
-            # Extra wait + retry: QR might take time to render after mode switch
-            await asyncio.sleep(3)
-            qr_b64 = await _capture_qr_code(page, platform)
-
-        if not qr_b64:
-            # JS fallback: try to find any large img/canvas that looks like a QR
-            qr_b64 = await _js_capture_qr(page)
-
-        if qr_b64:
-            session.qr_image_b64 = qr_b64
-            session.status = LoginStatus.QR_READY
-            logger.info(f"QR code captured for {platform} account {account_id}")
-        else:
-            screenshot = await page.screenshot(type="png", full_page=False)
-            session.qr_image_b64 = base64.b64encode(screenshot).decode()
-            session.status = LoginStatus.QR_READY
-            logger.warning(f"QR element not found for {platform}, using viewport screenshot")
+        screenshot = await page.screenshot(type="png", full_page=False)
+        session.screenshot_b64 = base64.b64encode(screenshot).decode()
+        session.status = LoginStatus.PAGE_READY
+        logger.info(f"Login page ready for {platform} account {account_id}")
 
     except Exception as e:
         logger.error(f"Login start failed for {account_id}: {e}")
@@ -184,15 +203,133 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
     return session
 
 
+async def send_sms_code(account_id: str, phone: str) -> dict:
+    """Fill the phone number and click 'send verification code'."""
+    session = _active_sessions.get(account_id)
+    if not session or not session.page or session.page.is_closed():
+        return {"success": False, "error": "没有进行中的登录会话"}
+
+    try:
+        page = session.page
+
+        # Find and fill phone input
+        phone_el = await page.evaluate_handle(PHONE_INPUT_JS)
+        el = phone_el.as_element()
+        if not el:
+            screenshot = await page.screenshot(type="png", full_page=False)
+            session.screenshot_b64 = base64.b64encode(screenshot).decode()
+            return {"success": False, "error": "未找到手机号输入框", "screenshot": session.screenshot_b64}
+
+        await el.click()
+        await asyncio.sleep(0.3)
+        await el.fill("")
+        await el.type(phone, delay=50)
+        logger.info(f"Phone number filled for {account_id}")
+        await asyncio.sleep(0.5)
+
+        # Click send code button
+        result = await page.evaluate(SEND_CODE_JS)
+        if result:
+            logger.info(f"Send code button: {result}")
+        else:
+            screenshot = await page.screenshot(type="png", full_page=False)
+            session.screenshot_b64 = base64.b64encode(screenshot).decode()
+            return {"success": False, "error": "未找到「发送验证码」按钮", "screenshot": session.screenshot_b64}
+
+        await asyncio.sleep(2)
+        screenshot = await page.screenshot(type="png", full_page=False)
+        session.screenshot_b64 = base64.b64encode(screenshot).decode()
+        session.status = LoginStatus.CODE_SENT
+        return {"success": True, "screenshot": session.screenshot_b64}
+
+    except Exception as e:
+        logger.error(f"Send SMS code failed for {account_id}: {e}")
+        return {"success": False, "error": str(e)}
+
+
+async def submit_login_code(account_id: str, code: str) -> dict:
+    """Fill verification code and click login."""
+    session = _active_sessions.get(account_id)
+    if not session or not session.page or session.page.is_closed():
+        return {"success": False, "error": "没有进行中的登录会话"}
+
+    try:
+        page = session.page
+        session.status = LoginStatus.SUBMITTING
+
+        # Find and fill code input
+        code_el = await page.evaluate_handle(CODE_INPUT_JS)
+        el = code_el.as_element()
+        if not el:
+            screenshot = await page.screenshot(type="png", full_page=False)
+            session.screenshot_b64 = base64.b64encode(screenshot).decode()
+            return {"success": False, "error": "未找到验证码输入框", "screenshot": session.screenshot_b64}
+
+        await el.click()
+        await asyncio.sleep(0.3)
+        await el.fill("")
+        await el.type(code, delay=50)
+        logger.info(f"Code filled for {account_id}")
+        await asyncio.sleep(0.5)
+
+        # Click login button
+        result = await page.evaluate(LOGIN_BUTTON_JS)
+        if result:
+            logger.info(f"Login button: {result}")
+        else:
+            logger.warning(f"Login button not found, trying Enter key")
+            await el.press("Enter")
+
+        # Wait for navigation
+        for i in range(10):
+            await asyncio.sleep(2)
+            url = page.url.lower()
+            if _check_login_success(url, session.platform):
+                session.status = LoginStatus.SUCCESS
+                await browser_manager.save_state(account_id)
+                logger.info(f"Account {account_id} login success!")
+                await page.close()
+                session.page = None
+                return {"success": True, "status": "success"}
+
+        # Not redirected yet — take screenshot to see what happened
+        screenshot = await page.screenshot(type="png", full_page=False)
+        session.screenshot_b64 = base64.b64encode(screenshot).decode()
+
+        # Check if there's an error message on the page
+        error_text = await page.evaluate("""() => {
+            const errs = document.querySelectorAll('.error, .err-msg, [class*="error"], [class*="alert"], [class*="warn"], [class*="tip"]');
+            for (const el of errs) {
+                const text = (el.textContent || '').trim();
+                if (text && text.length < 100) return text;
+            }
+            return null;
+        }""")
+
+        if error_text:
+            session.status = LoginStatus.FAILED
+            session.error = error_text
+            return {"success": False, "error": error_text, "screenshot": session.screenshot_b64}
+
+        session.status = LoginStatus.PAGE_READY
+        return {"success": False, "error": "登录未完成，请检查页面状态", "screenshot": session.screenshot_b64}
+
+    except Exception as e:
+        logger.error(f"Submit login code failed for {account_id}: {e}")
+        session.status = LoginStatus.FAILED
+        session.error = str(e)
+        return {"success": False, "error": str(e)}
+
+
 async def poll_login_status(account_id: str) -> dict:
-    """Check if user has scanned QR and logged in."""
+    """Check current login session status."""
     session = _active_sessions.get(account_id)
     if not session:
         return {"status": LoginStatus.IDLE, "error": "没有进行中的登录"}
 
-    if time.time() - session.created_at > 300:
+    if time.time() - session.created_at > 600:
         session.status = LoginStatus.EXPIRED
-        session.error = "登录超时（5分钟），请重新发起"
+        session.error = "登录超时（10分钟），请重新发起"
         if session.page:
             try:
                 await session.page.close()
@@ -204,30 +341,16 @@ async def poll_login_status(account_id: str) -> dict:
     if session.status in (LoginStatus.SUCCESS, LoginStatus.FAILED, LoginStatus.EXPIRED):
         return _session_to_dict(session)
 
-    if not session.page or session.page.is_closed():
-        session.status = LoginStatus.FAILED
-        session.error = "浏览器页面已关闭"
-        return _session_to_dict(session)
-
-    try:
-        url = session.page.url.lower()
-
-        if _check_login_success(url, session.platform):
-            session.status = LoginStatus.SUCCESS
-            await browser_manager.save_state(account_id)
-            logger.info(f"Account {account_id} login success for {session.platform}")
-            await session.page.close()
-            session.page = None
-            return _session_to_dict(session)
-
-        screenshot = await session.page.screenshot(type="png", full_page=False)
-        session.qr_image_b64 = base64.b64encode(screenshot).decode()
-        session.status = LoginStatus.WAITING_SCAN
-
-    except Exception as e:
-        logger.error(f"Poll login error for {account_id}: {e}")
-        session.status = LoginStatus.FAILED
-        session.error = str(e)
+    if session.page and not session.page.is_closed():
+        try:
+            url = session.page.url.lower()
+            if _check_login_success(url, session.platform):
+                session.status = LoginStatus.SUCCESS
+                await browser_manager.save_state(account_id)
+                await session.page.close()
+                session.page = None
+        except Exception:
+            pass
 
     return _session_to_dict(session)
 
@@ -243,13 +366,15 @@ async def cancel_login(account_id: str):
 
 
 async def get_login_screenshot(account_id: str) -> str | None:
-    """Get a fresh full-page screenshot of the login page."""
+    """Get a fresh screenshot of the login page."""
     session = _active_sessions.get(account_id)
     if not session or not session.page or session.page.is_closed():
         return None
     try:
         screenshot = await session.page.screenshot(type="png", full_page=False)
-        return base64.b64encode(screenshot).decode()
+        b64 = base64.b64encode(screenshot).decode()
+        session.screenshot_b64 = b64
+        return b64
     except Exception:
         return None
 
@@ -259,140 +384,37 @@ def _check_login_success(url: str, platform: str) -> bool:
     return any(ind in url for ind in indicators)
 
 
-async def _switch_to_qr_mode(page: Any, platform: str):
-    """Try to click the QR code login tab/button to switch to QR scan mode."""
-    # Step 1: try static selectors
-    selectors = QR_SWITCH_SELECTORS.get(platform, [])
-    for selector in selectors:
-        try:
-            el = page.locator(selector).first
-            if await el.is_visible(timeout=1000):
-                await el.click()
-                logger.info(f"Switched to QR login mode via selector: {selector}")
-                await asyncio.sleep(2)
-                return
-        except Exception:
-            continue
-
-    # Step 2: JS-based deep search for QR switch elements
-    logger.info(f"Static selectors failed for {platform}, trying JS DOM search...")
-    clicked = await page.evaluate("""() => {
-        const keywords = ['扫码登录', '二维码登录', '扫码', 'QR', 'qrcode', '其他登录方式'];
-        const allEls = document.querySelectorAll('a, button, div, span, p, img, svg, label, li, [role="tab"], [role="button"]');
-        for (const el of allEls) {
-            const text = (el.textContent || '').trim();
-            const cls = (el.className || '').toString().toLowerCase();
-            const alt = (el.getAttribute('alt') || '').toLowerCase();
-            const title = (el.getAttribute('title') || '').toLowerCase();
-            const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-            const combined = `${text} ${cls} ${alt} ${title} ${ariaLabel}`;
-            for (const kw of keywords) {
-                if (combined.toLowerCase().includes(kw.toLowerCase())) {
-                    const rect = el.getBoundingClientRect();
-                    if (rect.width > 0 && rect.height > 0 && rect.width < 300) {
-                        el.click();
-                        return `Clicked: tag=${el.tagName}, text="${text}", class="${cls}", size=${rect.width}x${rect.height}`;
+async def _switch_to_sms_mode(page: Any, platform: str):
+    """Ensure we're on the SMS/phone login tab."""
+    try:
+        clicked = await page.evaluate("""() => {
+            const keywords = ['短信验证登录', '短信登录', '验证码登录', '手机验证码登录', '手机号登录'];
+            const allEls = document.querySelectorAll('a, button, div, span, li, [role="tab"], [role="button"]');
+            for (const el of allEls) {
+                const text = (el.textContent || '').trim();
+                for (const kw of keywords) {
+                    if (text === kw || text.includes(kw)) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0 && rect.width < 300) {
+                            el.click();
+                            return `Clicked: "${text}"`;
+                        }
                     }
                 }
             }
-        }
-        // Fallback: look for small images/icons near login form that might be QR toggle
-        const icons = document.querySelectorAll('img[src*="qr"], img[src*="scan"], svg[class*="qr"], svg[class*="scan"], [class*="icon-qr"], [class*="icon-scan"], [class*="other-login"], [class*="switch-login"]');
-        for (const el of icons) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) {
-                el.click();
-                return `Clicked icon: tag=${el.tagName}, class="${el.className}", size=${rect.width}x${rect.height}`;
-            }
-        }
-        return null;
-    }""")
-
-    if clicked:
-        logger.info(f"JS DOM search result: {clicked}")
-        await asyncio.sleep(2)
-    else:
-        # Step 3: log page structure for debugging
-        debug_info = await page.evaluate("""() => {
-            const clickables = document.querySelectorAll('a, button, [role="tab"], [role="button"], img, svg');
-            const info = [];
-            for (const el of clickables) {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0) {
-                    info.push({
-                        tag: el.tagName,
-                        text: (el.textContent || '').trim().substring(0, 50),
-                        cls: (el.className || '').toString().substring(0, 80),
-                        src: (el.getAttribute('src') || '').substring(0, 80),
-                        size: `${Math.round(rect.width)}x${Math.round(rect.height)}`
-                    });
-                }
-            }
-            return info.slice(0, 30);
-        }""")
-        logger.warning(f"No QR switch found for {platform}. Page clickable elements: {debug_info}")
-
-
-async def _js_capture_qr(page: Any) -> str | None:
-    """Use JS to find any QR-like image/canvas on the page and screenshot it."""
-    try:
-        qr_el = await page.evaluate_handle("""() => {
-            // Look for img with QR-like src or near QR-related parent
-            const imgs = document.querySelectorAll('img');
-            for (const img of imgs) {
-                const rect = img.getBoundingClientRect();
-                const src = (img.src || '').toLowerCase();
-                const cls = (img.className || '').toString().toLowerCase();
-                const parentCls = (img.parentElement?.className || '').toString().toLowerCase();
-                const isQR = src.includes('qr') || src.includes('scan') ||
-                             cls.includes('qr') || parentCls.includes('qr') ||
-                             cls.includes('code') || parentCls.includes('code');
-                if (isQR && rect.width >= 80 && rect.height >= 80) return img;
-                // Square images around 120-300px are likely QR codes
-                if (rect.width >= 100 && rect.height >= 100 &&
-                    Math.abs(rect.width - rect.height) < 20) return img;
-            }
-            // Check canvas elements
-            const canvases = document.querySelectorAll('canvas');
-            for (const c of canvases) {
-                const rect = c.getBoundingClientRect();
-                if (rect.width >= 80 && rect.height >= 80) return c;
-            }
             return null;
         }""")
-        el = qr_el.as_element()
-        if el:
-            box = await el.bounding_box()
-            if box and box['width'] >= 80 and box['height'] >= 80:
-                screenshot = await el.screenshot(type="png")
-                logger.info(f"JS QR capture: {box['width']}x{box['height']}")
-                return base64.b64encode(screenshot).decode()
+        if clicked:
+            logger.info(f"Switched to SMS mode: {clicked}")
+            await asyncio.sleep(1)
     except Exception as e:
-        logger.debug(f"JS QR capture failed: {e}")
-    return None
-
-
-async def _capture_qr_code(page: Any, platform: str) -> str | None:
-    """Try to locate and screenshot the QR code element."""
-    selectors = QR_SELECTORS.get(platform, [])
-    for selector in selectors:
-        try:
-            el = page.locator(selector).first
-            if await el.is_visible(timeout=1500):
-                box = await el.bounding_box()
-                if box and box['width'] > 50 and box['height'] > 50:
-                    screenshot = await el.screenshot(type="png")
-                    logger.info(f"QR captured via selector: {selector} ({box['width']}x{box['height']})")
-                    return base64.b64encode(screenshot).decode()
-        except Exception:
-            continue
-    return None
+        logger.debug(f"Switch to SMS mode: {e}")
 
 
 def _session_to_dict(session: LoginSession) -> dict:
     return {
         "status": session.status.value,
-        "qr_image": session.qr_image_b64,
+        "screenshot": session.screenshot_b64,
         "error": session.error,
         "platform": session.platform,
         "elapsed": int(time.time() - session.created_at),
