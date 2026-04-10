@@ -212,26 +212,18 @@ async def send_sms_code(account_id: str, phone: str) -> dict:
     try:
         page = session.page
 
-        # Find and fill phone input
-        phone_el = await page.evaluate_handle(PHONE_INPUT_JS)
-        el = phone_el.as_element()
-        if not el:
+        # Find and fill phone input via Playwright locators (real interaction)
+        phone_filled = await _fill_phone_input(page, phone)
+        if not phone_filled:
             screenshot = await page.screenshot(type="png", full_page=False)
             session.screenshot_b64 = base64.b64encode(screenshot).decode()
             return {"success": False, "error": "未找到手机号输入框", "screenshot": session.screenshot_b64}
-
-        await el.click()
-        await asyncio.sleep(0.3)
-        await el.fill("")
-        await el.type(phone, delay=50)
         logger.info(f"Phone number filled for {account_id}")
         await asyncio.sleep(0.5)
 
-        # Click send code button
-        result = await page.evaluate(SEND_CODE_JS)
-        if result:
-            logger.info(f"Send code button: {result}")
-        else:
+        # Click send code button via Playwright (real mouse click)
+        code_clicked = await _click_send_code(page)
+        if not code_clicked:
             screenshot = await page.screenshot(type="png", full_page=False)
             session.screenshot_b64 = base64.b64encode(screenshot).decode()
             return {"success": False, "error": "未找到「发送验证码」按钮", "screenshot": session.screenshot_b64}
@@ -257,51 +249,49 @@ async def submit_login_code(account_id: str, code: str) -> dict:
         page = session.page
         session.status = LoginStatus.SUBMITTING
 
-        # Find and fill code input
-        code_el = await page.evaluate_handle(CODE_INPUT_JS)
-        el = code_el.as_element()
-        if not el:
+        # Find and fill code input via Playwright locators
+        code_filled = await _fill_code_input(page, code)
+        if not code_filled:
             screenshot = await page.screenshot(type="png", full_page=False)
             session.screenshot_b64 = base64.b64encode(screenshot).decode()
             return {"success": False, "error": "未找到验证码输入框", "screenshot": session.screenshot_b64}
-
-        await el.click()
-        await asyncio.sleep(0.3)
-        await el.fill("")
-        await el.type(code, delay=50)
         logger.info(f"Code filled for {account_id}")
         await asyncio.sleep(0.5)
 
-        # Click login button
-        result = await page.evaluate(LOGIN_BUTTON_JS)
-        if result:
-            logger.info(f"Login button: {result}")
-        else:
-            logger.warning(f"Login button not found, trying Enter key")
-            await el.press("Enter")
+        # Click login button via Playwright
+        login_clicked = await _click_login_button(page)
+        if not login_clicked:
+            logger.warning("Login button not found, trying Enter key")
+            await page.keyboard.press("Enter")
 
         # Wait for navigation
-        for i in range(10):
+        for _ in range(10):
             await asyncio.sleep(2)
-            url = page.url.lower()
+            try:
+                url = page.url.lower()
+            except Exception:
+                break
             if _check_login_success(url, session.platform):
                 session.status = LoginStatus.SUCCESS
                 await browser_manager.save_state(account_id)
                 logger.info(f"Account {account_id} login success!")
-                await page.close()
+                try:
+                    await page.close()
+                except Exception:
+                    pass
                 session.page = None
                 return {"success": True, "status": "success"}
 
-        # Not redirected yet — take screenshot to see what happened
+        # Not redirected yet — take screenshot
         screenshot = await page.screenshot(type="png", full_page=False)
         session.screenshot_b64 = base64.b64encode(screenshot).decode()
 
-        # Check if there's an error message on the page
+        # Check for error messages on page
         error_text = await page.evaluate("""() => {
             const errs = document.querySelectorAll('.error, .err-msg, [class*="error"], [class*="alert"], [class*="warn"], [class*="tip"]');
             for (const el of errs) {
                 const text = (el.textContent || '').trim();
-                if (text && text.length < 100) return text;
+                if (text && text.length < 100 && text.length > 2) return text;
             }
             return null;
         }""")
@@ -377,6 +367,238 @@ async def get_login_screenshot(account_id: str) -> str | None:
         return b64
     except Exception:
         return None
+
+
+async def _fill_phone_input(page: Any, phone: str) -> bool:
+    """Find the phone input and fill it using Playwright native interactions."""
+    # Strategy 1: Playwright locators by placeholder/role
+    strategies = [
+        page.locator('input[type="tel"]'),
+        page.get_by_placeholder("手机号"),
+        page.get_by_placeholder("请输入手机号"),
+        page.get_by_placeholder("手机号码"),
+        page.get_by_placeholder("输入手机号"),
+        page.locator('input[placeholder*="手机"]'),
+        page.locator('input[placeholder*="phone"]'),
+        page.locator('input[name*="phone"]'),
+        page.locator('input[name*="mobile"]'),
+        page.locator('input[id*="phone"]'),
+        page.locator('input[id*="mobile"]'),
+    ]
+    for loc in strategies:
+        try:
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                await loc.first.fill("")
+                await loc.first.fill(phone)
+                logger.info(f"Phone filled via Playwright locator")
+                return True
+        except Exception:
+            continue
+
+    # Strategy 2: JS to find, then Playwright to interact
+    try:
+        handle = await page.evaluate_handle(PHONE_INPUT_JS)
+        el = handle.as_element()
+        if el:
+            await el.click()
+            await el.fill("")
+            await el.fill(phone)
+            logger.info("Phone filled via JS handle + Playwright fill")
+            return True
+    except Exception as e:
+        logger.debug(f"JS phone fill failed: {e}")
+
+    return False
+
+
+async def _click_send_code(page: Any) -> bool:
+    """Find and click the 'send verification code' button using Playwright."""
+    # Strategy 1: Playwright text-based locators (triggers real mouse events)
+    text_patterns = [
+        "发送验证码", "获取验证码", "发送短信验证码", "获取短信验证码",
+    ]
+    for text in text_patterns:
+        try:
+            loc = page.get_by_text(text, exact=True)
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                logger.info(f"Send code clicked via get_by_text('{text}')")
+                return True
+        except Exception:
+            continue
+
+    # Strategy 2: partial text match
+    for text in text_patterns:
+        try:
+            loc = page.get_by_text(text)
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                logger.info(f"Send code clicked via partial text '{text}'")
+                return True
+        except Exception:
+            continue
+
+    # Strategy 3: role-based
+    for text in text_patterns:
+        try:
+            loc = page.get_by_role("button", name=text)
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                logger.info(f"Send code clicked via role button '{text}'")
+                return True
+        except Exception:
+            continue
+        try:
+            loc = page.get_by_role("link", name=text)
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                logger.info(f"Send code clicked via role link '{text}'")
+                return True
+        except Exception:
+            continue
+
+    # Strategy 4: CSS selectors
+    css_selectors = [
+        'button:has-text("发送验证码")',
+        'a:has-text("发送验证码")',
+        'span:has-text("发送验证码")',
+        'div:has-text("发送验证码")',
+        'button:has-text("获取验证码")',
+        'a:has-text("获取验证码")',
+        'span:has-text("获取验证码")',
+    ]
+    for sel in css_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=800):
+                await loc.click()
+                logger.info(f"Send code clicked via CSS '{sel}'")
+                return True
+        except Exception:
+            continue
+
+    # Strategy 5: JS find + Playwright click (get coords and click)
+    try:
+        coords = await page.evaluate("""() => {
+            const keywords = ['发送验证码', '获取验证码'];
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+                const text = walker.currentNode.textContent.trim();
+                for (const kw of keywords) {
+                    if (text.includes(kw)) {
+                        const el = walker.currentNode.parentElement;
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: text };
+                        }
+                    }
+                }
+            }
+            return null;
+        }""")
+        if coords:
+            await page.mouse.click(coords['x'], coords['y'])
+            logger.info(f"Send code clicked via coordinates: ({coords['x']}, {coords['y']}) text='{coords['text']}'")
+            return True
+    except Exception as e:
+        logger.debug(f"JS coords click failed: {e}")
+
+    return False
+
+
+async def _fill_code_input(page: Any, code: str) -> bool:
+    """Find the verification code input and fill it."""
+    strategies = [
+        page.get_by_placeholder("验证码"),
+        page.get_by_placeholder("请输入验证码"),
+        page.get_by_placeholder("输入验证码"),
+        page.get_by_placeholder("短信验证码"),
+        page.locator('input[placeholder*="验证码"]'),
+        page.locator('input[placeholder*="code"]'),
+        page.locator('input[name*="code"]'),
+        page.locator('input[name*="captcha"]'),
+        page.locator('input[id*="code"]'),
+    ]
+    for loc in strategies:
+        try:
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                await loc.first.fill("")
+                await loc.first.fill(code)
+                logger.info("Code filled via Playwright locator")
+                return True
+        except Exception:
+            continue
+
+    # JS fallback
+    try:
+        handle = await page.evaluate_handle(CODE_INPUT_JS)
+        el = handle.as_element()
+        if el:
+            await el.click()
+            await el.fill("")
+            await el.fill(code)
+            logger.info("Code filled via JS handle + Playwright fill")
+            return True
+    except Exception as e:
+        logger.debug(f"JS code fill failed: {e}")
+
+    return False
+
+
+async def _click_login_button(page: Any) -> bool:
+    """Find and click the login/submit button."""
+    text_patterns = ["登录", "登 录", "Log in", "Login"]
+    for text in text_patterns:
+        try:
+            loc = page.get_by_role("button", name=text)
+            if await loc.first.is_visible(timeout=800):
+                await loc.first.click()
+                logger.info(f"Login button clicked via role '{text}'")
+                return True
+        except Exception:
+            continue
+
+    css_selectors = [
+        'button:has-text("登录")',
+        'button:has-text("登 录")',
+        'button[type="submit"]',
+        'input[type="submit"]',
+    ]
+    for sel in css_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=800):
+                await loc.click()
+                logger.info(f"Login button clicked via CSS '{sel}'")
+                return True
+        except Exception:
+            continue
+
+    # JS coordinates fallback
+    try:
+        coords = await page.evaluate("""() => {
+            const buttons = document.querySelectorAll('button, [role="button"], input[type="submit"]');
+            for (const btn of buttons) {
+                const text = (btn.textContent || btn.value || '').trim();
+                if (text === '登录' || text === '登 录') {
+                    const rect = btn.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 20) {
+                        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                    }
+                }
+            }
+            return null;
+        }""")
+        if coords:
+            await page.mouse.click(coords['x'], coords['y'])
+            logger.info(f"Login button clicked via coordinates")
+            return True
+    except Exception as e:
+        logger.debug(f"JS login click failed: {e}")
+
+    return False
 
 
 def _check_login_success(url: str, platform: str) -> bool:
