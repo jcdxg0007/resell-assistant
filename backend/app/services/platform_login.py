@@ -157,6 +157,15 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
         await asyncio.sleep(2)
 
         qr_b64 = await _capture_qr_code(page, platform)
+        if not qr_b64:
+            # Extra wait + retry: QR might take time to render after mode switch
+            await asyncio.sleep(3)
+            qr_b64 = await _capture_qr_code(page, platform)
+
+        if not qr_b64:
+            # JS fallback: try to find any large img/canvas that looks like a QR
+            qr_b64 = await _js_capture_qr(page)
+
         if qr_b64:
             session.qr_image_b64 = qr_b64
             session.status = LoginStatus.QR_READY
@@ -252,18 +261,115 @@ def _check_login_success(url: str, platform: str) -> bool:
 
 async def _switch_to_qr_mode(page: Any, platform: str):
     """Try to click the QR code login tab/button to switch to QR scan mode."""
+    # Step 1: try static selectors
     selectors = QR_SWITCH_SELECTORS.get(platform, [])
     for selector in selectors:
         try:
             el = page.locator(selector).first
-            if await el.is_visible(timeout=1500):
+            if await el.is_visible(timeout=1000):
                 await el.click()
-                logger.info(f"Switched to QR login mode via: {selector}")
-                await asyncio.sleep(1.5)
+                logger.info(f"Switched to QR login mode via selector: {selector}")
+                await asyncio.sleep(2)
                 return
         except Exception:
             continue
-    logger.info(f"No QR switch button found for {platform}, page may already show QR")
+
+    # Step 2: JS-based deep search for QR switch elements
+    logger.info(f"Static selectors failed for {platform}, trying JS DOM search...")
+    clicked = await page.evaluate("""() => {
+        const keywords = ['扫码登录', '二维码登录', '扫码', 'QR', 'qrcode', '其他登录方式'];
+        const allEls = document.querySelectorAll('a, button, div, span, p, img, svg, label, li, [role="tab"], [role="button"]');
+        for (const el of allEls) {
+            const text = (el.textContent || '').trim();
+            const cls = (el.className || '').toString().toLowerCase();
+            const alt = (el.getAttribute('alt') || '').toLowerCase();
+            const title = (el.getAttribute('title') || '').toLowerCase();
+            const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+            const combined = `${text} ${cls} ${alt} ${title} ${ariaLabel}`;
+            for (const kw of keywords) {
+                if (combined.toLowerCase().includes(kw.toLowerCase())) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 0 && rect.height > 0 && rect.width < 300) {
+                        el.click();
+                        return `Clicked: tag=${el.tagName}, text="${text}", class="${cls}", size=${rect.width}x${rect.height}`;
+                    }
+                }
+            }
+        }
+        // Fallback: look for small images/icons near login form that might be QR toggle
+        const icons = document.querySelectorAll('img[src*="qr"], img[src*="scan"], svg[class*="qr"], svg[class*="scan"], [class*="icon-qr"], [class*="icon-scan"], [class*="other-login"], [class*="switch-login"]');
+        for (const el of icons) {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                el.click();
+                return `Clicked icon: tag=${el.tagName}, class="${el.className}", size=${rect.width}x${rect.height}`;
+            }
+        }
+        return null;
+    }""")
+
+    if clicked:
+        logger.info(f"JS DOM search result: {clicked}")
+        await asyncio.sleep(2)
+    else:
+        # Step 3: log page structure for debugging
+        debug_info = await page.evaluate("""() => {
+            const clickables = document.querySelectorAll('a, button, [role="tab"], [role="button"], img, svg');
+            const info = [];
+            for (const el of clickables) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    info.push({
+                        tag: el.tagName,
+                        text: (el.textContent || '').trim().substring(0, 50),
+                        cls: (el.className || '').toString().substring(0, 80),
+                        src: (el.getAttribute('src') || '').substring(0, 80),
+                        size: `${Math.round(rect.width)}x${Math.round(rect.height)}`
+                    });
+                }
+            }
+            return info.slice(0, 30);
+        }""")
+        logger.warning(f"No QR switch found for {platform}. Page clickable elements: {debug_info}")
+
+
+async def _js_capture_qr(page: Any) -> str | None:
+    """Use JS to find any QR-like image/canvas on the page and screenshot it."""
+    try:
+        qr_el = await page.evaluate_handle("""() => {
+            // Look for img with QR-like src or near QR-related parent
+            const imgs = document.querySelectorAll('img');
+            for (const img of imgs) {
+                const rect = img.getBoundingClientRect();
+                const src = (img.src || '').toLowerCase();
+                const cls = (img.className || '').toString().toLowerCase();
+                const parentCls = (img.parentElement?.className || '').toString().toLowerCase();
+                const isQR = src.includes('qr') || src.includes('scan') ||
+                             cls.includes('qr') || parentCls.includes('qr') ||
+                             cls.includes('code') || parentCls.includes('code');
+                if (isQR && rect.width >= 80 && rect.height >= 80) return img;
+                // Square images around 120-300px are likely QR codes
+                if (rect.width >= 100 && rect.height >= 100 &&
+                    Math.abs(rect.width - rect.height) < 20) return img;
+            }
+            // Check canvas elements
+            const canvases = document.querySelectorAll('canvas');
+            for (const c of canvases) {
+                const rect = c.getBoundingClientRect();
+                if (rect.width >= 80 && rect.height >= 80) return c;
+            }
+            return null;
+        }""")
+        el = qr_el.as_element()
+        if el:
+            box = await el.bounding_box()
+            if box and box['width'] >= 80 and box['height'] >= 80:
+                screenshot = await el.screenshot(type="png")
+                logger.info(f"JS QR capture: {box['width']}x{box['height']}")
+                return base64.b64encode(screenshot).decode()
+    except Exception as e:
+        logger.debug(f"JS QR capture failed: {e}")
+    return None
 
 
 async def _capture_qr_code(page: Any, platform: str) -> str | None:
