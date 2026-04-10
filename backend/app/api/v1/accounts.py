@@ -173,7 +173,73 @@ async def accounts_summary(
     }
 
 
+# ─── Platform Login ───────────────────────────────────────────
+
+from app.services.platform_login import (
+    start_login, poll_login_status, cancel_login, get_login_screenshot,
+)
+
+
+@router.post("/{account_id}/login", summary="发起平台扫码登录")
+async def initiate_login(
+    account_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Account).where(Account.id == account_id))
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    from app.services.browser import browser_manager
+    if not browser_manager._browser:
+        await browser_manager.start()
+
+    account_config = {
+        "proxy_url": account.proxy_url,
+        "user_agent": account.user_agent,
+        "viewport": account.viewport,
+    }
+    session = await start_login(str(account.id), account.platform, account_config)
+    return {
+        "status": session.status.value,
+        "qr_image": session.qr_image_b64,
+        "error": session.error,
+        "platform": account.platform,
+    }
+
+
+@router.get("/{account_id}/login/status", summary="查询登录状态")
+async def check_login_status(
+    account_id: str,
+    user: User = Depends(get_current_user),
+):
+    result = await poll_login_status(account_id)
+    return result
+
+
+@router.get("/{account_id}/login/screenshot", summary="获取登录页面截图")
+async def login_screenshot(
+    account_id: str,
+    user: User = Depends(get_current_user),
+):
+    img = await get_login_screenshot(account_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="无可用截图")
+    return {"screenshot": img}
+
+
+@router.post("/{account_id}/login/cancel", summary="取消登录")
+async def cancel_login_flow(
+    account_id: str,
+    user: User = Depends(get_current_user),
+):
+    await cancel_login(account_id)
+    return {"message": "已取消"}
+
+
 def _account_to_dict(a: Account) -> dict:
+    state_path = __import__("pathlib").Path(__file__).parent.parent.parent.parent / "playwright_states" / f"{a.id}.json"
     return {
         "id": str(a.id),
         "platform": a.platform,
@@ -189,4 +255,5 @@ def _account_to_dict(a: Account) -> dict:
         "suspended_reason": a.suspended_reason,
         "last_active_at": a.last_active_at.isoformat() if a.last_active_at else None,
         "created_at": a.created_at.isoformat() if a.created_at else None,
+        "logged_in": state_path.exists(),
     }

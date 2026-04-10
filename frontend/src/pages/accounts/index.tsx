@@ -1,15 +1,16 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Button, Space, Tag, Modal, Form,
-  Input, Select, InputNumber, message, Popconfirm, Progress, Row, Col, Statistic,
+  Input, Select, InputNumber, message, Popconfirm, Progress, Row, Col, Statistic, Spin, Alert,
 } from 'antd';
 import {
-  PlusOutlined, ReloadOutlined, PauseCircleOutlined, PlayCircleOutlined, EditOutlined,
+  PlusOutlined, ReloadOutlined, PauseCircleOutlined, PlayCircleOutlined,
+  EditOutlined, LoginOutlined, CheckCircleOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
 
-const { Title } = Typography;
+const { Title, Text } = Typography;
 
 const PLATFORM_MAP: Record<string, { label: string; color: string }> = {
   xianyu: { label: '闲鱼', color: 'orange' },
@@ -39,6 +40,7 @@ interface AccountItem {
   is_active: boolean;
   suspended_reason: string | null;
   created_at: string | null;
+  logged_in?: boolean;
 }
 
 interface Summary {
@@ -58,6 +60,15 @@ const Accounts: React.FC = () => {
   const [form] = Form.useForm();
   const [editForm] = Form.useForm();
 
+  // Login state
+  const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const [loginAccount, setLoginAccount] = useState<AccountItem | null>(null);
+  const [loginStatus, setLoginStatus] = useState<string>('idle');
+  const [qrImage, setQrImage] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginElapsed, setLoginElapsed] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
     try {
@@ -75,6 +86,10 @@ const Accounts: React.FC = () => {
   }, []);
 
   useEffect(() => { fetchAccounts(); }, [fetchAccounts]);
+
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
 
   const handleCreate = async () => {
     try {
@@ -151,12 +166,97 @@ const Accounts: React.FC = () => {
     fetchAccounts();
   };
 
+  // ─── Login Flow ─────────────────────────────────────────────
+
+  const startLogin = async (record: AccountItem) => {
+    setLoginAccount(record);
+    setLoginStatus('loading');
+    setQrImage(null);
+    setLoginError(null);
+    setLoginElapsed(0);
+    setLoginModalOpen(true);
+
+    try {
+      const res = await api.post(`/accounts/${record.id}/login`);
+      const { status, qr_image, error } = res.data;
+      setLoginStatus(status);
+      if (qr_image) setQrImage(qr_image);
+      if (error) setLoginError(error);
+
+      if (status === 'success') {
+        message.success('该账号已登录，无需重复操作');
+        fetchAccounts();
+        return;
+      }
+
+      if (status === 'qr_ready' || status === 'waiting_scan') {
+        startPolling(record.id);
+      }
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } };
+      setLoginStatus('failed');
+      setLoginError(error.response?.data?.detail || '发起登录失败');
+    }
+  };
+
+  const startPolling = (accountId: string) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await api.get(`/accounts/${accountId}/login/status`);
+        const { status, qr_image, error, elapsed } = res.data;
+        setLoginStatus(status);
+        if (qr_image) setQrImage(qr_image);
+        if (error) setLoginError(error);
+        if (elapsed) setLoginElapsed(elapsed);
+
+        if (status === 'success') {
+          if (pollRef.current) clearInterval(pollRef.current);
+          message.success('登录成功！会话已保存');
+          fetchAccounts();
+        } else if (status === 'failed' || status === 'expired') {
+          if (pollRef.current) clearInterval(pollRef.current);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    }, 3000);
+  };
+
+  const closeLogin = async () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (loginAccount && loginStatus !== 'success') {
+      await api.post(`/accounts/${loginAccount.id}/login/cancel`).catch(() => {});
+    }
+    setLoginModalOpen(false);
+    setLoginAccount(null);
+    setQrImage(null);
+    setLoginStatus('idle');
+    setLoginError(null);
+  };
+
+  const refreshScreenshot = async () => {
+    if (!loginAccount) return;
+    try {
+      const res = await api.get(`/accounts/${loginAccount.id}/login/screenshot`);
+      if (res.data.screenshot) setQrImage(res.data.screenshot);
+    } catch {
+      message.error('获取截图失败');
+    }
+  };
+
   const columns: ColumnsType<AccountItem> = [
     {
       title: '平台', dataIndex: 'platform', width: 90,
       render: (v: string) => <Tag color={PLATFORM_MAP[v]?.color}>{PLATFORM_MAP[v]?.label || v}</Tag>,
     },
     { title: '账号名', dataIndex: 'account_name', width: 150 },
+    {
+      title: '会话', dataIndex: 'logged_in', width: 80,
+      render: (v: boolean) => v
+        ? <Tag icon={<CheckCircleOutlined />} color="success">已登录</Tag>
+        : <Tag color="default">未登录</Tag>,
+    },
     { title: '身份组', dataIndex: 'identity_group', width: 100 },
     { title: '品类', dataIndex: 'niche', width: 100, render: (v: string) => v || '-' },
     {
@@ -187,9 +287,12 @@ const Accounts: React.FC = () => {
       render: (v: boolean) => v ? <Tag color="success">正常</Tag> : <Tag color="error">暂停</Tag>,
     },
     {
-      title: '操作', width: 160, fixed: 'right',
+      title: '操作', width: 220, fixed: 'right',
       render: (_: unknown, record: AccountItem) => (
         <Space size="small">
+          <Button size="small" type="primary" ghost icon={<LoginOutlined />} onClick={() => startLogin(record)}>
+            登录
+          </Button>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(record)}>编辑</Button>
           {record.is_active ? (
             <Popconfirm title="确认暂停该账号？" onConfirm={() => handleSuspend(record.id)}>
@@ -238,7 +341,7 @@ const Accounts: React.FC = () => {
           dataSource={accounts}
           loading={loading}
           pagination={false}
-          scroll={{ x: 1300 }}
+          scroll={{ x: 1500 }}
           locale={{ emptyText: '暂无账号，请点击「添加账号」录入' }}
         />
       </Card>
@@ -309,6 +412,76 @@ const Accounts: React.FC = () => {
             <Input.TextArea rows={2} placeholder="留空不修改" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 扫码登录弹窗 */}
+      <Modal
+        title={`扫码登录 - ${loginAccount?.account_name || ''} (${PLATFORM_MAP[loginAccount?.platform || '']?.label || ''})`}
+        open={loginModalOpen}
+        onCancel={closeLogin}
+        footer={[
+          loginStatus === 'failed' || loginStatus === 'expired' ? (
+            <Button key="retry" type="primary" onClick={() => loginAccount && startLogin(loginAccount)}>
+              重新登录
+            </Button>
+          ) : null,
+          <Button key="screenshot" onClick={refreshScreenshot} disabled={!loginAccount || loginStatus === 'success'}>
+            刷新截图
+          </Button>,
+          <Button key="close" onClick={closeLogin}>关闭</Button>,
+        ]}
+        width={480}
+      >
+        <div style={{ textAlign: 'center', minHeight: 300 }}>
+          {loginStatus === 'loading' && (
+            <div style={{ padding: '80px 0' }}>
+              <Spin size="large" />
+              <div style={{ marginTop: 16 }}><Text type="secondary">正在打开登录页面...</Text></div>
+            </div>
+          )}
+
+          {loginStatus === 'success' && (
+            <div style={{ padding: '60px 0' }}>
+              <CheckCircleOutlined style={{ fontSize: 64, color: '#52c41a' }} />
+              <div style={{ marginTop: 16 }}><Title level={4}>登录成功</Title></div>
+              <Text type="secondary">会话已保存，后续自动化操作将使用此会话</Text>
+            </div>
+          )}
+
+          {(loginStatus === 'qr_ready' || loginStatus === 'waiting_scan') && (
+            <>
+              <Alert
+                message="请用手机 App 扫描下方二维码完成登录"
+                type="info"
+                showIcon
+                style={{ marginBottom: 16, textAlign: 'left' }}
+              />
+              {qrImage && (
+                <img
+                  src={`data:image/png;base64,${qrImage}`}
+                  alt="QR Code"
+                  style={{ maxWidth: '100%', maxHeight: 350, border: '1px solid #f0f0f0', borderRadius: 8 }}
+                />
+              )}
+              <div style={{ marginTop: 12 }}>
+                <Text type="secondary">
+                  等待扫码中... ({loginElapsed}s / 300s)
+                </Text>
+              </div>
+            </>
+          )}
+
+          {(loginStatus === 'failed' || loginStatus === 'expired') && (
+            <div style={{ padding: '40px 0' }}>
+              <Alert
+                message={loginStatus === 'expired' ? '登录超时' : '登录失败'}
+                description={loginError || '请重试'}
+                type="error"
+                showIcon
+              />
+            </div>
+          )}
+        </div>
       </Modal>
     </Space>
   );
