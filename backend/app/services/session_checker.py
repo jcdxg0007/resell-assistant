@@ -1,99 +1,134 @@
 """
-Session health checker — validates whether saved Playwright sessions are still active.
-Opens a headless browser with stored cookies and checks if the platform redirects to login.
+Session health checker — cookie-based offline check (no network needed).
+Reads saved Playwright state files and checks cookie expiration times.
 """
-import asyncio
-from datetime import datetime, timezone
+import json
+import time
 from pathlib import Path
 
 from loguru import logger
 
-from app.services.browser import browser_manager, STATES_DIR
-from app.services.platform_login import LOGIN_PAGE_INDICATORS
+from app.services.browser import STATES_DIR
 
-PLATFORM_CHECK_URLS = {
-    "xianyu": "https://www.goofish.com/",
-    "xiaohongshu": "https://creator.xiaohongshu.com/",
-    "douyin": "https://creator.douyin.com/",
+# Key cookies per platform that indicate a valid login session
+PLATFORM_SESSION_COOKIES = {
+    "xianyu": [
+        "cookie2", "_m_h5_tk", "sgcookie", "XSRF-TOKEN",
+        "munb", "csg", "_tb_token_",
+    ],
+    "xiaohongshu": [
+        "web_session", "xsecappid", "a1", "webId",
+        "galaxy_creator_session_id", "customerClientId",
+    ],
+    "douyin": [
+        "sessionid", "sid_tt", "uid_tt", "passport_csrf_token",
+    ],
 }
 
 
-async def check_session(account_id: str, platform: str, account_config: dict) -> dict:
+def check_session_offline(account_id: str, platform: str) -> dict:
     """
-    Check whether a saved session is still valid.
+    Check session validity by reading the saved cookie state file.
+    No browser or network access needed.
 
     Returns dict with:
       - status: "active" | "expired" | "none"
       - hint: optional reason string
+      - details: dict with cookie analysis
     """
     state_path = STATES_DIR / f"{account_id}.json"
     if not state_path.exists():
         return {"status": "none", "hint": None}
 
-    check_url = PLATFORM_CHECK_URLS.get(platform)
-    if not check_url:
-        return {"status": "none", "hint": f"不支持的平台: {platform}"}
-
-    page = None
     try:
-        if not browser_manager._browser:
-            await browser_manager.start()
-
-        context = await browser_manager.get_context(account_id, account_config)
-        page = await context.new_page()
-
-        logger.info(f"Session check: opening {check_url} for account {account_id}")
-        await page.goto(check_url, wait_until="domcontentloaded", timeout=30000)
-
-        # Poll URL multiple times to handle multi-step redirects
-        # (e.g. platform briefly shows /login then auto-redirects back with valid cookies)
-        login_indicators = LOGIN_PAGE_INDICATORS.get(platform, [])
-        is_on_login = True
-        for attempt in range(6):
-            await asyncio.sleep(3)
-            try:
-                current_url = page.url.lower()
-            except Exception:
-                break
-            logger.debug(f"Session check attempt {attempt+1}: {current_url}")
-            if not any(ind in current_url for ind in login_indicators):
-                is_on_login = False
-                break
-
-        final_url = page.url.lower() if not page.is_closed() else ""
-
-        if is_on_login and any(ind in final_url for ind in login_indicators):
-            logger.warning(f"Session expired for account {account_id}: stuck on {final_url}")
-            await page.close()
-            try:
-                state_path.unlink()
-                logger.info(f"Removed expired state file for {account_id}")
-            except Exception:
-                pass
-            await browser_manager.close_context(account_id)
-            return {"status": "expired", "hint": "会话已过期，被重定向到登录页"}
-        else:
-            logger.info(f"Session active for account {account_id}: on {final_url}")
-            await browser_manager.save_state(account_id)
-            await page.close()
-            return {"status": "active", "hint": None}
-
+        state_data = json.loads(state_path.read_text())
     except Exception as e:
-        logger.error(f"Session check failed for {account_id}: {e}")
-        if page and not page.is_closed():
-            try:
-                await page.close()
-            except Exception:
-                pass
-        # Network/timeout errors don't necessarily mean expired — keep current status
-        return {"status": "none", "hint": f"检查异常: {str(e)[:80]}"}
+        logger.error(f"Failed to read state file for {account_id}: {e}")
+        return {"status": "none", "hint": f"状态文件读取失败: {str(e)[:50]}"}
+
+    cookies = state_data.get("cookies", [])
+    if not cookies:
+        return {"status": "expired", "hint": "无有效 cookies"}
+
+    now = time.time()
+    session_cookie_names = PLATFORM_SESSION_COOKIES.get(platform, [])
+
+    total_cookies = len(cookies)
+    expired_cookies = 0
+    valid_session_cookies = 0
+    expired_session_cookies = 0
+    earliest_session_expiry = None
+
+    for cookie in cookies:
+        expires = cookie.get("expires", -1)
+        name = cookie.get("name", "")
+
+        is_expired = (expires > 0 and expires < now)
+        if is_expired:
+            expired_cookies += 1
+
+        is_session_cookie = any(
+            sc.lower() in name.lower() for sc in session_cookie_names
+        ) if session_cookie_names else False
+
+        if is_session_cookie:
+            if is_expired:
+                expired_session_cookies += 1
+            else:
+                valid_session_cookies += 1
+                if expires > 0:
+                    if earliest_session_expiry is None or expires < earliest_session_expiry:
+                        earliest_session_expiry = expires
+
+    # Decision logic
+    if session_cookie_names:
+        # Platform has known session cookies: check those specifically
+        if valid_session_cookies > 0:
+            remaining_hours = None
+            hint = None
+            if earliest_session_expiry:
+                remaining_seconds = earliest_session_expiry - now
+                remaining_hours = remaining_seconds / 3600
+                if remaining_hours < 24:
+                    hint = f"会话将在 {remaining_hours:.0f} 小时后过期"
+                else:
+                    days = remaining_hours / 24
+                    hint = f"会话有效期剩余约 {days:.0f} 天"
+            logger.info(
+                f"Session active for {account_id}: "
+                f"{valid_session_cookies} valid session cookies, "
+                f"{expired_session_cookies} expired"
+            )
+            return {"status": "active", "hint": hint}
+        elif expired_session_cookies > 0:
+            logger.warning(f"Session expired for {account_id}: all session cookies expired")
+            return {"status": "expired", "hint": "会话 cookies 已过期，请重新登录"}
+        else:
+            # No session cookies found at all — fallback to general check
+            pass
+
+    # Fallback: general cookie analysis
+    valid_cookies = total_cookies - expired_cookies
+    if valid_cookies == 0:
+        return {"status": "expired", "hint": "所有 cookies 已过期"}
+
+    expiry_ratio = expired_cookies / total_cookies if total_cookies > 0 else 0
+    if expiry_ratio > 0.8:
+        return {"status": "expired", "hint": f"大部分 cookies 已过期 ({expired_cookies}/{total_cookies})"}
+
+    logger.info(f"Session likely active for {account_id}: {valid_cookies}/{total_cookies} cookies valid")
+    return {"status": "active", "hint": f"{valid_cookies}/{total_cookies} cookies 有效"}
+
+
+# Keep async interface for compatibility with API/Celery callers
+async def check_session(account_id: str, platform: str, account_config: dict) -> dict:
+    """Async wrapper around the offline cookie check."""
+    return check_session_offline(account_id, platform)
 
 
 async def check_all_sessions(accounts: list[dict]) -> dict:
     """
     Check sessions for a list of accounts.
-
-    accounts: list of dicts with keys: id, platform, proxy_url, user_agent, viewport
     Returns summary: {checked, active, expired, skipped, details: [...]}
     """
     summary = {"checked": 0, "active": 0, "expired": 0, "skipped": 0, "details": []}
@@ -101,13 +136,8 @@ async def check_all_sessions(accounts: list[dict]) -> dict:
     for acc in accounts:
         account_id = acc["id"]
         platform = acc["platform"]
-        config = {
-            "proxy_url": acc.get("proxy_url"),
-            "user_agent": acc.get("user_agent"),
-            "viewport": acc.get("viewport"),
-        }
 
-        result = await check_session(account_id, platform, config)
+        result = check_session_offline(account_id, platform)
         status = result["status"]
 
         if status == "none":
@@ -124,8 +154,6 @@ async def check_all_sessions(accounts: list[dict]) -> dict:
             "platform": platform,
             **result,
         })
-
-        await asyncio.sleep(1)
 
     logger.info(
         f"Session check complete: {summary['checked']} checked, "
