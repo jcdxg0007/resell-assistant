@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Typography, Table, Card, Button, Space, Tag, Modal, Form,
+  Typography, Table, Card, Button, Space, Tag, Modal, Form, Tooltip,
   Input, Select, InputNumber, message, Popconfirm, Progress, Row, Col, Statistic, Spin, Alert,
 } from 'antd';
 import {
   PlusOutlined, ReloadOutlined, PauseCircleOutlined, PlayCircleOutlined,
-  EditOutlined, LoginOutlined, CheckCircleOutlined,
+  EditOutlined, LoginOutlined, CheckCircleOutlined, SafetyCertificateOutlined,
+  CloseCircleOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -40,7 +41,9 @@ interface AccountItem {
   is_active: boolean;
   suspended_reason: string | null;
   created_at: string | null;
-  logged_in?: boolean;
+  session_status: string;
+  session_checked_at: string | null;
+  session_expires_hint: string | null;
 }
 
 interface Summary {
@@ -291,6 +294,42 @@ const Accounts: React.FC = () => {
     }
   };
 
+  // ─── Session Check ─────────────────────────────────────────
+  const [checkingSession, setCheckingSession] = useState<string | null>(null);
+
+  const handleCheckSession = async (record: AccountItem) => {
+    setCheckingSession(record.id);
+    try {
+      const res = await api.post(`/accounts/${record.id}/check-session`);
+      const status = res.data.session_status;
+      if (status === 'active') {
+        message.success(`${record.account_name} 会话在线`);
+      } else if (status === 'expired') {
+        message.warning(`${record.account_name} 会话已过期，请重新登录`);
+      } else {
+        message.info(`${record.account_name} 未登录`);
+      }
+      fetchAccounts();
+    } catch {
+      message.error('检查会话失败');
+    } finally {
+      setCheckingSession(null);
+    }
+  };
+
+  const formatCheckedTime = (iso: string | null) => {
+    if (!iso) return '从未检查';
+    const d = new Date(iso);
+    const now = new Date();
+    const diffMs = now.getTime() - d.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return '刚刚';
+    if (diffMin < 60) return `${diffMin}分钟前`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}小时前`;
+    return `${Math.floor(diffHr / 24)}天前`;
+  };
+
   const columns: ColumnsType<AccountItem> = [
     {
       title: '平台', dataIndex: 'platform', width: 90,
@@ -298,10 +337,25 @@ const Accounts: React.FC = () => {
     },
     { title: '账号名', dataIndex: 'account_name', width: 150 },
     {
-      title: '会话', dataIndex: 'logged_in', width: 80,
-      render: (v: boolean) => v
-        ? <Tag icon={<CheckCircleOutlined />} color="success">已登录</Tag>
-        : <Tag color="default">未登录</Tag>,
+      title: '会话', dataIndex: 'session_status', width: 110,
+      render: (_: unknown, r: AccountItem) => {
+        const tip = r.session_expires_hint || formatCheckedTime(r.session_checked_at);
+        if (r.session_status === 'active') {
+          return (
+            <Tooltip title={`上次检查: ${formatCheckedTime(r.session_checked_at)}`}>
+              <Tag icon={<CheckCircleOutlined />} color="success">在线</Tag>
+            </Tooltip>
+          );
+        }
+        if (r.session_status === 'expired') {
+          return (
+            <Tooltip title={tip}>
+              <Tag icon={<CloseCircleOutlined />} color="error">已过期</Tag>
+            </Tooltip>
+          );
+        }
+        return <Tag color="default">未登录</Tag>;
+      },
     },
     { title: '身份组', dataIndex: 'identity_group', width: 100 },
     { title: '品类', dataIndex: 'niche', width: 100, render: (v: string) => v || '-' },
@@ -333,12 +387,22 @@ const Accounts: React.FC = () => {
       render: (v: boolean) => v ? <Tag color="success">正常</Tag> : <Tag color="error">暂停</Tag>,
     },
     {
-      title: '操作', width: 220, fixed: 'right',
+      title: '操作', width: 280, fixed: 'right',
       render: (_: unknown, record: AccountItem) => (
         <Space size="small">
           <Button size="small" type="primary" ghost icon={<LoginOutlined />} onClick={() => startLogin(record)}>
             登录
           </Button>
+          <Tooltip title="检查会话是否仍然有效">
+            <Button
+              size="small"
+              icon={<SafetyCertificateOutlined />}
+              loading={checkingSession === record.id}
+              onClick={() => handleCheckSession(record)}
+            >
+              检查
+            </Button>
+          </Tooltip>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(record)}>编辑</Button>
           {record.is_active ? (
             <Popconfirm title="确认暂停该账号？" onConfirm={() => handleSuspend(record.id)}>
@@ -387,7 +451,7 @@ const Accounts: React.FC = () => {
           dataSource={accounts}
           loading={loading}
           pagination={false}
-          scroll={{ x: 1500 }}
+          scroll={{ x: 1600 }}
           locale={{ emptyText: '暂无账号，请点击「添加账号」录入' }}
         />
       </Card>

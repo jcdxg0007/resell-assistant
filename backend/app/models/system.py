@@ -43,6 +43,12 @@ class Account(Base, UUIDMixin, TimestampMixin):
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     suspended_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Session monitoring
+    session_status: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    # "none" / "active" / "expired"
+    session_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_expires_hint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
 
 class Task(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "tasks"

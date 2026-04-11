@@ -87,6 +87,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.ai_ops.daily_report",
         "schedule": crontab(minute=0, hour=22),
     },
+
+    # === Session Monitoring ===
+    "session-health-check": {
+        "task": "app.tasks.session.check_all_sessions",
+        "schedule": crontab(minute=0, hour="*/2"),
+    },
 }
 
 celery_app.autodiscover_tasks([
@@ -95,4 +101,5 @@ celery_app.autodiscover_tasks([
     "app.tasks.publish",
     "app.tasks.customer",
     "app.tasks.ai_ops",
+    "app.tasks.session",
 ])

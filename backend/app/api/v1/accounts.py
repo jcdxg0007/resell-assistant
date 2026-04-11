@@ -232,9 +232,18 @@ async def login_send_code(
 async def login_verify_code(
     account_id: str,
     req: CodeLoginRequest,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     result = await submit_login_code(account_id, req.code)
+    if result.get("success") and result.get("status") == "success":
+        acc = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
+        if acc:
+            acc.session_status = "active"
+            acc.session_checked_at = datetime.now(timezone.utc)
+            acc.session_expires_hint = None
+            acc.last_active_at = datetime.now(timezone.utc)
+            await db.commit()
     return result
 
 
@@ -267,8 +276,55 @@ async def cancel_login_flow(
     return {"message": "已取消"}
 
 
+# ─── Session Health Check ─────────────────────────────────────
+
+from app.services.session_checker import check_session
+
+
+@router.post("/{account_id}/check-session", summary="手动检查账号会话状态")
+async def check_account_session(
+    account_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Account).where(Account.id == account_id))
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    from app.services.browser import browser_manager
+    if not browser_manager._browser:
+        await browser_manager.start()
+
+    account_config = {
+        "proxy_url": account.proxy_url,
+        "user_agent": account.user_agent,
+        "viewport": account.viewport,
+    }
+    check_result = await check_session(str(account.id), account.platform, account_config)
+
+    now = datetime.now(timezone.utc)
+    account.session_checked_at = now
+    account.session_status = check_result["status"]
+    account.session_expires_hint = check_result.get("hint")
+
+    if check_result["status"] == "active":
+        account.last_active_at = now
+    elif check_result["status"] == "expired":
+        account.health_score = max(0, account.health_score - 10)
+
+    await db.commit()
+    await db.refresh(account)
+
+    return {
+        "session_status": account.session_status,
+        "session_checked_at": account.session_checked_at.isoformat() if account.session_checked_at else None,
+        "session_expires_hint": account.session_expires_hint,
+        "health_score": account.health_score,
+    }
+
+
 def _account_to_dict(a: Account) -> dict:
-    state_path = __import__("pathlib").Path(__file__).parent.parent.parent.parent / "playwright_states" / f"{a.id}.json"
     return {
         "id": str(a.id),
         "platform": a.platform,
@@ -284,5 +340,7 @@ def _account_to_dict(a: Account) -> dict:
         "suspended_reason": a.suspended_reason,
         "last_active_at": a.last_active_at.isoformat() if a.last_active_at else None,
         "created_at": a.created_at.isoformat() if a.created_at else None,
-        "logged_in": state_path.exists(),
+        "session_status": a.session_status,
+        "session_checked_at": a.session_checked_at.isoformat() if a.session_checked_at else None,
+        "session_expires_hint": a.session_expires_hint,
     }
