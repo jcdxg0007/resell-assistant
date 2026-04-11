@@ -189,7 +189,7 @@ const Accounts: React.FC = () => {
     setLoginModalOpen(true);
 
     try {
-      const res = await api.post(`/accounts/${record.id}/login`);
+      const res = await api.post(`/accounts/${record.id}/login`, null, { timeout: 60000 });
       const { status, screenshot: img, error } = res.data;
       setLoginStatus(status);
       if (img) setScreenshot(img);
@@ -200,9 +200,13 @@ const Accounts: React.FC = () => {
         fetchAccounts();
       }
     } catch (err: unknown) {
-      const error = err as { response?: { data?: { detail?: string } } };
+      const error = err as { response?: { data?: { detail?: string } }; code?: string; message?: string };
       setLoginStatus('failed');
-      setLoginError(error.response?.data?.detail || '发起登录失败');
+      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+        setLoginError('连接平台超时，请检查后端服务器网络是否能访问该平台（可能需要配置代理）');
+      } else {
+        setLoginError(error.response?.data?.detail || '发起登录失败');
+      }
     }
   };
 
@@ -299,19 +303,23 @@ const Accounts: React.FC = () => {
 
   const handleCheckSession = async (record: AccountItem) => {
     setCheckingSession(record.id);
+    message.loading({ content: '正在检查会话...', key: 'session-check', duration: 0 });
     try {
-      const res = await api.post(`/accounts/${record.id}/check-session`);
+      const res = await api.post(`/accounts/${record.id}/check-session`, null, { timeout: 15000 });
       const status = res.data.session_status;
+      const hint = res.data.session_expires_hint;
       if (status === 'active') {
-        message.success(`${record.account_name} 会话在线`);
+        message.success({ content: `${record.account_name} 会话在线${hint ? ` (${hint})` : ''}`, key: 'session-check' });
       } else if (status === 'expired') {
-        message.warning(`${record.account_name} 会话已过期，请重新登录`);
+        message.warning({ content: `${record.account_name} 会话已过期，请重新登录`, key: 'session-check' });
       } else {
-        message.info(`${record.account_name} 未登录`);
+        message.info({ content: `${record.account_name} 未找到登录状态`, key: 'session-check' });
       }
       fetchAccounts();
-    } catch {
-      message.error('检查会话失败');
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } }; code?: string };
+      const detail = error.response?.data?.detail || (error.code === 'ECONNABORTED' ? '请求超时' : '检查会话失败');
+      message.error({ content: detail, key: 'session-check' });
     } finally {
       setCheckingSession(null);
     }

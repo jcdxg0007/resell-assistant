@@ -276,9 +276,9 @@ async def cancel_login_flow(
     return {"message": "已取消"}
 
 
-# ─── Session Health Check ─────────────────────────────────────
+# ─── Session Health Check (offline, no browser needed) ────────
 
-from app.services.session_checker import check_session
+from app.services.session_checker import check_session_offline
 
 
 @router.post("/{account_id}/check-session", summary="手动检查账号会话状态")
@@ -292,30 +292,24 @@ async def check_account_session(
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    from app.services.browser import browser_manager
-    if not browser_manager._browser:
-        await browser_manager.start()
-
-    account_config = {
-        "proxy_url": account.proxy_url,
-        "user_agent": account.user_agent,
-        "viewport": account.viewport,
-    }
-    check_result = await check_session(str(account.id), account.platform, account_config)
+    check_result = check_session_offline(str(account.id), account.platform)
 
     now = datetime.now(timezone.utc)
     account.session_checked_at = now
 
     status = check_result["status"]
+    hint = check_result.get("hint")
+
     if status == "active":
         account.session_status = "active"
-        account.session_expires_hint = None
+        account.session_expires_hint = hint
         account.last_active_at = now
     elif status == "expired":
         account.session_status = "expired"
-        account.session_expires_hint = check_result.get("hint")
+        account.session_expires_hint = hint
         account.health_score = max(0, account.health_score - 10)
-    # "none" (check error/no state) — don't change existing session_status
+    else:
+        account.session_expires_hint = hint
 
     await db.commit()
     await db.refresh(account)
