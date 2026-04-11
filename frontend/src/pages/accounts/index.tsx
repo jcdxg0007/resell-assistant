@@ -302,40 +302,32 @@ const Accounts: React.FC = () => {
   // ─── Session Check ─────────────────────────────────────────
   const [checkingSession, setCheckingSession] = useState<string | null>(null);
 
+  const [checkResult, setCheckResult] = useState<{ visible: boolean; title: string; content: string }>({ visible: false, title: '', content: '' });
+
   const handleCheckSession = async (record: AccountItem) => {
     setCheckingSession(record.id);
     try {
       const res = await api.post(`/accounts/${record.id}/check-session`, null, { timeout: 15000 });
       const status = res.data.session_status;
       const hint = res.data.session_expires_hint;
+      let title = '';
+      let content = '';
       if (status === 'active') {
-        notification.success({
-          message: '会话在线',
-          description: `${record.account_name} 登录状态正常${hint ? `（${hint}）` : ''}`,
-          duration: 5,
-        });
+        title = '✅ 会话在线';
+        content = `${record.account_name} 登录状态正常${hint ? `（${hint}）` : ''}`;
       } else if (status === 'expired') {
-        notification.warning({
-          message: '会话已过期',
-          description: `${record.account_name} 的登录已失效，请重新登录`,
-          duration: 5,
-        });
+        title = '⚠️ 会话已过期';
+        content = `${record.account_name} 的登录已失效，请重新登录`;
       } else {
-        notification.info({
-          message: '尚未登录',
-          description: `${record.account_name} 没有保存的登录状态，请先点击「登录」`,
-          duration: 5,
-        });
+        title = 'ℹ️ 尚未登录';
+        content = `${record.account_name} 没有保存的登录状态，请先点击「登录」`;
       }
+      setCheckResult({ visible: true, title, content });
       fetchAccounts();
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } }; code?: string };
       const detail = error.response?.data?.detail || (error.code === 'ECONNABORTED' ? '请求超时' : '检查会话失败');
-      notification.error({
-        message: '检查失败',
-        description: detail,
-        duration: 5,
-      });
+      setCheckResult({ visible: true, title: '❌ 检查失败', content: detail });
     } finally {
       setCheckingSession(null);
     }
@@ -666,6 +658,21 @@ const Accounts: React.FC = () => {
             </div>
           )}
         </div>
+      </Modal>
+
+      {/* 会话检查结果弹窗 */}
+      <Modal
+        title={checkResult.title}
+        open={checkResult.visible}
+        onOk={() => setCheckResult({ ...checkResult, visible: false })}
+        onCancel={() => setCheckResult({ ...checkResult, visible: false })}
+        footer={[
+          <Button key="ok" type="primary" onClick={() => setCheckResult({ ...checkResult, visible: false })}>
+            知道了
+          </Button>,
+        ]}
+      >
+        <p style={{ fontSize: 16, margin: '16px 0' }}>{checkResult.content}</p>
       </Modal>
     </Space>
   );
