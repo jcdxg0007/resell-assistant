@@ -188,7 +188,7 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
             return session
 
         logger.info(f"Navigating to {platform} login for account {account_id}")
-        await page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
         await asyncio.sleep(3)
 
         url = page.url.lower()
