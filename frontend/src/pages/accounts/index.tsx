@@ -53,7 +53,7 @@ interface Summary {
 }
 
 const Accounts: React.FC = () => {
-  const { message } = App.useApp();
+  const { message, notification } = App.useApp();
   const [accounts, setAccounts] = useState<AccountItem[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -304,23 +304,38 @@ const Accounts: React.FC = () => {
 
   const handleCheckSession = async (record: AccountItem) => {
     setCheckingSession(record.id);
-    message.loading({ content: '正在检查会话...', key: 'session-check', duration: 0 });
     try {
       const res = await api.post(`/accounts/${record.id}/check-session`, null, { timeout: 15000 });
       const status = res.data.session_status;
       const hint = res.data.session_expires_hint;
       if (status === 'active') {
-        message.success({ content: `${record.account_name} 会话在线${hint ? ` — ${hint}` : ''}`, key: 'session-check', duration: 5 });
+        notification.success({
+          message: '会话在线',
+          description: `${record.account_name} 登录状态正常${hint ? `（${hint}）` : ''}`,
+          duration: 5,
+        });
       } else if (status === 'expired') {
-        message.warning({ content: `${record.account_name} 会话已过期，请重新登录`, key: 'session-check', duration: 5 });
+        notification.warning({
+          message: '会话已过期',
+          description: `${record.account_name} 的登录已失效，请重新登录`,
+          duration: 5,
+        });
       } else {
-        message.info({ content: `${record.account_name} 尚未登录，请先点击「登录」按钮`, key: 'session-check', duration: 5 });
+        notification.info({
+          message: '尚未登录',
+          description: `${record.account_name} 没有保存的登录状态，请先点击「登录」`,
+          duration: 5,
+        });
       }
       fetchAccounts();
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } }; code?: string };
       const detail = error.response?.data?.detail || (error.code === 'ECONNABORTED' ? '请求超时' : '检查会话失败');
-      message.error({ content: detail, key: 'session-check', duration: 5 });
+      notification.error({
+        message: '检查失败',
+        description: detail,
+        duration: 5,
+      });
     } finally {
       setCheckingSession(null);
     }
