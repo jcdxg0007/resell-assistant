@@ -278,7 +278,7 @@ async def cancel_login_flow(
 
 # ─── Session Health Check (offline, no browser needed) ────────
 
-from app.services.session_checker import check_session_offline
+from app.services.session_checker import check_session
 
 
 @router.post("/{account_id}/check-session", summary="手动检查账号会话状态")
@@ -292,7 +292,7 @@ async def check_account_session(
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    check_result = check_session_offline(str(account.id), account.platform)
+    check_result = await check_session(str(account.id), account.platform, {})
 
     now = datetime.now(timezone.utc)
     account.session_checked_at = now

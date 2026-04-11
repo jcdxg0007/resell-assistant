@@ -49,6 +49,9 @@ class Account(Base, UUIDMixin, TimestampMixin):
     session_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     session_expires_hint: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    # Persistent cookie storage (survives container restarts)
+    cookies_data: Mapped[str | None] = mapped_column(Text, nullable=True)
+
 
 class Task(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "tasks"
