@@ -309,17 +309,17 @@ const Accounts: React.FC = () => {
       const status = res.data.session_status;
       const hint = res.data.session_expires_hint;
       if (status === 'active') {
-        message.success({ content: `${record.account_name} 会话在线${hint ? ` (${hint})` : ''}`, key: 'session-check' });
+        message.success({ content: `${record.account_name} 会话在线${hint ? ` — ${hint}` : ''}`, key: 'session-check', duration: 5 });
       } else if (status === 'expired') {
-        message.warning({ content: `${record.account_name} 会话已过期，请重新登录`, key: 'session-check' });
+        message.warning({ content: `${record.account_name} 会话已过期，请重新登录`, key: 'session-check', duration: 5 });
       } else {
-        message.info({ content: `${record.account_name} 未找到登录状态`, key: 'session-check' });
+        message.info({ content: `${record.account_name} 尚未登录，请先点击「登录」按钮`, key: 'session-check', duration: 5 });
       }
       fetchAccounts();
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } }; code?: string };
       const detail = error.response?.data?.detail || (error.code === 'ECONNABORTED' ? '请求超时' : '检查会话失败');
-      message.error({ content: detail, key: 'session-check' });
+      message.error({ content: detail, key: 'session-check', duration: 5 });
     } finally {
       setCheckingSession(null);
     }
