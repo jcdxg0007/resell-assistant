@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Button, Space, Tag, Modal, Form, Tooltip,
-  Input, Select, InputNumber, message, Popconfirm, Progress, Row, Col, Statistic, Spin, Alert,
+  Input, Select, InputNumber, App, Popconfirm, Progress, Row, Col, Statistic, Spin, Alert,
 } from 'antd';
 import {
   PlusOutlined, ReloadOutlined, PauseCircleOutlined, PlayCircleOutlined,
@@ -53,6 +53,7 @@ interface Summary {
 }
 
 const Accounts: React.FC = () => {
+  const { message } = App.useApp();
   const [accounts, setAccounts] = useState<AccountItem[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
