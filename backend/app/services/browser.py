@@ -82,7 +82,8 @@ class BrowserManager:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--single-process",
+                    "--no-zygote",
+                    "--disable-features=VizDisplayCompositor",
                 ],
             )
             logger.info("Playwright browser started")

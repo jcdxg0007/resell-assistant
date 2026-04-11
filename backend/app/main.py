@@ -93,3 +93,25 @@ async def debug_network():
         results["httpx_xiaohongshu"] = {"error": str(e)[:120], "ok": False}
 
     return results
+
+
+@app.get("/debug/playwright")
+async def debug_playwright():
+    """Test if Playwright Chromium can reach external sites."""
+    import time as _time
+    try:
+        from app.services.browser import browser_manager
+        if not browser_manager._browser:
+            await browser_manager.start()
+        ctx = await browser_manager._browser.new_context()
+        page = await ctx.new_page()
+        t0 = _time.time()
+        resp = await page.goto("https://creator.xiaohongshu.com/", wait_until="domcontentloaded", timeout=30000)
+        ms = round((_time.time() - t0) * 1000)
+        url = page.url
+        status = resp.status if resp else None
+        await page.close()
+        await ctx.close()
+        return {"ok": True, "url": url, "status": status, "ms": ms}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
