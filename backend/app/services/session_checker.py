@@ -43,23 +43,33 @@ async def check_session(account_id: str, platform: str, account_config: dict) ->
         page = await context.new_page()
 
         logger.info(f"Session check: opening {check_url} for account {account_id}")
-        await page.goto(check_url, wait_until="domcontentloaded", timeout=20000)
-        await asyncio.sleep(3)
+        await page.goto(check_url, wait_until="domcontentloaded", timeout=30000)
 
-        final_url = page.url.lower()
+        # Poll URL multiple times to handle multi-step redirects
+        # (e.g. platform briefly shows /login then auto-redirects back with valid cookies)
         login_indicators = LOGIN_PAGE_INDICATORS.get(platform, [])
-        on_login_page = any(ind in final_url for ind in login_indicators)
+        is_on_login = True
+        for attempt in range(6):
+            await asyncio.sleep(3)
+            try:
+                current_url = page.url.lower()
+            except Exception:
+                break
+            logger.debug(f"Session check attempt {attempt+1}: {current_url}")
+            if not any(ind in current_url for ind in login_indicators):
+                is_on_login = False
+                break
 
-        if on_login_page:
-            logger.warning(f"Session expired for account {account_id}: redirected to {final_url}")
+        final_url = page.url.lower() if not page.is_closed() else ""
+
+        if is_on_login and any(ind in final_url for ind in login_indicators):
+            logger.warning(f"Session expired for account {account_id}: stuck on {final_url}")
             await page.close()
-            # Remove stale state file
             try:
                 state_path.unlink()
                 logger.info(f"Removed expired state file for {account_id}")
             except Exception:
                 pass
-            # Close the context so stale cookies aren't reused
             await browser_manager.close_context(account_id)
             return {"status": "expired", "hint": "会话已过期，被重定向到登录页"}
         else:
@@ -75,7 +85,8 @@ async def check_session(account_id: str, platform: str, account_config: dict) ->
                 await page.close()
             except Exception:
                 pass
-        return {"status": "expired", "hint": f"检查失败: {str(e)[:80]}"}
+        # Network/timeout errors don't necessarily mean expired — keep current status
+        return {"status": "none", "hint": f"检查异常: {str(e)[:80]}"}
 
 
 async def check_all_sessions(accounts: list[dict]) -> dict:

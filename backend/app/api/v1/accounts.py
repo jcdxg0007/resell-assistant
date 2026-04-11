@@ -305,13 +305,17 @@ async def check_account_session(
 
     now = datetime.now(timezone.utc)
     account.session_checked_at = now
-    account.session_status = check_result["status"]
-    account.session_expires_hint = check_result.get("hint")
 
-    if check_result["status"] == "active":
+    status = check_result["status"]
+    if status == "active":
+        account.session_status = "active"
+        account.session_expires_hint = None
         account.last_active_at = now
-    elif check_result["status"] == "expired":
+    elif status == "expired":
+        account.session_status = "expired"
+        account.session_expires_hint = check_result.get("hint")
         account.health_score = max(0, account.health_score - 10)
+    # "none" (check error/no state) — don't change existing session_status
 
     await db.commit()
     await db.refresh(account)
