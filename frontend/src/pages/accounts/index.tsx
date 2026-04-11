@@ -53,7 +53,7 @@ interface Summary {
 }
 
 const Accounts: React.FC = () => {
-  const { message, notification } = App.useApp();
+  const { message } = App.useApp();
   const [accounts, setAccounts] = useState<AccountItem[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(false);
