@@ -5,10 +5,12 @@ Supports static proxy URLs and 青果网络 (qg.net) long-term proxy API.
 Usage in account proxy_url field:
   - Static proxy: "http://ip:port" or "socks5://user:pass@ip:port"
   - 青果长效代理: "qgnet:YOUR_KEY"  (auto-queries assigned IP)
-  - 青果长效代理+地区: "qgnet:YOUR_KEY:area=441900"
+  - 青果长效代理+地区: "qgnet:YOUR_KEY:area=440100,440300"
 
-Auto-manages IP whitelist: on startup, the container's outbound IP
-is automatically added to the 青果 whitelist.
+Features:
+  - Auto-queries assigned proxy IP from 青果 API
+  - Auto-extracts new IP when current one expires (with area preference)
+  - Auto-adds container IP to 青果 whitelist on startup
 """
 import time
 from typing import Any
@@ -19,8 +21,27 @@ from loguru import logger
 _proxy_cache: dict[str, dict[str, Any]] = {}
 _whitelist_registered: dict[str, str] = {}
 
-QG_LONGTERM_API = "https://longterm.proxy.qg.net/query"
+QG_LONGTERM_QUERY = "https://longterm.proxy.qg.net/query"
+QG_LONGTERM_GET = "https://longterm.proxy.qg.net/get"
 QG_WHITELIST_ADD = "https://proxy.qg.net/whitelist/add"
+
+DEFAULT_AREA = "440100,440300"
+
+
+def _parse_qgnet_config(proxy_url: str) -> tuple[str, dict[str, str]]:
+    """Parse 'qgnet:KEY' or 'qgnet:KEY:area=xxx&isp=1' into (key, params)."""
+    parts = proxy_url.split(":", 2)
+    key = parts[1] if len(parts) >= 2 else ""
+    extra = parts[2] if len(parts) >= 3 else ""
+
+    params: dict[str, str] = {}
+    if extra:
+        for pair in extra.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                params[k.strip()] = v.strip()
+
+    return key, params
 
 
 async def resolve_proxy(proxy_url: str | None) -> str | None:
@@ -41,13 +62,8 @@ async def resolve_proxy(proxy_url: str | None) -> str | None:
 
 
 async def _resolve_qgnet_longterm(proxy_url: str) -> str | None:
-    """Query 青果网络 long-term proxy API for assigned proxy IP.
-
-    Format: "qgnet:KEY" or "qgnet:KEY:task=xxx"
-    """
-    parts = proxy_url.split(":", 2)
-    key = parts[1] if len(parts) >= 2 else ""
-    extra_params = parts[2] if len(parts) >= 3 else ""
+    """Query 青果 long-term proxy; auto-extract if none available."""
+    key, extra_params = _parse_qgnet_config(proxy_url)
 
     if not key:
         logger.error("青果代理配置格式错误，缺少 key")
@@ -60,58 +76,99 @@ async def _resolve_qgnet_longterm(proxy_url: str) -> str | None:
             logger.debug(f"Using cached proxy {cached['server']} (expires in {remaining:.0f}s)")
             return cached["proxy_formatted"]
 
-    params: dict[str, str] = {"key": key}
-    if extra_params:
-        for pair in extra_params.split("&"):
-            if "=" in pair:
-                k, v = pair.split("=", 1)
-                params[k.strip()] = v.strip()
+    await _ensure_whitelist(key)
 
+    result = await _query_existing_proxy(key)
+
+    if not result:
+        area = extra_params.get("area", DEFAULT_AREA)
+        logger.info(f"No active proxy found, auto-extracting new IP (area={area})")
+        result = await _extract_new_proxy(key, area)
+
+    if not result:
+        return None
+
+    return _cache_proxy_result(key, result)
+
+
+async def _query_existing_proxy(key: str) -> dict | None:
+    """Query existing assigned proxy via /query API."""
     try:
-        await _ensure_whitelist(key)
-
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(QG_LONGTERM_API, params=params)
+            resp = await client.get(QG_LONGTERM_QUERY, params={"key": key})
             data = resp.json()
 
         if data.get("code") != "SUCCESS":
-            logger.error(f"青果长效代理查询失败: {data.get('code')} - {data}")
+            logger.warning(f"青果代理查询: {data.get('code')} - {data.get('message', '')}")
             return None
 
         ip_list = data.get("data", [])
         if not ip_list:
-            logger.error("青果长效代理返回空列表，可能没有可用的代理通道")
+            logger.info("青果代理查询返回空列表，当前无可用代理")
+            return None
+
+        return ip_list[0]
+
+    except Exception as e:
+        logger.error(f"青果代理查询异常: {e}")
+        return None
+
+
+async def _extract_new_proxy(key: str, area: str) -> dict | None:
+    """Extract a new proxy IP via /get API with area preference."""
+    try:
+        params: dict[str, str] = {"key": key, "area": area}
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(QG_LONGTERM_GET, params=params)
+            data = resp.json()
+
+        if data.get("code") != "SUCCESS":
+            logger.error(f"青果代理提取失败: {data.get('code')} - {data.get('message', '')}")
+            return None
+
+        ip_list = data.get("data", [])
+        if not ip_list:
+            logger.error("青果代理提取返回空列表")
             return None
 
         ip_info = ip_list[0]
-        server = ip_info["server"]  # e.g. "125.75.110.68:62473"
-        proxy_formatted = f"http://{server}"
-
-        deadline_str = ip_info.get("deadline", "")
-        try:
-            from datetime import datetime
-            deadline_ts = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M:%S").timestamp()
-        except Exception:
-            deadline_ts = time.time() + 3600
-
-        _proxy_cache[key] = {
-            "server": server,
-            "proxy_formatted": proxy_formatted,
-            "deadline": deadline_ts,
-            "area": ip_info.get("area", ""),
-            "proxy_ip": ip_info.get("proxy_ip", ""),
-            "isp": ip_info.get("isp", ""),
-        }
-
         logger.info(
-            f"青果长效代理查询成功: {server} ({ip_info.get('area', '')} {ip_info.get('isp', '')}) "
-            f"有效至 {deadline_str}"
+            f"青果代理自动提取成功: {ip_info.get('server')} "
+            f"({ip_info.get('area', '')} {ip_info.get('isp', '')})"
         )
-        return proxy_formatted
+        return ip_info
 
     except Exception as e:
-        logger.error(f"青果长效代理查询异常: {e}")
+        logger.error(f"青果代理提取异常: {e}")
         return None
+
+
+def _cache_proxy_result(key: str, ip_info: dict) -> str:
+    """Cache proxy info and return formatted proxy URL."""
+    server = ip_info["server"]
+    proxy_formatted = f"http://{server}"
+
+    deadline_str = ip_info.get("deadline", "")
+    try:
+        from datetime import datetime
+        deadline_ts = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M:%S").timestamp()
+    except Exception:
+        deadline_ts = time.time() + 3600
+
+    _proxy_cache[key] = {
+        "server": server,
+        "proxy_formatted": proxy_formatted,
+        "deadline": deadline_ts,
+        "area": ip_info.get("area", ""),
+        "proxy_ip": ip_info.get("proxy_ip", ""),
+        "isp": ip_info.get("isp", ""),
+    }
+
+    logger.info(
+        f"青果代理就绪: {server} ({ip_info.get('area', '')} {ip_info.get('isp', '')}) "
+        f"有效至 {deadline_str}"
+    )
+    return proxy_formatted
 
 
 async def get_proxy_status(proxy_url: str | None) -> dict:
@@ -122,8 +179,7 @@ async def get_proxy_status(proxy_url: str | None) -> dict:
     proxy_url = proxy_url.strip()
 
     if proxy_url.startswith("qgnet:"):
-        parts = proxy_url.split(":", 2)
-        key = parts[1] if len(parts) >= 2 else ""
+        key, _ = _parse_qgnet_config(proxy_url)
         cached = _proxy_cache.get(key)
 
         if cached and cached["deadline"] - time.time() > 0:
