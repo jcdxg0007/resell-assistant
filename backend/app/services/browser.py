@@ -114,8 +114,15 @@ class BrowserManager:
             "timezone_id": "Asia/Shanghai",
         }
 
-        if account_config.get("proxy_url"):
-            context_options["proxy"] = {"server": account_config["proxy_url"]}
+        raw_proxy = account_config.get("proxy_url")
+        if raw_proxy:
+            from app.services.proxy_service import resolve_proxy
+            resolved = await resolve_proxy(raw_proxy)
+            if resolved:
+                context_options["proxy"] = {"server": resolved}
+                logger.info(f"Proxy resolved for {account_id}: {resolved}")
+            else:
+                logger.warning(f"Proxy resolution failed for {account_id}, proceeding without proxy")
 
         if account_config.get("user_agent"):
             context_options["user_agent"] = account_config["user_agent"]

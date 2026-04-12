@@ -396,7 +396,14 @@ const Accounts: React.FC = () => {
     },
     {
       title: '代理 IP', dataIndex: 'proxy_url', ellipsis: true, width: 160,
-      render: (v: string) => v ? <Tag color="blue">{v}</Tag> : <Tag color="warning">未配置</Tag>,
+      render: (v: string) => {
+        if (!v) return <Tag color="warning">未配置</Tag>;
+        if (v.startsWith('qgnet:')) {
+          const key = v.split(':')[1] || '';
+          return <Tag color="green">青果 {key.slice(0, 6)}...</Tag>;
+        }
+        return <Tag color="blue">{v}</Tag>;
+      },
     },
     {
       title: '状态', dataIndex: 'is_active', width: 80,
@@ -498,8 +505,12 @@ const Accounts: React.FC = () => {
           <Form.Item name="niche" label="品类定位">
             <Input placeholder="例如：3C数码、小家具" />
           </Form.Item>
-          <Form.Item name="proxy_url" label="代理 IP">
-            <Input placeholder="例如：socks5://user:pass@ip:port" />
+          <Form.Item
+            name="proxy_url"
+            label="代理 IP"
+            extra="青果长效代理填 qgnet:你的KEY（如 qgnet:3DB99AC7），静态代理填 http://ip:port"
+          >
+            <Input placeholder="例如：qgnet:3DB99AC7 或 http://ip:port" />
           </Form.Item>
           <Form.Item name="user_agent" label="User-Agent">
             <Input.TextArea rows={2} placeholder="留空则自动生成" />
@@ -517,8 +528,12 @@ const Accounts: React.FC = () => {
         okText="保存"
       >
         <Form form={editForm} layout="vertical">
-          <Form.Item name="proxy_url" label="代理 IP">
-            <Input placeholder="例如：socks5://user:pass@ip:port" allowClear />
+          <Form.Item
+            name="proxy_url"
+            label="代理 IP"
+            extra="青果长效代理填 qgnet:你的KEY（如 qgnet:3DB99AC7），静态代理填 http://ip:port"
+          >
+            <Input placeholder="例如：qgnet:3DB99AC7 或 http://ip:port" allowClear />
           </Form.Item>
           <Form.Item name="niche" label="品类定位">
             <Input placeholder="例如：3C数码、小家具" allowClear />

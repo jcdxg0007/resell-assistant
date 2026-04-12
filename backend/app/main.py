@@ -97,21 +97,25 @@ async def debug_network():
 
 @app.get("/debug/playwright")
 async def debug_playwright(proxy: str | None = None):
-    """Test Playwright Chromium connectivity. Optional proxy param to test proxy."""
+    """Test Playwright Chromium connectivity. Optional proxy param to test proxy.
+    Supports qgnet:KEY format to auto-resolve via 青果 API.
+    """
     import time as _time
     try:
         from app.services.browser import browser_manager
+        from app.services.proxy_service import resolve_proxy
         if not browser_manager._browser:
             await browser_manager.start()
 
+        resolved_proxy = await resolve_proxy(proxy) if proxy else None
+
         ctx_opts: dict = {}
-        if proxy:
-            ctx_opts["proxy"] = {"server": proxy}
+        if resolved_proxy:
+            ctx_opts["proxy"] = {"server": resolved_proxy}
 
         ctx = await browser_manager._browser.new_context(**ctx_opts)
         page = await ctx.new_page()
 
-        # Visit IP check service to see what IP the website sees
         t0 = _time.time()
         await page.goto("https://httpbin.org/ip", wait_until="domcontentloaded", timeout=30000)
         ms = round((_time.time() - t0) * 1000)
@@ -120,6 +124,21 @@ async def debug_playwright(proxy: str | None = None):
 
         await page.close()
         await ctx.close()
-        return {"ok": True, "url": url, "ip_seen": content, "proxy_used": proxy, "ms": ms}
+        return {
+            "ok": True,
+            "url": url,
+            "ip_seen": content,
+            "proxy_input": proxy,
+            "proxy_resolved": resolved_proxy,
+            "ms": ms,
+        }
     except Exception as e:
-        return {"ok": False, "error": str(e)[:200], "proxy_used": proxy}
+        return {"ok": False, "error": str(e)[:200], "proxy_input": proxy}
+
+
+@app.get("/debug/proxy")
+async def debug_proxy(key: str | None = None):
+    """Query 青果长效代理状态."""
+    from app.services.proxy_service import get_proxy_status
+    proxy_url = f"qgnet:{key}" if key else None
+    return await get_proxy_status(proxy_url)
