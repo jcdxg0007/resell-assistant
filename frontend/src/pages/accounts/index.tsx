@@ -79,6 +79,35 @@ const Accounts: React.FC = () => {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [proxyInfoMap, setProxyInfoMap] = useState<Record<string, { ip: string; area: string; isp: string }>>({});
+
+  const fetchProxyStatus = useCallback(async (accountList: AccountItem[]) => {
+    const qgAccounts = accountList.filter((a) => a.proxy_url?.startsWith('qgnet:'));
+    const seen = new Set<string>();
+    const unique = qgAccounts.filter((a) => {
+      if (seen.has(a.proxy_url!)) return false;
+      seen.add(a.proxy_url!);
+      return true;
+    });
+    if (!unique.length) return;
+
+    const results: Record<string, { ip: string; area: string; isp: string }> = {};
+    await Promise.all(
+      unique.map(async (a) => {
+        try {
+          const res = await api.get(`/accounts/${a.id}/proxy-status`);
+          if (res.data.status === 'active') {
+            const info = { ip: res.data.proxy_ip || res.data.server || '', area: res.data.area || '', isp: res.data.isp || '' };
+            for (const acc of accountList) {
+              if (acc.proxy_url === a.proxy_url) results[acc.id] = info;
+            }
+          }
+        } catch { /* ignore */ }
+      }),
+    );
+    setProxyInfoMap(results);
+  }, []);
+
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
     try {
@@ -86,14 +115,16 @@ const Accounts: React.FC = () => {
         api.get('/accounts/', { params: { page_size: 100 } }),
         api.get('/accounts/stats/summary').catch(() => ({ data: null })),
       ]);
-      setAccounts(listRes.data.items || []);
+      const items = listRes.data.items || [];
+      setAccounts(items);
       if (summaryRes.data) setSummary(summaryRes.data);
+      fetchProxyStatus(items);
     } catch {
       message.error('获取账号列表失败');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchProxyStatus]);
 
   useEffect(() => { fetchAccounts(); }, [fetchAccounts]);
 
@@ -395,12 +426,23 @@ const Accounts: React.FC = () => {
       ),
     },
     {
-      title: '代理 IP', dataIndex: 'proxy_url', width: 180,
-      render: (v: string) => {
+      title: '代理 IP', dataIndex: 'proxy_url', width: 200,
+      render: (v: string, record: AccountItem) => {
         if (!v) return <Tag color="warning">未配置</Tag>;
         if (v.startsWith('qgnet:')) {
-          const key = v.split(':')[1] || '';
-          return <Tooltip title={v}><Tag color="green">青果 {key}</Tag></Tooltip>;
+          const info = proxyInfoMap[record.id];
+          return (
+            <Tooltip title={v}>
+              <div>
+                <Tag color="green" style={{ marginBottom: info ? 4 : 0 }}>青果代理</Tag>
+                {info && (
+                  <div style={{ fontSize: 12, color: '#666', lineHeight: '18px' }}>
+                    {info.ip} <span style={{ color: '#999' }}>{info.area}{info.isp ? ` ${info.isp}` : ''}</span>
+                  </div>
+                )}
+              </div>
+            </Tooltip>
+          );
         }
         return <Tooltip title={v}><Tag color="blue">{v}</Tag></Tooltip>;
       },

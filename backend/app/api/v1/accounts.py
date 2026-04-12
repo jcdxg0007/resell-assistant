@@ -322,6 +322,21 @@ async def check_account_session(
     }
 
 
+@router.get("/{account_id}/proxy-status", summary="查询账号代理IP实时状态")
+async def account_proxy_status(
+    account_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Account).where(Account.id == account_id))
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    from app.services.proxy_service import get_proxy_status
+    return await get_proxy_status(account.proxy_url)
+
+
 def _account_to_dict(a: Account) -> dict:
     return {
         "id": str(a.id),
