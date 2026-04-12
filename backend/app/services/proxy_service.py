@@ -6,6 +6,9 @@ Usage in account proxy_url field:
   - Static proxy: "http://ip:port" or "socks5://user:pass@ip:port"
   - 青果长效代理: "qgnet:YOUR_KEY"  (auto-queries assigned IP)
   - 青果长效代理+地区: "qgnet:YOUR_KEY:area=441900"
+
+Auto-manages IP whitelist: on startup, the container's outbound IP
+is automatically added to the 青果 whitelist.
 """
 import time
 from typing import Any
@@ -14,8 +17,10 @@ import httpx
 from loguru import logger
 
 _proxy_cache: dict[str, dict[str, Any]] = {}
+_whitelist_registered: dict[str, str] = {}
 
 QG_LONGTERM_API = "https://longterm.proxy.qg.net/query"
+QG_WHITELIST_ADD = "https://proxy.qg.net/whitelist/add"
 
 
 async def resolve_proxy(proxy_url: str | None) -> str | None:
@@ -63,6 +68,8 @@ async def _resolve_qgnet_longterm(proxy_url: str) -> str | None:
                 params[k.strip()] = v.strip()
 
     try:
+        await _ensure_whitelist(key)
+
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(QG_LONGTERM_API, params=params)
             data = resp.json()
@@ -147,3 +154,44 @@ async def get_proxy_status(proxy_url: str | None) -> dict:
         return {"type": "qgnet_longterm", "status": "error", "message": "无法获取代理"}
 
     return {"type": "static", "status": "active", "server": proxy_url}
+
+
+async def _get_outbound_ip() -> str | None:
+    """Detect this container's outbound IP."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get("https://d.qg.net/ip")
+            return resp.text.strip()
+    except Exception:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get("https://httpbin.org/ip")
+                return resp.json().get("origin", "").strip()
+        except Exception:
+            return None
+
+
+async def _ensure_whitelist(key: str):
+    """Auto-add container IP to 青果 whitelist on first use."""
+    outbound_ip = await _get_outbound_ip()
+    if not outbound_ip:
+        return
+
+    if _whitelist_registered.get(key) == outbound_ip:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                QG_WHITELIST_ADD,
+                params={"Key": key, "IP": outbound_ip},
+            )
+            data = resp.json()
+
+        if data.get("Code") == 0:
+            _whitelist_registered[key] = outbound_ip
+            logger.info(f"青果白名单已自动添加: {outbound_ip} (Key={key[:6]}...)")
+        else:
+            logger.warning(f"青果白名单添加返回: {data}")
+    except Exception as e:
+        logger.warning(f"青果白名单自动添加失败: {e}")
