@@ -395,14 +395,14 @@ const Accounts: React.FC = () => {
       ),
     },
     {
-      title: '代理 IP', dataIndex: 'proxy_url', ellipsis: true, width: 160,
+      title: '代理 IP', dataIndex: 'proxy_url', width: 180,
       render: (v: string) => {
         if (!v) return <Tag color="warning">未配置</Tag>;
         if (v.startsWith('qgnet:')) {
           const key = v.split(':')[1] || '';
-          return <Tag color="green">青果 {key.slice(0, 6)}...</Tag>;
+          return <Tooltip title={v}><Tag color="green">青果 {key}</Tag></Tooltip>;
         }
-        return <Tag color="blue">{v}</Tag>;
+        return <Tooltip title={v}><Tag color="blue">{v}</Tag></Tooltip>;
       },
     },
     {
