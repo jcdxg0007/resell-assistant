@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Table, Card, Input, Button, Space, Tag, Row, Col,
-  Statistic, Progress, message, Modal, Descriptions,
+  Statistic, Progress, Descriptions, App, Alert, Modal,
 } from 'antd';
 import { SearchOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -35,8 +35,11 @@ const decisionColors: Record<string, string> = {
 };
 
 const XianyuSelection: React.FC = () => {
+  const { modal, message } = App.useApp();
   const [loading, setLoading] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [searchResult, setSearchResult] = useState<'success' | 'error' | null>(null);
+  const [searchKeyword, setSearchKeyword] = useState('');
   const [data, setData] = useState<ProductItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -72,24 +75,15 @@ const XianyuSelection: React.FC = () => {
       return;
     }
     setSearchLoading(true);
+    setSearchResult(null);
     try {
       await api.post('/products/search', { keyword: keyword.trim(), platform: 'xianyu' });
-      Modal.success({
-        title: '搜索任务已提交',
-        content: (
-          <div>
-            <p>关键词「{keyword.trim()}」正在后台爬取闲鱼数据</p>
-            <p style={{ color: '#8c8c8c', fontSize: 13 }}>爬虫完成后会自动写入商品库，届时刷新页面即可看到新数据</p>
-          </div>
-        ),
-        okText: '知道了',
-        onOk: () => fetchRecommendations(1),
-      });
-    } catch (e: any) {
-      Modal.error({
-        title: '搜索失败',
-        content: e.response?.data?.detail || '请检查网络或稍后重试',
-      });
+      setSearchKeyword(keyword.trim());
+      setSearchResult('success');
+      message.success('搜索任务已提交');
+    } catch {
+      setSearchResult('error');
+      message.error('搜索任务提交失败');
     } finally {
       setSearchLoading(false);
     }
@@ -195,6 +189,34 @@ const XianyuSelection: React.FC = () => {
           </Col>
         </Row>
       </Card>
+
+      {searchResult === 'success' && (
+        <Alert
+          message={`搜索任务已提交：「${searchKeyword}」`}
+          description="爬虫正在后台抓取闲鱼数据，完成后刷新页面即可看到新商品"
+          type="success"
+          showIcon
+          closable
+          onClose={() => setSearchResult(null)}
+          style={{ marginBottom: 16 }}
+          action={
+            <Button size="small" onClick={() => fetchRecommendations(1)}>
+              刷新数据
+            </Button>
+          }
+        />
+      )}
+      {searchResult === 'error' && (
+        <Alert
+          message="搜索任务提交失败"
+          description="请检查网络连接或稍后重试"
+          type="error"
+          showIcon
+          closable
+          onClose={() => setSearchResult(null)}
+          style={{ marginBottom: 16 }}
+        />
+      )}
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={6}>
