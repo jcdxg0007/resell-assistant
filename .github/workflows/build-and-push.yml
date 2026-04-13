@@ -96,27 +96,46 @@ jobs:
           SHA="${{ github.sha }}"
           NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           IMG_BASE="${{ env.REGISTRY }}/${{ env.NAMESPACE }}"
+          KUBE="${{ env.KUBE_SERVER }}/apis/apps/v1/namespaces/${{ env.KUBE_NS }}/deployments"
+          AUTH="Authorization: Bearer ${{ secrets.KUBE_TOKEN }}"
+
+          get_container_name() {
+            local APP=$1
+            NAME=$(curl -sk -H "$AUTH" "$KUBE/$APP" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['spec']['template']['spec']['containers'][0]['name'])" 2>/dev/null)
+            echo "${NAME:-$APP}"
+          }
 
           deploy_app() {
             local APP=$1
             local NEEDS_BUILD=$2
             echo "--- Deploying $APP ---"
+
+            CNAME=$(get_container_name "$APP")
+            echo "Container name: $CNAME"
+
             if [ "$NEEDS_BUILD" = "true" ]; then
-              echo "Updating image to $IMG_BASE/$APP:$SHA"
-              PATCH="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}},\"spec\":{\"containers\":[{\"name\":\"$APP\",\"image\":\"$IMG_BASE/$APP:$SHA\",\"imagePullPolicy\":\"Always\"}]}}}}"
+              NEW_IMG="$IMG_BASE/$APP:$SHA"
+              echo "Updating image to $NEW_IMG (imagePullPolicy=Always)"
+              PATCH="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}},\"spec\":{\"containers\":[{\"name\":\"$CNAME\",\"image\":\"$NEW_IMG\",\"imagePullPolicy\":\"Always\"}]}}}}"
             else
               echo "Restarting only (no new build)"
               PATCH="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}}}}}"
             fi
-            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" -X PATCH \
-              -H "Authorization: Bearer ${{ secrets.KUBE_TOKEN }}" \
+
+            RESP=$(curl -sk -w "\n%{http_code}" -X PATCH \
+              -H "$AUTH" \
               -H "Content-Type: application/strategic-merge-patch+json" \
-              "${{ env.KUBE_SERVER }}/apis/apps/v1/namespaces/${{ env.KUBE_NS }}/deployments/$APP" \
+              "$KUBE/$APP" \
               -d "$PATCH")
+            STATUS=$(echo "$RESP" | tail -1)
+            BODY=$(echo "$RESP" | sed '$d')
+
             if [ "$STATUS" = "200" ]; then
               echo "✅ $APP deployed successfully"
             else
               echo "❌ $APP deploy failed (HTTP $STATUS)"
+              echo "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('message',''))" 2>/dev/null || echo "$BODY"
             fi
           }
 
