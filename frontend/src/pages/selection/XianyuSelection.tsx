@@ -35,7 +35,7 @@ const decisionColors: Record<string, string> = {
 };
 
 const XianyuSelection: React.FC = () => {
-  const { modal, message } = App.useApp();
+  const { message } = App.useApp();
   const [loading, setLoading] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchResult, setSearchResult] = useState<'success' | 'error' | null>(null);
