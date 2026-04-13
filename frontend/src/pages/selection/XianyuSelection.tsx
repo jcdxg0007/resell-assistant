@@ -74,9 +74,22 @@ const XianyuSelection: React.FC = () => {
     setSearchLoading(true);
     try {
       await api.post('/products/search', { keyword: keyword.trim(), platform: 'xianyu' });
-      message.success('搜索任务已提交，请稍后刷新查看结果');
-    } catch {
-      message.error('搜索失败');
+      Modal.success({
+        title: '搜索任务已提交',
+        content: (
+          <div>
+            <p>关键词「{keyword.trim()}」正在后台爬取闲鱼数据</p>
+            <p style={{ color: '#8c8c8c', fontSize: 13 }}>爬虫完成后会自动写入商品库，届时刷新页面即可看到新数据</p>
+          </div>
+        ),
+        okText: '知道了',
+        onOk: () => fetchRecommendations(1),
+      });
+    } catch (e: any) {
+      Modal.error({
+        title: '搜索失败',
+        content: e.response?.data?.detail || '请检查网络或稍后重试',
+      });
     } finally {
       setSearchLoading(false);
     }
