@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Card, Table, Tabs, Typography, Button, Space, Tag, message, Modal,
-  Tooltip, Badge, Popconfirm,
+  Card, Table, Tabs, Typography, Button, Space, Tag, message,
+  Tooltip, Popconfirm,
 } from 'antd';
 import { ReloadOutlined, RocketOutlined, FireOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -138,12 +138,6 @@ const XianyuWorkbench: React.FC = () => {
       ),
     },
   ];
-
-  const tabCounts = {
-    all: total,
-    draft: data.filter(d => d.status === 'draft').length,
-    published: data.filter(d => d.status === 'published').length,
-  };
 
   return (
     <div>

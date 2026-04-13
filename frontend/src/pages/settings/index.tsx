@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Card, Form, Input, Tabs, Typography, Switch, Button, Space, message,
-  Tag, Descriptions, Divider, Alert,
+  Tag, Descriptions, Alert,
 } from 'antd';
 import { SaveOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import api from '../../services/api';

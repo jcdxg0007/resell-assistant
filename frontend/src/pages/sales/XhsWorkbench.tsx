@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Card, Table, Tabs, Typography, Button, Space, Tag, message,
-  Tooltip, Popconfirm,
+  Popconfirm,
 } from 'antd';
 import { ReloadOutlined, RocketOutlined, DeleteOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';

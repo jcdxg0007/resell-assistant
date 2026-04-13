@@ -1,11 +1,10 @@
 import React, { useState, useCallback } from 'react';
 import {
-  Card, Tabs, Typography, Button, Space, Tag, Spin, Descriptions,
-  List, Alert, message, Row, Col, Statistic, Divider,
+  Card, Tabs, Typography, Button, Space, Tag, Descriptions,
+  List, Alert, message, Row, Col,
 } from 'antd';
 import {
-  ReloadOutlined, CheckCircleOutlined, WarningOutlined,
-  CloseCircleOutlined, BulbOutlined, FileTextOutlined,
+  CheckCircleOutlined, BulbOutlined, FileTextOutlined,
 } from '@ant-design/icons';
 import api from '../../services/api';
 
@@ -95,7 +94,7 @@ const AiOps: React.FC = () => {
       {suggestions.length > 0 ? (
         <List
           dataSource={suggestions}
-          renderItem={(item, idx) => (
+          renderItem={(item) => (
             <List.Item>
               <List.Item.Meta
                 avatar={<BulbOutlined style={{ fontSize: 20, color: '#faad14' }} />}
