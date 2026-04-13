@@ -200,6 +200,10 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
             session.page = None
             return session
 
+        # Dismiss privacy/agreement popups (e.g. Taobao "隐私保护" dialog)
+        await _dismiss_privacy_popup(page)
+        await asyncio.sleep(0.5)
+
         # Ensure we're on SMS login tab (for platforms that default elsewhere)
         await _switch_to_sms_mode(page, platform)
         await asyncio.sleep(1)
@@ -225,6 +229,8 @@ async def send_sms_code(account_id: str, phone: str) -> dict:
 
     try:
         page = session.page
+
+        await _dismiss_privacy_popup(page)
 
         # Find and fill phone input via Playwright locators (real interaction)
         phone_filled = await _fill_phone_input(page, phone)
@@ -633,6 +639,62 @@ def _check_login_success(url: str, platform: str) -> bool:
         ]):
             return True
     return False
+
+
+async def _dismiss_privacy_popup(page: Any):
+    """Dismiss privacy/agreement popups that block interaction (Taobao, XHS, etc.)."""
+    try:
+        clicked = await page.evaluate("""() => {
+            const keywords = ['同意', '我同意', '同意并继续', '我已阅读并同意', '接受',
+                              '我知道了', '我已了解', '确定', '知道了'];
+            // Check common popup containers
+            const selectors = [
+                '.dialog', '.modal', '.popup', '.overlay',
+                '[class*="dialog"]', '[class*="modal"]', '[class*="popup"]',
+                '[class*="Dialog"]', '[class*="Modal"]', '[class*="Popup"]',
+                '[class*="privacy"]', '[class*="Privacy"]',
+                '[class*="agreement"]', '[class*="Agreement"]',
+                '[class*="consent"]', '[role="dialog"]',
+            ];
+            for (const sel of selectors) {
+                const containers = document.querySelectorAll(sel);
+                for (const container of containers) {
+                    const rect = container.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+                    const buttons = container.querySelectorAll('button, a, div, span, [role="button"]');
+                    for (const btn of buttons) {
+                        const text = (btn.textContent || '').trim();
+                        for (const kw of keywords) {
+                            if (text === kw || (text.length < 15 && text.includes(kw))) {
+                                const btnRect = btn.getBoundingClientRect();
+                                if (btnRect.width > 20 && btnRect.height > 10) {
+                                    btn.click();
+                                    return `Clicked "${text}" in ${sel}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Fallback: scan all visible buttons for agree keywords
+            const allBtns = document.querySelectorAll('button, [role="button"]');
+            for (const btn of allBtns) {
+                const text = (btn.textContent || '').trim();
+                if ((text === '同意' || text === '我同意' || text === '确定') && text.length < 10) {
+                    const rect = btn.getBoundingClientRect();
+                    if (rect.width > 20 && rect.height > 10) {
+                        btn.click();
+                        return `Clicked fallback "${text}"`;
+                    }
+                }
+            }
+            return null;
+        }""")
+        if clicked:
+            logger.info(f"Privacy popup dismissed: {clicked}")
+            await asyncio.sleep(1)
+    except Exception as e:
+        logger.debug(f"Privacy popup dismiss attempt: {e}")
 
 
 async def _switch_to_sms_mode(page: Any, platform: str):

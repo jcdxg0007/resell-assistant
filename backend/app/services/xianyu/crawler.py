@@ -31,14 +31,50 @@ class XianyuCrawler:
         """Search Xianyu for a keyword, return list of product summaries."""
         page = await context.new_page()
         results = []
+        api_items: list[dict] = []
+
+        async def _capture_search_api(response):
+            """Intercept mtop search API responses for reliable data extraction."""
+            if "idlemtopsearch.pc.search" not in response.url:
+                return
+            try:
+                data = await response.json()
+                if data.get("ret", [""])[0].startswith("SUCCESS"):
+                    result_data = data.get("data", {})
+                    card_list = result_data.get("resultList", result_data.get("cardList", []))
+                    for card in card_list:
+                        item_data = card.get("data", card)
+                        item_id = item_data.get("id") or item_data.get("itemId")
+                        title = item_data.get("title", "")
+                        price_str = item_data.get("price") or item_data.get("soldPrice", "0")
+                        img = item_data.get("pic") or item_data.get("picUrl", "")
+                        want = int(item_data.get("wantNum", 0))
+                        parsed_price = self._parse_price(str(price_str))
+                        if item_id and title and parsed_price:
+                            api_items.append({
+                                "title": title,
+                                "price": parsed_price,
+                                "item_id": str(item_id),
+                                "url": f"https://www.goofish.com/item?id={item_id}",
+                                "image_url": img,
+                                "want_count": want,
+                            })
+            except Exception as e:
+                logger.debug(f"API intercept error: {e}")
+
+        page.on("response", _capture_search_api)
         try:
             url = self.SEARCH_URL.format(keyword=keyword)
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
             await _random_delay(2, 4)
-            await _human_scroll(page, times=5)
+            await _human_scroll(page, times=3)
+
+            if api_items:
+                logger.info(f"Got {len(api_items)} items from API intercept for '{keyword}'")
+                return api_items[:max_items]
 
             items = await page.query_selector_all('[class*="item-card"], [class*="ItemCard"], [class*="feed-item"]')
-            logger.info(f"Found {len(items)} raw items for keyword '{keyword}'")
+            logger.info(f"Found {len(items)} raw DOM items for keyword '{keyword}'")
 
             for item in items[:max_items]:
                 try:
@@ -53,8 +89,9 @@ class XianyuCrawler:
         except Exception as e:
             logger.error(f"Search failed for '{keyword}': {e}")
         finally:
+            page.remove_listener("response", _capture_search_api)
             await page.close()
-        return results
+        return results or api_items[:max_items]
 
     async def _extract_search_item(self, element) -> dict | None:
         """Extract product data from a search result element."""

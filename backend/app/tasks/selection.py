@@ -25,13 +25,46 @@ def run_async(coro):
         loop.close()
 
 
-async def _get_crawler_context(account_id: str | None = None):
-    """Get or create a Playwright context for crawling (uses a shared crawl identity)."""
+async def _get_crawler_context(account_id: str | None = None, platform: str = "xianyu"):
+    """Get a Playwright context with login session for crawling.
+
+    Tries to find an active account for the platform; falls back to anonymous context.
+    """
     if not browser_manager._browser:
         await browser_manager.start()
-    config = {"proxy_url": None}  # Crawling uses dynamic proxy, configured separately
-    ctx_id = account_id or "crawler_default"
-    return await browser_manager.get_context(ctx_id, config)
+
+    if account_id:
+        config = {"proxy_url": None}
+        return await browser_manager.get_context(account_id, config)
+
+    # Find the best logged-in account for this platform
+    try:
+        from app.models.system import Account
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Account)
+                .where(Account.platform == platform)
+                .where(Account.is_active == True)
+                .where(Account.session_status == "active")
+                .order_by(Account.health_score.desc())
+                .limit(1)
+            )
+            account = result.scalar_one_or_none()
+            if account:
+                config = {
+                    "proxy_url": account.proxy_url,
+                    "user_agent": account.user_agent,
+                    "viewport": account.viewport,
+                }
+                logger.info(f"Using logged-in account '{account.account_name}' for {platform} crawling")
+                return await browser_manager.get_context(str(account.id), config)
+            else:
+                logger.warning(f"No active logged-in {platform} account found, using anonymous context")
+    except Exception as e:
+        logger.error(f"Failed to find crawler account: {e}")
+
+    config = {"proxy_url": None}
+    return await browser_manager.get_context("crawler_default", config)
 
 
 @celery_app.task(name="app.tasks.selection.xianyu_price_monitor")
@@ -55,7 +88,7 @@ async def _xianyu_price_monitor():
 
         for product in products:
             try:
-                context = await _get_crawler_context()
+                context = await _get_crawler_context(platform="xianyu")
                 keyword = product.title[:20]
                 market_data = await xianyu_crawler.collect_market_data(context, keyword)
 
@@ -99,7 +132,7 @@ async def _xianyu_product_discovery():
     ]
 
     async with AsyncSessionLocal() as db:
-        context = await _get_crawler_context()
+        context = await _get_crawler_context(platform="xianyu")
         for keyword in discovery_keywords:
             try:
                 items = await xianyu_crawler.search_products(context, keyword, max_items=20)
@@ -244,8 +277,114 @@ def instant_search(keyword: str, platform: str = "xianyu"):
 
 
 async def _instant_search(keyword: str, platform: str):
-    if platform == "xianyu":
-        context = await _get_crawler_context()
-        market_data = await xianyu_crawler.collect_market_data(context, keyword)
+    if platform != "xianyu":
+        return {"error": f"Platform {platform} not yet supported"}
+
+    context = await _get_crawler_context(platform=platform)
+    market_data = await xianyu_crawler.collect_market_data(context, keyword)
+    items = market_data.get("items", [])
+    if not items:
+        logger.warning(f"Instant search '{keyword}': no items found")
         return market_data
-    return {"error": f"Platform {platform} not yet supported"}
+
+    async with AsyncSessionLocal() as db:
+        saved_product_ids = []
+        for item in items:
+            if not item.get("item_id"):
+                continue
+            existing = await db.execute(
+                select(Product).where(
+                    Product.source_platform == Platform.XIANYU,
+                    Product.source_id == item["item_id"],
+                )
+            )
+            product = existing.scalar_one_or_none()
+            if product:
+                product.price = item.get("price", product.price)
+                product.last_crawled_at = datetime.now(timezone.utc)
+            else:
+                product = Product(
+                    source_platform=Platform.XIANYU,
+                    source_url=item.get("url", ""),
+                    source_id=item["item_id"],
+                    title=item["title"],
+                    price=item["price"],
+                    image_urls=[item["image_url"]] if item.get("image_url") else None,
+                    category=keyword,
+                    sales_count=item.get("want_count", 0),
+                    last_crawled_at=datetime.now(timezone.utc),
+                )
+                db.add(product)
+
+            await db.flush()
+            saved_product_ids.append(str(product.id))
+
+        if saved_product_ids and market_data.get("active_listings", 0) > 0:
+            for pid in saved_product_ids:
+                md = XianyuMarketData(
+                    product_id=pid,
+                    keyword=keyword,
+                    active_listings=market_data["active_listings"],
+                    total_wants=market_data.get("total_wants", 0),
+                    price_min=market_data.get("price_min"),
+                    price_max=market_data.get("price_max"),
+                    price_avg=market_data.get("price_avg"),
+                    price_cv=market_data.get("price_cv"),
+                    top5_sales=market_data.get("top5_sales"),
+                    seller_distribution=market_data.get("seller_distribution"),
+                    captured_at=datetime.now(timezone.utc),
+                )
+                db.add(md)
+
+        await db.commit()
+        logger.info(
+            f"Instant search '{keyword}': saved {len(saved_product_ids)} products, "
+            f"market_data active_listings={market_data.get('active_listings', 0)}"
+        )
+
+        # Auto-score saved products
+        from app.services.selection.scoring import ScoringInput, calculate_xianyu_score
+
+        active_listings = market_data.get("active_listings", 0)
+        price_cv = market_data.get("price_cv", 0)
+        total_wants = market_data.get("total_wants", 0)
+        price_avg = market_data.get("price_avg", 0)
+
+        seller_dist = market_data.get("seller_distribution", {})
+        top1_ratio = 0.0
+        if seller_dist:
+            total_sellers = sum(seller_dist.values())
+            top1_count = max(seller_dist.values()) if seller_dist else 0
+            top1_ratio = (top1_count / total_sellers * 100) if total_sellers > 0 else 0
+
+        for pid in saved_product_ids:
+            try:
+                scoring_input = ScoringInput(
+                    active_listings=active_listings,
+                    price_cv=price_cv,
+                    total_wants=total_wants,
+                    top1_seller_ratio=top1_ratio,
+                    unit_price=price_avg or 0,
+                )
+                score_result = calculate_xianyu_score(scoring_input)
+                dim_dict = {
+                    d.name: {"score": d.score, "max": d.max_score, "label": d.label}
+                    for d in score_result.dimensions
+                }
+                from app.models.product import ProductScore
+                db_score = ProductScore(
+                    product_id=pid,
+                    score_type="xianyu_10d",
+                    total_score=score_result.total_score,
+                    dimension_scores=dim_dict,
+                    decision=score_result.decision,
+                    scored_at=datetime.now(timezone.utc),
+                )
+                db.add(db_score)
+            except Exception as e:
+                logger.error(f"Auto-score failed for {pid}: {e}")
+
+        await db.commit()
+
+    market_data["saved_products"] = len(saved_product_ids)
+    return market_data

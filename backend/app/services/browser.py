@@ -73,11 +73,13 @@ class BrowserManager:
 
     async def start(self):
         try:
+            import shutil
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=[
+
+            launch_kwargs: dict[str, Any] = {
+                "headless": True,
+                "args": [
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
@@ -85,7 +87,13 @@ class BrowserManager:
                     "--no-zygote",
                     "--disable-features=VizDisplayCompositor",
                 ],
-            )
+            }
+            system_chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+            if system_chromium:
+                launch_kwargs["executable_path"] = system_chromium
+                logger.info(f"Using system Chromium: {system_chromium}")
+
+            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
             logger.info("Playwright browser started")
         except ImportError:
             logger.warning("Playwright not installed, browser features disabled")
