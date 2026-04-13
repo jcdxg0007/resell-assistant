@@ -194,6 +194,7 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
         url = page.url.lower()
         if _check_login_success(url, platform):
             session.status = LoginStatus.SUCCESS
+            await _acquire_platform_cookies(page, platform)
             await browser_manager.save_state(account_id)
             logger.info(f"Account {account_id} already logged in to {platform}")
             await page.close()
@@ -299,8 +300,10 @@ async def submit_login_code(account_id: str, code: str) -> dict:
                 break
             if _check_login_success(url, session.platform):
                 session.status = LoginStatus.SUCCESS
+                # Navigate to target platform to acquire platform-specific cookies (SSO)
+                await _acquire_platform_cookies(page, session.platform)
                 await browser_manager.save_state(account_id)
-                logger.info(f"Account {account_id} login success!")
+                logger.info(f"Account {account_id} login success! (cookies saved with platform domains)")
                 try:
                     await page.close()
                 except Exception:
@@ -645,6 +648,32 @@ def _check_login_success(url: str, platform: str) -> bool:
         ]):
             return True
     return False
+
+
+PLATFORM_HOME_URLS = {
+    "xianyu": "https://www.goofish.com/",
+    "xiaohongshu": "https://creator.xiaohongshu.com/",
+    "douyin": "https://creator.douyin.com/",
+}
+
+
+async def _acquire_platform_cookies(page: Any, platform: str):
+    """After SSO login, visit the target platform to acquire its domain cookies."""
+    home_url = PLATFORM_HOME_URLS.get(platform)
+    if not home_url:
+        return
+    try:
+        current = page.url.lower()
+        target_domain = home_url.split("//")[1].rstrip("/")
+        if target_domain in current:
+            logger.info(f"Already on {target_domain}, cookies should be set")
+            return
+        logger.info(f"Navigating to {home_url} to acquire platform cookies...")
+        await page.goto(home_url, wait_until="domcontentloaded", timeout=15000)
+        await asyncio.sleep(3)
+        logger.info(f"Platform cookie acquisition done, URL: {page.url[:60]}")
+    except Exception as e:
+        logger.warning(f"Failed to acquire {platform} cookies: {e}")
 
 
 async def _dismiss_privacy_popup(page: Any, retries: int = 3):

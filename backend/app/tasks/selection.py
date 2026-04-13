@@ -25,46 +25,73 @@ def run_async(coro):
         loop.close()
 
 
-async def _get_crawler_context(account_id: str | None = None, platform: str = "xianyu"):
-    """Get a Playwright context with login session for crawling.
+def _find_active_account_sync(platform: str) -> dict | None:
+    """Find an active logged-in account and pre-cache its cookies to disk.
 
-    Tries to find an active account for the platform; falls back to anonymous context.
+    Uses a one-shot asyncpg connection with its own event loop.
+    Must be called from sync context (before run_async).
     """
+    import asyncpg
+    import json as _json
+    from pathlib import Path
+    from app.core.config import get_settings
+    settings = get_settings()
+    raw_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+
+    async def _query():
+        conn = await asyncpg.connect(raw_url)
+        try:
+            row = await conn.fetchrow(
+                "SELECT id, account_name, proxy_url, user_agent, viewport, cookies_data "
+                "FROM accounts "
+                "WHERE platform = $1 AND is_active = true AND session_status = 'active' "
+                "ORDER BY health_score DESC LIMIT 1",
+                platform,
+            )
+            if not row:
+                return None
+            vp = row["viewport"]
+            if isinstance(vp, str):
+                vp = _json.loads(vp)
+            account_id = str(row["id"])
+
+            # Pre-write cookies to file so browser_manager.get_context can pick them up
+            cookies_data = row["cookies_data"]
+            if cookies_data:
+                states_dir = Path(__file__).parent.parent.parent / "playwright_states"
+                states_dir.mkdir(exist_ok=True)
+                state_file = states_dir / f"{account_id}.json"
+                state_file.write_text(cookies_data)
+                logger.info(f"Pre-cached cookies to {state_file.name} for '{row['account_name']}'")
+
+            return {
+                "id": account_id,
+                "account_name": row["account_name"],
+                "proxy_url": row["proxy_url"],
+                "user_agent": row["user_agent"],
+                "viewport": vp,
+            }
+        finally:
+            await conn.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_query())
+    except Exception as e:
+        logger.error(f"Sync account lookup failed: {e}")
+        return None
+    finally:
+        loop.close()
+
+
+async def _get_crawler_context(account_id: str | None = None, account_config: dict | None = None):
+    """Get a Playwright context for crawling."""
     if not browser_manager._browser:
         await browser_manager.start()
 
-    if account_id:
-        config = {"proxy_url": None}
-        return await browser_manager.get_context(account_id, config)
-
-    # Find the best logged-in account for this platform
-    try:
-        from app.models.system import Account
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(Account)
-                .where(Account.platform == platform)
-                .where(Account.is_active == True)
-                .where(Account.session_status == "active")
-                .order_by(Account.health_score.desc())
-                .limit(1)
-            )
-            account = result.scalar_one_or_none()
-            if account:
-                config = {
-                    "proxy_url": account.proxy_url,
-                    "user_agent": account.user_agent,
-                    "viewport": account.viewport,
-                }
-                logger.info(f"Using logged-in account '{account.account_name}' for {platform} crawling")
-                return await browser_manager.get_context(str(account.id), config)
-            else:
-                logger.warning(f"No active logged-in {platform} account found, using anonymous context")
-    except Exception as e:
-        logger.error(f"Failed to find crawler account: {e}")
-
-    config = {"proxy_url": None}
-    return await browser_manager.get_context("crawler_default", config)
+    config = account_config or {"proxy_url": None}
+    ctx_id = account_id or "crawler_default"
+    return await browser_manager.get_context(ctx_id, config)
 
 
 @celery_app.task(name="app.tasks.selection.xianyu_price_monitor")
@@ -88,7 +115,7 @@ async def _xianyu_price_monitor():
 
         for product in products:
             try:
-                context = await _get_crawler_context(platform="xianyu")
+                context = await _get_crawler_context()
                 keyword = product.title[:20]
                 market_data = await xianyu_crawler.collect_market_data(context, keyword)
 
@@ -132,7 +159,7 @@ async def _xianyu_product_discovery():
     ]
 
     async with AsyncSessionLocal() as db:
-        context = await _get_crawler_context(platform="xianyu")
+        context = await _get_crawler_context()
         for keyword in discovery_keywords:
             try:
                 items = await xianyu_crawler.search_products(context, keyword, max_items=20)
@@ -273,14 +300,30 @@ def source_stock_check():
 def instant_search(keyword: str, platform: str = "xianyu"):
     """User-triggered instant search on a platform."""
     logger.info(f"Instant search: '{keyword}' on {platform}")
-    return run_async(_instant_search(keyword, platform))
+    # Look up logged-in account in sync context (own event loop, no conflict)
+    account = _find_active_account_sync(platform)
+    if account:
+        logger.info(f"Will use account '{account['account_name']}' for search")
+    else:
+        logger.warning(f"No active {platform} account, search may return empty results")
+    return run_async(_instant_search(keyword, platform, account))
 
 
-async def _instant_search(keyword: str, platform: str):
+async def _instant_search(keyword: str, platform: str, account: dict | None = None):
     if platform != "xianyu":
         return {"error": f"Platform {platform} not yet supported"}
 
-    context = await _get_crawler_context(platform=platform)
+    if account:
+        context = await _get_crawler_context(
+            account_id=account["id"],
+            account_config={
+                "proxy_url": account.get("proxy_url"),
+                "user_agent": account.get("user_agent"),
+                "viewport": account.get("viewport"),
+            },
+        )
+    else:
+        context = await _get_crawler_context()
     market_data = await xianyu_crawler.collect_market_data(context, keyword)
     items = market_data.get("items", [])
     if not items:
