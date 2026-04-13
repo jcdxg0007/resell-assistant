@@ -250,6 +250,11 @@ async def send_sms_code(account_id: str, phone: str) -> dict:
             return {"success": False, "error": "未找到「发送验证码」按钮", "screenshot": session.screenshot_b64}
 
         await asyncio.sleep(2)
+
+        # Taobao shows privacy agreement popup AFTER clicking send code
+        await _dismiss_privacy_popup(page, retries=3)
+
+        await asyncio.sleep(1)
         screenshot = await page.screenshot(type="png", full_page=False)
         session.screenshot_b64 = base64.b64encode(screenshot).decode()
         session.status = LoginStatus.CODE_SENT
@@ -643,18 +648,22 @@ def _check_login_success(url: str, platform: str) -> bool:
 
 
 async def _dismiss_privacy_popup(page: Any, retries: int = 3):
-    """Dismiss privacy/agreement popups using Playwright native clicks (more reliable)."""
+    """Dismiss privacy/agreement popups (Taobao login-dialog, XHS, etc.)."""
     for attempt in range(retries):
         dismissed = False
 
-        # Strategy 1: Playwright locator — exact text match with native mouse click
-        agree_texts = ["同意", "我同意", "同意并继续", "接受", "确定", "知道了", "我知道了"]
-        for text in agree_texts:
+        # Strategy 1: Exact CSS selector for Taobao's known popup button
+        exact_selectors = [
+            "button.dialog-btn-ok",
+            ".login-dialog-footer button.dialog-btn-ok",
+            ".login-dialog button:last-child",
+        ]
+        for sel in exact_selectors:
             try:
-                loc = page.get_by_text(text, exact=True)
-                if await loc.first.is_visible(timeout=500):
-                    await loc.first.click(force=True)
-                    logger.info(f"Privacy popup dismissed via get_by_text('{text}') [attempt {attempt+1}]")
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=800):
+                    await loc.click(force=True)
+                    logger.info(f"Privacy popup dismissed via '{sel}' [attempt {attempt+1}]")
                     dismissed = True
                     break
             except Exception:
@@ -664,10 +673,10 @@ async def _dismiss_privacy_popup(page: Any, retries: int = 3):
             await asyncio.sleep(1)
             continue
 
-        # Strategy 2: Playwright role-based button click
-        for text in agree_texts:
+        # Strategy 2: Playwright role button with exact text
+        for text in ["同意", "确定", "接受", "知道了", "我同意"]:
             try:
-                loc = page.get_by_role("button", name=text)
+                loc = page.get_by_role("button", name=text, exact=True)
                 if await loc.first.is_visible(timeout=500):
                     await loc.first.click(force=True)
                     logger.info(f"Privacy popup dismissed via role button '{text}' [attempt {attempt+1}]")
@@ -680,52 +689,30 @@ async def _dismiss_privacy_popup(page: Any, retries: int = 3):
             await asyncio.sleep(1)
             continue
 
-        # Strategy 3: CSS selector targeting common popup agree buttons
-        css_tries = [
-            'button:has-text("同意")',
-            'a:has-text("同意")',
-            'div:has-text("同意"):not(:has(div:has-text("同意")))',
-            '[class*="dialog"] button >> text="同意"',
-            '[class*="modal"] button >> text="同意"',
-            '[role="dialog"] button >> text="同意"',
-        ]
-        for sel in css_tries:
-            try:
-                loc = page.locator(sel).first
-                if await loc.is_visible(timeout=500):
-                    await loc.click(force=True)
-                    logger.info(f"Privacy popup dismissed via CSS '{sel}' [attempt {attempt+1}]")
-                    dismissed = True
-                    break
-            except Exception:
-                continue
-
-        if dismissed:
-            await asyncio.sleep(1)
-            continue
-
-        # Strategy 4: Find button coordinates via JS, then Playwright mouse.click
+        # Strategy 3: JS coords → Playwright mouse.click (bypasses all framework issues)
         try:
             coords = await page.evaluate("""() => {
+                // Look for Taobao's specific dialog button first
+                const okBtn = document.querySelector('button.dialog-btn-ok');
+                if (okBtn) {
+                    const rect = okBtn.getBoundingClientRect();
+                    if (rect.width > 0) return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: okBtn.textContent.trim() };
+                }
+                // Fallback: any visible button with agree-like text
                 const keywords = ['同意', '确定', '接受', '知道了'];
-                const allEls = document.querySelectorAll('button, a, div, span, [role="button"]');
-                for (const el of allEls) {
-                    const text = (el.textContent || '').trim();
-                    if (text.length > 10) continue;
-                    for (const kw of keywords) {
-                        if (text === kw) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 20 && rect.height > 10 && rect.width < 200) {
-                                return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: text };
-                            }
-                        }
+                for (const btn of document.querySelectorAll('button')) {
+                    const text = btn.textContent.trim();
+                    if (keywords.includes(text)) {
+                        const rect = btn.getBoundingClientRect();
+                        if (rect.width > 20 && rect.height > 10)
+                            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text };
                     }
                 }
                 return null;
             }""")
             if coords:
                 await page.mouse.click(coords['x'], coords['y'])
-                logger.info(f"Privacy popup dismissed via mouse.click({coords['x']}, {coords['y']}) text='{coords['text']}' [attempt {attempt+1}]")
+                logger.info(f"Privacy popup dismissed via mouse.click({coords['x']:.0f}, {coords['y']:.0f}) '{coords['text']}' [attempt {attempt+1}]")
                 dismissed = True
                 await asyncio.sleep(1)
         except Exception as e:
