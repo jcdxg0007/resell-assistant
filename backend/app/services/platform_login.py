@@ -201,8 +201,9 @@ async def start_login(account_id: str, platform: str, account_config: dict) -> L
             return session
 
         # Dismiss privacy/agreement popups (e.g. Taobao "隐私保护" dialog)
-        await _dismiss_privacy_popup(page)
-        await asyncio.sleep(0.5)
+        # Wait extra for popup to appear (often delayed by JS framework)
+        await asyncio.sleep(2)
+        await _dismiss_privacy_popup(page, retries=3)
 
         # Ensure we're on SMS login tab (for platforms that default elsewhere)
         await _switch_to_sms_mode(page, platform)
@@ -641,60 +642,100 @@ def _check_login_success(url: str, platform: str) -> bool:
     return False
 
 
-async def _dismiss_privacy_popup(page: Any):
-    """Dismiss privacy/agreement popups that block interaction (Taobao, XHS, etc.)."""
-    try:
-        clicked = await page.evaluate("""() => {
-            const keywords = ['同意', '我同意', '同意并继续', '我已阅读并同意', '接受',
-                              '我知道了', '我已了解', '确定', '知道了'];
-            // Check common popup containers
-            const selectors = [
-                '.dialog', '.modal', '.popup', '.overlay',
-                '[class*="dialog"]', '[class*="modal"]', '[class*="popup"]',
-                '[class*="Dialog"]', '[class*="Modal"]', '[class*="Popup"]',
-                '[class*="privacy"]', '[class*="Privacy"]',
-                '[class*="agreement"]', '[class*="Agreement"]',
-                '[class*="consent"]', '[role="dialog"]',
-            ];
-            for (const sel of selectors) {
-                const containers = document.querySelectorAll(sel);
-                for (const container of containers) {
-                    const rect = container.getBoundingClientRect();
-                    if (rect.width <= 0 || rect.height <= 0) continue;
-                    const buttons = container.querySelectorAll('button, a, div, span, [role="button"]');
-                    for (const btn of buttons) {
-                        const text = (btn.textContent || '').trim();
-                        for (const kw of keywords) {
-                            if (text === kw || (text.length < 15 && text.includes(kw))) {
-                                const btnRect = btn.getBoundingClientRect();
-                                if (btnRect.width > 20 && btnRect.height > 10) {
-                                    btn.click();
-                                    return `Clicked "${text}" in ${sel}`;
-                                }
+async def _dismiss_privacy_popup(page: Any, retries: int = 3):
+    """Dismiss privacy/agreement popups using Playwright native clicks (more reliable)."""
+    for attempt in range(retries):
+        dismissed = False
+
+        # Strategy 1: Playwright locator — exact text match with native mouse click
+        agree_texts = ["同意", "我同意", "同意并继续", "接受", "确定", "知道了", "我知道了"]
+        for text in agree_texts:
+            try:
+                loc = page.get_by_text(text, exact=True)
+                if await loc.first.is_visible(timeout=500):
+                    await loc.first.click(force=True)
+                    logger.info(f"Privacy popup dismissed via get_by_text('{text}') [attempt {attempt+1}]")
+                    dismissed = True
+                    break
+            except Exception:
+                continue
+
+        if dismissed:
+            await asyncio.sleep(1)
+            continue
+
+        # Strategy 2: Playwright role-based button click
+        for text in agree_texts:
+            try:
+                loc = page.get_by_role("button", name=text)
+                if await loc.first.is_visible(timeout=500):
+                    await loc.first.click(force=True)
+                    logger.info(f"Privacy popup dismissed via role button '{text}' [attempt {attempt+1}]")
+                    dismissed = True
+                    break
+            except Exception:
+                continue
+
+        if dismissed:
+            await asyncio.sleep(1)
+            continue
+
+        # Strategy 3: CSS selector targeting common popup agree buttons
+        css_tries = [
+            'button:has-text("同意")',
+            'a:has-text("同意")',
+            'div:has-text("同意"):not(:has(div:has-text("同意")))',
+            '[class*="dialog"] button >> text="同意"',
+            '[class*="modal"] button >> text="同意"',
+            '[role="dialog"] button >> text="同意"',
+        ]
+        for sel in css_tries:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=500):
+                    await loc.click(force=True)
+                    logger.info(f"Privacy popup dismissed via CSS '{sel}' [attempt {attempt+1}]")
+                    dismissed = True
+                    break
+            except Exception:
+                continue
+
+        if dismissed:
+            await asyncio.sleep(1)
+            continue
+
+        # Strategy 4: Find button coordinates via JS, then Playwright mouse.click
+        try:
+            coords = await page.evaluate("""() => {
+                const keywords = ['同意', '确定', '接受', '知道了'];
+                const allEls = document.querySelectorAll('button, a, div, span, [role="button"]');
+                for (const el of allEls) {
+                    const text = (el.textContent || '').trim();
+                    if (text.length > 10) continue;
+                    for (const kw of keywords) {
+                        if (text === kw) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 20 && rect.height > 10 && rect.width < 200) {
+                                return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, text: text };
                             }
                         }
                     }
                 }
-            }
-            // Fallback: scan all visible buttons for agree keywords
-            const allBtns = document.querySelectorAll('button, [role="button"]');
-            for (const btn of allBtns) {
-                const text = (btn.textContent || '').trim();
-                if ((text === '同意' || text === '我同意' || text === '确定') && text.length < 10) {
-                    const rect = btn.getBoundingClientRect();
-                    if (rect.width > 20 && rect.height > 10) {
-                        btn.click();
-                        return `Clicked fallback "${text}"`;
-                    }
-                }
-            }
-            return null;
-        }""")
-        if clicked:
-            logger.info(f"Privacy popup dismissed: {clicked}")
-            await asyncio.sleep(1)
-    except Exception as e:
-        logger.debug(f"Privacy popup dismiss attempt: {e}")
+                return null;
+            }""")
+            if coords:
+                await page.mouse.click(coords['x'], coords['y'])
+                logger.info(f"Privacy popup dismissed via mouse.click({coords['x']}, {coords['y']}) text='{coords['text']}' [attempt {attempt+1}]")
+                dismissed = True
+                await asyncio.sleep(1)
+        except Exception as e:
+            logger.debug(f"Privacy popup coords click failed: {e}")
+
+        if not dismissed:
+            if attempt < retries - 1:
+                await asyncio.sleep(1)
+            else:
+                logger.debug("No privacy popup found or all strategies failed")
 
 
 async def _switch_to_sms_mode(page: Any, platform: str):
