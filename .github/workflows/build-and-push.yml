@@ -91,19 +91,38 @@ jobs:
     needs: [changes, build-backend, build-frontend]
     if: always() && !failure() && !cancelled()
     steps:
-      - name: Restart Sealos Deployments
+      - name: Deploy to Sealos
         run: |
+          SHA="${{ github.sha }}"
           NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          for APP in backend celery frontend; do
-            echo "Restarting $APP..."
+          IMG_BASE="${{ env.REGISTRY }}/${{ env.NAMESPACE }}"
+
+          deploy_app() {
+            local APP=$1
+            local NEEDS_BUILD=$2
+            echo "--- Deploying $APP ---"
+            if [ "$NEEDS_BUILD" = "true" ]; then
+              echo "Updating image to $IMG_BASE/$APP:$SHA"
+              PATCH="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}},\"spec\":{\"containers\":[{\"name\":\"$APP\",\"image\":\"$IMG_BASE/$APP:$SHA\",\"imagePullPolicy\":\"Always\"}]}}}}"
+            else
+              echo "Restarting only (no new build)"
+              PATCH="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}}}}}"
+            fi
             STATUS=$(curl -sk -o /dev/null -w "%{http_code}" -X PATCH \
               -H "Authorization: Bearer ${{ secrets.KUBE_TOKEN }}" \
               -H "Content-Type: application/strategic-merge-patch+json" \
               "${{ env.KUBE_SERVER }}/apis/apps/v1/namespaces/${{ env.KUBE_NS }}/deployments/$APP" \
-              -d "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}}}}}")
+              -d "$PATCH")
             if [ "$STATUS" = "200" ]; then
-              echo "✅ $APP restarted successfully"
+              echo "✅ $APP deployed successfully"
             else
-              echo "❌ $APP restart failed (HTTP $STATUS)"
+              echo "❌ $APP deploy failed (HTTP $STATUS)"
             fi
-          done
+          }
+
+          BACKEND_CHANGED="${{ needs.changes.outputs.backend }}"
+          FRONTEND_CHANGED="${{ needs.changes.outputs.frontend }}"
+
+          deploy_app "backend"  "$BACKEND_CHANGED"
+          deploy_app "celery"   "$BACKEND_CHANGED"
+          deploy_app "frontend" "$FRONTEND_CHANGED"
