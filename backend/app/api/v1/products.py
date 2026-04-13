@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +10,21 @@ from app.models.system import User
 from app.schemas.product import ProductOut
 
 router = APIRouter()
+
+
+class SearchRequest(BaseModel):
+    keyword: str
+    platform: str = "xianyu"
+
+
+@router.post("/search", summary="提交搜索任务")
+async def search_products(
+    req: SearchRequest,
+    user: User = Depends(get_current_user),
+):
+    from app.tasks.selection import instant_search
+    instant_search.delay(req.keyword, req.platform)
+    return {"message": "搜索任务已提交", "keyword": req.keyword, "platform": req.platform}
 
 
 @router.get("/", summary="商品列表")

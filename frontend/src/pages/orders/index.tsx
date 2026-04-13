@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Table, Card, Button, Space, Tag, Row, Col, Statistic,
-  Modal, Descriptions, message, Select, Input, Tooltip, Badge,
+  Modal, Descriptions, message, Select, Input, Tooltip, Badge, Alert,
 } from 'antd';
 import {
   ReloadOutlined, ExclamationCircleOutlined,
-  DollarOutlined,
+  DollarOutlined, CopyOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -30,7 +30,9 @@ interface OrderItem {
   sale_platform: string;
   sale_order_id: string;
   buyer_name: string;
+  buyer_phone: string | null;
   buyer_address: string;
+  buyer_note: string | null;
   sale_price: number;
   platform_fee: number;
   purchase_cost: number | null;
@@ -183,11 +185,11 @@ const Orders: React.FC = () => {
       render: (t: string) => t ? new Date(t).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-',
     },
     {
-      title: '操作', width: 150,
+      title: '操作', width: 160,
       render: (_: unknown, record: OrderItem) => (
-        <Space size="small">
+        <Space size="small" wrap>
           <Button size="small" onClick={() => { setDetailOrder(record); setDetailVisible(true); }}>详情</Button>
-          {record.status === 'error' && (
+          {['pending', 'error'].includes(record.status) && (
             <Button size="small" type="primary" onClick={() => { setDetailOrder(record); setManualVisible(true); }}>手动采购</Button>
           )}
           {['purchased', 'shipped', 'delivered'].includes(record.status) && (
@@ -234,31 +236,80 @@ const Orders: React.FC = () => {
           pagination={{ current: page, total, pageSize: 20, onChange: (p) => fetchOrders(p), showTotal: (t) => `共 ${t} 单` }}
           scroll={{ x: 1100 }}
           locale={{ emptyText: '暂无订单数据' }}
+          rowClassName={(record) => record.status === 'pending' ? 'ant-table-row-pending' : ''}
         />
       </Card>
 
       <Modal title="订单详情" open={detailVisible} onCancel={() => setDetailVisible(false)} footer={null} width={640}>
         {detailOrder && (
-          <Descriptions column={2} bordered size="small">
-            <Descriptions.Item label="订单号" span={2}>{detailOrder.sale_order_id}</Descriptions.Item>
-            <Descriptions.Item label="售价">¥{detailOrder.sale_price}</Descriptions.Item>
-            <Descriptions.Item label="成本">{detailOrder.purchase_cost != null ? `¥${detailOrder.purchase_cost}` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="手续费">¥{detailOrder.platform_fee}</Descriptions.Item>
-            <Descriptions.Item label="利润">{detailOrder.actual_profit != null ? `¥${detailOrder.actual_profit}` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="买家">{detailOrder.buyer_name}</Descriptions.Item>
-            <Descriptions.Item label="地址">{detailOrder.buyer_address}</Descriptions.Item>
-            <Descriptions.Item label="源平台">{detailOrder.source_platform || '-'}</Descriptions.Item>
-            <Descriptions.Item label="源订单号">{detailOrder.source_order_id || '-'}</Descriptions.Item>
-            <Descriptions.Item label="状态" span={2}>
-              <Tag color={STATUS_MAP[detailOrder.status]?.color}>{STATUS_MAP[detailOrder.status]?.label}</Tag>
-              {detailOrder.error_message && <Text type="danger" style={{ marginLeft: 8 }}>{detailOrder.error_message}</Text>}
-            </Descriptions.Item>
-            {detailOrder.logistics?.map((l) => (
-              <Descriptions.Item key={l.id} label={l.direction === 'forward' ? '发货物流' : '退货物流'} span={2}>
-                {l.carrier} {l.tracking_number} ({l.synced_to_sale_platform ? '已同步' : '待同步'})
+          <>
+            {detailOrder.status === 'pending' && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="此订单待采购"
+                description="请手动在货源平台下单，然后点击「手动采购」录入采购信息"
+                action={
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={() => { setManualVisible(true); }}
+                  >
+                    手动采购
+                  </Button>
+                }
+              />
+            )}
+            <Descriptions column={2} bordered size="small">
+              <Descriptions.Item label="订单号" span={2}>
+                <Text copyable>{detailOrder.sale_order_id}</Text>
               </Descriptions.Item>
-            ))}
-          </Descriptions>
+              <Descriptions.Item label="售价">¥{detailOrder.sale_price}</Descriptions.Item>
+              <Descriptions.Item label="成本">{detailOrder.purchase_cost != null ? `¥${detailOrder.purchase_cost}` : '-'}</Descriptions.Item>
+              <Descriptions.Item label="手续费">¥{detailOrder.platform_fee}</Descriptions.Item>
+              <Descriptions.Item label="利润">{detailOrder.actual_profit != null ? `¥${detailOrder.actual_profit}` : '-'}</Descriptions.Item>
+              <Descriptions.Item label="买家">{detailOrder.buyer_name}</Descriptions.Item>
+              <Descriptions.Item label="手机">
+                {detailOrder.buyer_phone ? <Text copyable>{detailOrder.buyer_phone}</Text> : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="地址" span={2}>
+                {detailOrder.buyer_address ? (
+                  <Space>
+                    <span>{detailOrder.buyer_address}</span>
+                    <Tooltip title="复制完整收货信息">
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<CopyOutlined />}
+                        onClick={() => {
+                          const info = [detailOrder.buyer_name, detailOrder.buyer_phone, detailOrder.buyer_address].filter(Boolean).join(' ');
+                          navigator.clipboard.writeText(info);
+                          message.success('收货信息已复制');
+                        }}
+                      />
+                    </Tooltip>
+                  </Space>
+                ) : '-'}
+              </Descriptions.Item>
+              {detailOrder.buyer_note && (
+                <Descriptions.Item label="买家留言" span={2}>{detailOrder.buyer_note}</Descriptions.Item>
+              )}
+              <Descriptions.Item label="源平台">{detailOrder.source_platform || '-'}</Descriptions.Item>
+              <Descriptions.Item label="源订单号">
+                {detailOrder.source_order_id ? <Text copyable>{detailOrder.source_order_id}</Text> : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="状态" span={2}>
+                <Tag color={STATUS_MAP[detailOrder.status]?.color}>{STATUS_MAP[detailOrder.status]?.label}</Tag>
+                {detailOrder.error_message && <Text type="danger" style={{ marginLeft: 8 }}>{detailOrder.error_message}</Text>}
+              </Descriptions.Item>
+              {detailOrder.logistics?.map((l) => (
+                <Descriptions.Item key={l.id} label={l.direction === 'forward' ? '发货物流' : '退货物流'} span={2}>
+                  {l.carrier} {l.tracking_number} ({l.synced_to_sale_platform ? '已同步' : '待同步'})
+                </Descriptions.Item>
+              ))}
+            </Descriptions>
+          </>
         )}
       </Modal>
 

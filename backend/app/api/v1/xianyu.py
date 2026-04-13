@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +11,29 @@ from app.models.xianyu import XianyuListing, XianyuMarketData
 from app.models.system import User
 
 router = APIRouter()
+
+
+def _listing_to_dict(l: XianyuListing) -> dict:
+    return {
+        "id": str(l.id),
+        "product_id": str(l.product_id),
+        "account_id": str(l.account_id),
+        "xianyu_item_id": l.xianyu_item_id,
+        "title": l.title,
+        "description": l.description,
+        "price": l.price,
+        "original_cost": l.original_cost,
+        "expected_profit": l.expected_profit,
+        "image_paths": l.image_paths,
+        "status": l.status,
+        "error_message": l.error_message,
+        "views": l.views,
+        "wants": l.wants,
+        "chats": l.chats,
+        "published_at": l.published_at.isoformat() if l.published_at else None,
+        "last_refreshed_at": l.last_refreshed_at.isoformat() if l.last_refreshed_at else None,
+        "created_at": l.created_at.isoformat() if hasattr(l, "created_at") and l.created_at else None,
+    }
 
 
 @router.get("/listings", summary="闲鱼发布列表")
@@ -37,58 +61,54 @@ async def list_listings(
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [
-            {
-                "id": str(l.id),
-                "title": l.title,
-                "price": l.price,
-                "original_cost": l.original_cost,
-                "expected_profit": l.expected_profit,
-                "status": l.status,
-                "views": l.views,
-                "wants": l.wants,
-                "chats": l.chats,
-                "published_at": l.published_at.isoformat() if l.published_at else None,
-                "last_refreshed_at": l.last_refreshed_at.isoformat() if l.last_refreshed_at else None,
-            }
-            for l in listings
-        ],
+        "items": [_listing_to_dict(l) for l in listings],
     }
+
+
+class CreateListingRequest(BaseModel):
+    product_id: str
+    account_id: str
+    title: str
+    description: str
+    price: float
+    original_cost: float
+    image_paths: list[str] | None = None
 
 
 @router.post("/listings", summary="创建闲鱼草稿")
 async def create_listing(
-    product_id: str,
-    account_id: str,
-    title: str,
-    description: str,
-    price: float,
-    original_cost: float,
+    req: CreateListingRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     listing = XianyuListing(
-        product_id=product_id,
-        account_id=account_id,
-        title=title,
-        description=description,
-        price=price,
-        original_cost=original_cost,
-        expected_profit=round(price - original_cost - price * 0.006, 2),
+        product_id=req.product_id,
+        account_id=req.account_id,
+        title=req.title,
+        description=req.description,
+        price=req.price,
+        original_cost=req.original_cost,
+        expected_profit=round(req.price - req.original_cost - req.price * 0.006, 2),
+        image_paths=req.image_paths,
         status="draft",
     )
     db.add(listing)
     await db.commit()
     await db.refresh(listing)
-    return {"id": str(listing.id), "status": "draft", "message": "草稿已创建"}
+    return _listing_to_dict(listing)
+
+
+class UpdateListingRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    price: float | None = None
+    image_paths: list[str] | None = None
 
 
 @router.put("/listings/{listing_id}", summary="更新闲鱼草稿")
 async def update_listing(
     listing_id: str,
-    title: str | None = None,
-    description: str | None = None,
-    price: float | None = None,
+    req: UpdateListingRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -96,13 +116,15 @@ async def update_listing(
     listing = result.scalar_one_or_none()
     if not listing:
         raise HTTPException(status_code=404, detail="发布记录不存在")
-    if title:
-        listing.title = title
-    if description:
-        listing.description = description
-    if price:
-        listing.price = price
-        listing.expected_profit = round(price - listing.original_cost - price * 0.006, 2)
+    if req.title is not None:
+        listing.title = req.title
+    if req.description is not None:
+        listing.description = req.description
+    if req.price is not None:
+        listing.price = req.price
+        listing.expected_profit = round(req.price - listing.original_cost - req.price * 0.006, 2)
+    if req.image_paths is not None:
+        listing.image_paths = req.image_paths
     await db.commit()
     return {"message": "已更新"}
 
@@ -121,9 +143,12 @@ async def publish_listing(
         raise HTTPException(status_code=400, detail=f"当前状态 {listing.status} 不允许发布")
 
     listing.status = "pending_review"
+    listing.error_message = None
     await db.commit()
 
-    # TODO: Trigger Celery task for Playwright-based publishing
+    from app.tasks.publish import execute_publish
+    execute_publish.delay(str(listing.id))
+
     return {"message": "已加入发布队列", "status": "pending_review"}
 
 
@@ -140,8 +165,29 @@ async def batch_refresh(
         )
     )
     listings = result.scalars().all()
-    # TODO: Trigger Celery task for batch refresh via Playwright
+    if not listings:
+        raise HTTPException(status_code=400, detail="没有可擦亮的商品")
+
+    from app.tasks.publish import execute_single_refresh
+    for listing in listings:
+        execute_single_refresh.delay(str(listing.id))
+
     return {"message": f"已加入擦亮队列: {len(listings)}个商品"}
+
+
+@router.delete("/listings/{listing_id}", summary="删除/下架闲鱼商品")
+async def remove_listing(
+    listing_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(XianyuListing).where(XianyuListing.id == listing_id))
+    listing = result.scalar_one_or_none()
+    if not listing:
+        raise HTTPException(status_code=404, detail="发布记录不存在")
+    listing.status = "removed"
+    await db.commit()
+    return {"message": "已下架"}
 
 
 @router.get("/market/{product_id}", summary="闲鱼市场数据")

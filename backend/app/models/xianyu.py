@@ -29,6 +29,8 @@ class XianyuListing(Base, UUIDMixin, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     views: Mapped[int] = mapped_column(Integer, default=0)
     wants: Mapped[int] = mapped_column(Integer, default=0)
     chats: Mapped[int] = mapped_column(Integer, default=0)

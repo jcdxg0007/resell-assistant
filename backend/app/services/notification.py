@@ -22,19 +22,42 @@ settings = get_settings()
 class NotificationService:
     """Dual-channel notification: DingTalk + Email."""
 
+    async def _get_dingtalk_config(self) -> tuple[str, str]:
+        """Get DingTalk webhook config: prefer DB settings, fall back to env."""
+        webhook_url = settings.DINGTALK_WEBHOOK_URL
+        secret = settings.DINGTALK_SECRET
+        try:
+            from sqlalchemy import select
+            from app.core.database import AsyncSessionLocal
+            from app.models.system import SystemConfig
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(SystemConfig).where(SystemConfig.key.in_(["dingtalk_webhook_url", "dingtalk_secret"]))
+                )
+                for row in result.scalars().all():
+                    if row.key == "dingtalk_webhook_url" and row.value:
+                        webhook_url = row.value
+                    elif row.key == "dingtalk_secret" and row.value:
+                        secret = row.value
+        except Exception:
+            pass
+        return webhook_url, secret
+
     async def send_dingtalk(self, title: str, content: str, at_all: bool = False) -> bool:
         """Send a message via DingTalk custom robot webhook."""
-        if not settings.DINGTALK_WEBHOOK_URL:
+        webhook_url, secret = await self._get_dingtalk_config()
+
+        if not webhook_url:
             logger.debug("DingTalk webhook not configured, skipping notification")
             return False
 
-        url = settings.DINGTALK_WEBHOOK_URL
+        url = webhook_url
 
-        if settings.DINGTALK_SECRET:
+        if secret:
             timestamp = str(round(time.time() * 1000))
-            string_to_sign = f"{timestamp}\n{settings.DINGTALK_SECRET}"
+            string_to_sign = f"{timestamp}\n{secret}"
             hmac_code = hmac.new(
-                settings.DINGTALK_SECRET.encode("utf-8"),
+                secret.encode("utf-8"),
                 string_to_sign.encode("utf-8"),
                 digestmod=hashlib.sha256,
             ).digest()
@@ -126,15 +149,60 @@ class NotificationService:
         return results
 
     async def notify_new_order(self, order_data: dict):
-        """Notification template for new orders."""
+        """Notification for new orders (auto mode — brief)."""
         content = (
             f"**平台**: {order_data.get('sale_platform', '闲鱼')}\n"
             f"**商品**: {order_data.get('item_title', '')}\n"
             f"**金额**: ¥{order_data.get('sale_price', 0)}\n"
-            f"**买家**: {order_data.get('buyer_name', '')}\n"
-            f"**地址**: {order_data.get('buyer_address', '')[:50]}..."
+            f"**买家**: {order_data.get('buyer_name', '')}\n\n"
+            f"系统正在自动采购..."
         )
-        await self.notify("新订单", content, level="info")
+        await self.notify("新订单 - 自动采购中", content, level="info")
+
+    async def notify_new_order_manual(self, order_data: dict):
+        """Notification for new orders (manual mode — detailed for hand-purchasing)."""
+        sale_price = order_data.get("sale_price", 0)
+        source_price = order_data.get("source_price", 0)
+        fee = round(sale_price * 0.006, 2)
+        profit = round(sale_price - fee - source_price, 2) if source_price else None
+
+        buyer_name = order_data.get("buyer_name", "")
+        buyer_phone = order_data.get("buyer_phone", "")
+        buyer_address = order_data.get("buyer_address", "")
+
+        lines = [
+            f"**商品**: {order_data.get('item_title', '')}",
+            f"**售价**: ¥{sale_price}",
+        ]
+
+        if source_price:
+            lines.append(f"**采购价**: ¥{source_price}")
+        if profit is not None:
+            lines.append(f"**预估利润**: ¥{profit}")
+
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("**收货信息（长按复制）**:")
+        lines.append("")
+        addr_parts = [buyer_name, buyer_phone, buyer_address]
+        lines.append(" ".join(p for p in addr_parts if p))
+
+        source_url = order_data.get("source_url", "")
+        source_platform = order_data.get("source_platform", "")
+        if source_url:
+            platform_label = {"pinduoduo": "拼多多", "taobao": "淘宝"}.get(source_platform, source_platform)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            lines.append(f"**货源**: {platform_label}")
+            lines.append(f"[点击打开货源链接]({source_url})")
+
+        lines.append("")
+        lines.append(f"**订单号**: {order_data.get('sale_order_id', '')}")
+
+        content = "\n".join(lines)
+        await self.notify("新订单 - 待手动采购", content, level="warning")
 
     async def notify_high_profit_product(self, product_data: dict):
         """Notification template for high-profit product discovery."""

@@ -34,7 +34,24 @@ def detect_new_orders():
     run_async(_detect_new_orders())
 
 
+async def _get_purchase_mode() -> str:
+    """Read auto_purchase_mode from SystemConfig (defaults to 'manual')."""
+    try:
+        from app.models.system import SystemConfig
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(SystemConfig.value).where(SystemConfig.key == "auto_purchase_mode")
+            )
+            row = result.scalar_one_or_none()
+            return row if row else "manual"
+    except Exception:
+        return "manual"
+
+
 async def _detect_new_orders():
+    purchase_mode = await _get_purchase_mode()
+    logger.info(f"Purchase mode: {purchase_mode}")
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Account).where(
@@ -47,7 +64,6 @@ async def _detect_new_orders():
 
         for account in accounts:
             try:
-                # Get known order IDs for this account
                 known = await db.execute(
                     select(Order.sale_order_id).where(Order.account_id == account.id)
                 )
@@ -82,15 +98,17 @@ async def _detect_new_orders():
                     )
                     db.add(order)
 
-                    await notification_service.notify_new_order(order_data)
-
                 if new_orders:
                     await db.commit()
                     logger.info(f"Account {account.account_name}: {len(new_orders)} new orders")
 
-                    # Trigger auto-purchase for each new order
                     for order_data in new_orders:
-                        auto_purchase_order.delay(order_data["sale_order_id"])
+                        if purchase_mode == "auto":
+                            await notification_service.notify_new_order(order_data)
+                            auto_purchase_order.delay(order_data["sale_order_id"])
+                        else:
+                            await notification_service.notify_new_order_manual(order_data)
+                            logger.info(f"Manual mode: DingTalk notification sent for {order_data['sale_order_id']}")
 
             except Exception as e:
                 logger.error(f"Order detection failed for {account.account_name}: {e}")

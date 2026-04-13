@@ -289,6 +289,25 @@ async def list_templates(
 # ─── Notes Management ───
 
 
+def _note_to_dict(n: XhsNote) -> dict:
+    return {
+        "id": str(n.id),
+        "product_id": str(n.product_id) if n.product_id else None,
+        "account_id": str(n.account_id),
+        "title": n.title,
+        "body": n.body,
+        "note_type": n.note_type,
+        "content_type": n.content_type,
+        "image_paths": n.image_paths,
+        "tags": n.tags,
+        "topics": n.topics,
+        "status": n.status,
+        "scheduled_at": n.scheduled_at.isoformat() if n.scheduled_at else None,
+        "published_at": n.published_at.isoformat() if n.published_at else None,
+        "created_at": n.created_at.isoformat() if hasattr(n, "created_at") and n.created_at else None,
+    }
+
+
 @router.get("/notes", summary="笔记列表")
 async def list_notes(
     status: str | None = None,
@@ -313,17 +332,125 @@ async def list_notes(
     return {
         "total": total,
         "page": page,
-        "items": [
-            {
-                "id": str(n.id),
-                "title": n.title,
-                "note_type": n.note_type,
-                "content_type": n.content_type,
-                "status": n.status,
-                "tags": n.tags,
-                "topics": n.topics,
-                "published_at": n.published_at.isoformat() if n.published_at else None,
-            }
-            for n in notes
-        ],
+        "items": [_note_to_dict(n) for n in notes],
     }
+
+
+class CreateNoteRequest(BaseModel):
+    account_id: str
+    product_id: str | None = None
+    title: str
+    body: str
+    note_type: str = "seed_review"
+    content_type: str = "image"
+    image_paths: list[str] | None = None
+    tags: list[str] | None = None
+    topics: list[str] | None = None
+
+
+@router.post("/notes", summary="创建笔记草稿")
+async def create_note(
+    req: CreateNoteRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    note = XhsNote(
+        account_id=req.account_id,
+        product_id=req.product_id,
+        title=req.title,
+        body=req.body,
+        note_type=req.note_type,
+        content_type=req.content_type,
+        image_paths=req.image_paths,
+        tags=req.tags,
+        topics=req.topics,
+        status="draft",
+    )
+    db.add(note)
+    await db.commit()
+    await db.refresh(note)
+    return _note_to_dict(note)
+
+
+class UpdateNoteRequest(BaseModel):
+    title: str | None = None
+    body: str | None = None
+    tags: list[str] | None = None
+    topics: list[str] | None = None
+    image_paths: list[str] | None = None
+
+
+@router.put("/notes/{note_id}", summary="更新笔记草稿")
+async def update_note(
+    note_id: str,
+    req: UpdateNoteRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(XhsNote).where(XhsNote.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    if req.title is not None:
+        note.title = req.title
+    if req.body is not None:
+        note.body = req.body
+    if req.tags is not None:
+        note.tags = req.tags
+    if req.topics is not None:
+        note.topics = req.topics
+    if req.image_paths is not None:
+        note.image_paths = req.image_paths
+    await db.commit()
+    return {"message": "已更新"}
+
+
+@router.post("/notes/{note_id}/publish", summary="发布笔记到小红书")
+async def publish_note(
+    note_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(XhsNote).where(XhsNote.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    if note.status not in ("draft",):
+        raise HTTPException(status_code=400, detail=f"当前状态 {note.status} 不允许发布")
+
+    note.status = "scheduled"
+    await db.commit()
+    return {"message": "已加入发布队列", "status": "scheduled"}
+
+
+@router.delete("/notes/{note_id}", summary="删除笔记")
+async def delete_note(
+    note_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(select(XhsNote).where(XhsNote.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+    note.status = "removed"
+    await db.commit()
+    return {"message": "已删除"}
+
+
+class GenerateContentRequest(BaseModel):
+    product_title: str
+    product_category: str = ""
+    note_type: str = "seed_review"
+
+
+@router.post("/generate-content", summary="AI生成笔记内容")
+async def generate_content(
+    req: GenerateContentRequest,
+    user: User = Depends(get_current_user),
+):
+    from app.services.xiaohongshu.content_generator import generate_note_titles, generate_note_body, recommend_tags
+    titles = await generate_note_titles(req.product_title, req.note_type, count=3)
+    body = await generate_note_body(req.product_title, req.note_type)
+    tags = recommend_tags(req.product_title, req.product_category)
+    return {"titles": titles, "body": body, "tags": tags}

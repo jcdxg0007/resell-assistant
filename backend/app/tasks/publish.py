@@ -106,6 +106,43 @@ async def _execute_publish(listing_id: str):
         return pub_result
 
 
+@celery_app.task(name="app.tasks.publish.execute_single_refresh")
+def execute_single_refresh(listing_id: str):
+    """Refresh a single listing (triggered by API)."""
+    logger.info(f"Refreshing listing {listing_id}")
+    return run_async(_execute_single_refresh(listing_id))
+
+
+async def _execute_single_refresh(listing_id: str):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(XianyuListing).where(XianyuListing.id == listing_id)
+        )
+        listing = result.scalar_one_or_none()
+        if not listing or listing.status != "published" or not listing.xianyu_item_id:
+            return {"error": "listing not eligible for refresh"}
+
+        acct_result = await db.execute(select(Account).where(Account.id == listing.account_id))
+        account = acct_result.scalar_one_or_none()
+        if not account or not account.is_active:
+            return {"error": "account unavailable"}
+
+        config = {"proxy_url": account.proxy_url, "user_agent": account.user_agent, "viewport": account.viewport}
+
+        ref_result = await refresh_listing(
+            account_id=str(account.id),
+            account_config=config,
+            xianyu_item_id=listing.xianyu_item_id,
+        )
+
+        if ref_result["success"]:
+            listing.last_refreshed_at = datetime.now(timezone.utc)
+            await db.commit()
+            logger.info(f"Refreshed listing {listing.title[:30]}")
+
+        return ref_result
+
+
 @celery_app.task(name="app.tasks.publish.batch_refresh_listings")
 def batch_refresh_listings():
     """Batch refresh (擦亮) published listings for exposure boost."""

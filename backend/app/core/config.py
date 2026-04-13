@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://default:Xv01aH061L@resell--manager-redis-redis.ns-3zn44u6p.svc:6379/2"
 
     # DingTalk
-    DINGTALK_WEBHOOK_URL: str = ""
-    DINGTALK_SECRET: str = ""
+    DINGTALK_WEBHOOK_URL: str = "https://oapi.dingtalk.com/robot/send?access_token=9665944ecd4eea9fc5a73d5fb11d140324f34b880d4993905d0213060b651812"
+    DINGTALK_SECRET: str = "SEC86507aaec1945c1e0953632994190d74695b66d112caaf668f67a13ca75c0bb4"
 
     # Email
     SMTP_HOST: str = ""
