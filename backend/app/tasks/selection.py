@@ -332,6 +332,7 @@ async def _instant_search(keyword: str, platform: str, account: dict | None = No
 
     async with AsyncSessionLocal() as db:
         saved_product_ids = []
+        product_data: dict[str, dict] = {}
         for item in items:
             if not item.get("item_id"):
                 continue
@@ -360,7 +361,13 @@ async def _instant_search(keyword: str, platform: str, account: dict | None = No
                 db.add(product)
 
             await db.flush()
-            saved_product_ids.append(str(product.id))
+            pid = str(product.id)
+            saved_product_ids.append(pid)
+            product_data[pid] = {
+                "price": item.get("price") or 0,
+                "want_count": item.get("want_count", 0),
+                "title": item.get("title", ""),
+            }
 
         if saved_product_ids and market_data.get("active_listings", 0) > 0:
             for pid in saved_product_ids:
@@ -391,7 +398,9 @@ async def _instant_search(keyword: str, platform: str, account: dict | None = No
         active_listings = market_data.get("active_listings", 0)
         price_cv = market_data.get("price_cv", 0)
         total_wants = market_data.get("total_wants", 0)
-        price_avg = market_data.get("price_avg", 0)
+        price_avg = market_data.get("price_avg", 0) or 0
+        price_min = market_data.get("price_min") or 0
+        price_max = market_data.get("price_max") or 0
 
         seller_dist = market_data.get("seller_distribution", {})
         top1_ratio = 0.0
@@ -402,16 +411,27 @@ async def _instant_search(keyword: str, platform: str, account: dict | None = No
 
         for pid in saved_product_ids:
             try:
+                pd = product_data.get(pid, {})
                 scoring_input = ScoringInput(
                     active_listings=active_listings,
                     price_cv=price_cv,
                     total_wants=total_wants,
+                    item_want_count=pd.get("want_count", 0),
                     top1_seller_ratio=top1_ratio,
-                    unit_price=price_avg or 0,
+                    unit_price=pd.get("price", 0) or 0,
+                    title=pd.get("title", ""),
+                    category_price_avg=price_avg,
+                    category_price_min=price_min,
+                    category_price_max=price_max,
                 )
                 score_result = calculate_xianyu_score(scoring_input)
                 dim_dict = {
-                    d.name: {"score": d.score, "max": d.max_score, "label": d.label}
+                    d.name: {
+                        "score": d.score,
+                        "max": d.max_score,
+                        "label": d.label,
+                        "has_data": d.has_data,
+                    }
                     for d in score_result.dimensions
                 }
                 from app.models.product import ProductScore

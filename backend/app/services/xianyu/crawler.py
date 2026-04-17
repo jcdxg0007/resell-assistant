@@ -1,12 +1,12 @@
 """
 Xianyu crawler service using Playwright.
-Searches products, extracts market data, and collects listing details.
+Searches products via homepage search bar (bypasses anti-bot on direct URL access),
+extracts market data, and collects listing details.
 """
 import asyncio
 import random
 import re
 from datetime import datetime, timezone
-from typing import Any
 
 from loguru import logger
 
@@ -21,109 +21,175 @@ async def _human_scroll(page, times: int = 3):
         await _random_delay(0.5, 1.5)
 
 
+async def _dismiss_goofish_modal(page):
+    """Dismiss the login/announcement modal that goofish.com shows to visitors."""
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+        await page.evaluate(
+            '() => document.querySelectorAll(".ant-modal-wrap, .ant-modal-mask")'
+            ".forEach(el => el.remove())"
+        )
+    except Exception:
+        pass
+
+
+def _extract_card_item(card: dict) -> dict | None:
+    """Extract product data from goofish's nested card structure.
+
+    Card path: data.item.main.exContent / data.item.main.clickParam.args
+    """
+    try:
+        item_node = card.get("data", {}).get("item", {}).get("main", {})
+        ex = item_node.get("exContent", {})
+        args = item_node.get("clickParam", {}).get("args", {})
+
+        item_id = str(ex.get("itemId") or args.get("item_id") or args.get("id") or "")
+        title = ex.get("title") or args.get("title", "")
+        price_str = (
+            args.get("price")
+            or args.get("displayPrice")
+            or ex.get("detailParams", {}).get("soldPrice", "")
+        )
+        pic_url = ex.get("picUrl", "")
+        want = int(args.get("wantNum", 0) or 0)
+        seller = ex.get("userNickName", "")
+
+        if not item_id or not title:
+            return None
+
+        price = None
+        if price_str:
+            try:
+                price = float(str(price_str).replace(",", ""))
+            except ValueError:
+                pass
+
+        return {
+            "title": title,
+            "price": price,
+            "item_id": item_id,
+            "url": f"https://www.goofish.com/item?id={item_id}",
+            "image_url": pic_url,
+            "want_count": want,
+            "seller_name": seller,
+        }
+    except Exception:
+        return None
+
+
 class XianyuCrawler:
     """Crawls Xianyu search results and product details."""
 
     SEARCH_URL = "https://www.goofish.com/search?q={keyword}"
     ITEM_URL = "https://www.goofish.com/item?id={item_id}"
 
-    async def search_products(self, context, keyword: str, max_items: int = 30) -> list[dict]:
-        """Search Xianyu for a keyword, return list of product summaries."""
+    async def search_products(self, context, keyword: str, max_items: int = 100) -> list[dict]:
+        """Search Xianyu by typing in homepage search bar.
+
+        Navigating directly to search URL triggers anti-bot (RGV587_ERROR).
+        Going through the homepage lets the security SDK initialise first.
+        Scrolls repeatedly to trigger lazy-load API pages until max_items reached.
+        """
         page = await context.new_page()
-        results = []
         api_items: list[dict] = []
+        seen_ids: set[str] = set()
+        api_page_count = 0
 
         async def _capture_search_api(response):
-            """Intercept mtop search API responses for reliable data extraction."""
-            if "idlemtopsearch.pc.search" not in response.url:
+            nonlocal api_page_count
+            url = response.url
+            if "mtop." not in url or "search" not in url.lower():
                 return
             try:
                 data = await response.json()
-                if data.get("ret", [""])[0].startswith("SUCCESS"):
-                    result_data = data.get("data", {})
-                    card_list = result_data.get("resultList", result_data.get("cardList", []))
-                    for card in card_list:
-                        item_data = card.get("data", card)
-                        item_id = item_data.get("id") or item_data.get("itemId")
-                        title = item_data.get("title", "")
-                        price_str = item_data.get("price") or item_data.get("soldPrice", "0")
-                        img = item_data.get("pic") or item_data.get("picUrl", "")
-                        want = int(item_data.get("wantNum", 0))
-                        parsed_price = self._parse_price(str(price_str))
-                        if item_id and title and parsed_price:
-                            api_items.append({
-                                "title": title,
-                                "price": parsed_price,
-                                "item_id": str(item_id),
-                                "url": f"https://www.goofish.com/item?id={item_id}",
-                                "image_url": img,
-                                "want_count": want,
-                            })
+                ret = (data.get("ret") or [""])[0]
+                if "SUCCESS" not in ret:
+                    if "ERROR" in ret or "FAIL" in ret:
+                        logger.debug(f"API non-success: {ret[:60]}")
+                    return
+                rd = data.get("data", {})
+                cards = rd.get("resultList", rd.get("cardList", []))
+                if len(cards) <= 1:
+                    return
+                api_page_count += 1
+                new_count = 0
+                for card in cards:
+                    item = _extract_card_item(card)
+                    if item and item["item_id"] not in seen_ids:
+                        seen_ids.add(item["item_id"])
+                        api_items.append(item)
+                        new_count += 1
+                logger.info(
+                    f"API page {api_page_count}: {len(cards)} cards, "
+                    f"{new_count} new → total {len(api_items)} for '{keyword}'"
+                )
             except Exception as e:
                 logger.debug(f"API intercept error: {e}")
 
         page.on("response", _capture_search_api)
         try:
-            url = self.SEARCH_URL.format(keyword=keyword)
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await _random_delay(2, 4)
-            await _human_scroll(page, times=3)
+            logger.info(f"Loading goofish homepage before search '{keyword}' (max={max_items})")
+            await page.goto(
+                "https://www.goofish.com/",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await asyncio.sleep(4)
+            await _dismiss_goofish_modal(page)
+            await asyncio.sleep(1)
+
+            search_input = page.locator(
+                'input[class*="search"], input[placeholder*="搜索"]'
+            ).first
+            await search_input.click()
+            await asyncio.sleep(0.5)
+            await search_input.fill(keyword)
+            await asyncio.sleep(0.3)
+            await page.keyboard.press("Enter")
+            logger.info(f"Search triggered for '{keyword}', waiting for first page...")
+
+            await asyncio.sleep(8)
+
+            max_scroll_rounds = 10
+            stall_rounds = 0
+            for scroll_round in range(max_scroll_rounds):
+                if len(api_items) >= max_items:
+                    logger.info(f"Reached {len(api_items)} items, stopping scroll")
+                    break
+
+                prev_count = len(api_items)
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(random.uniform(1.5, 2.5))
+                await _human_scroll(page, times=2)
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+
+                if len(api_items) == prev_count:
+                    stall_rounds += 1
+                    if stall_rounds >= 2:
+                        logger.info(
+                            f"No new items after {stall_rounds} stalled rounds, "
+                            f"stopping at {len(api_items)} items"
+                        )
+                        break
+                else:
+                    stall_rounds = 0
 
             if api_items:
-                logger.info(f"Got {len(api_items)} items from API intercept for '{keyword}'")
+                logger.info(
+                    f"Got {len(api_items)} items across {api_page_count} API pages for '{keyword}'"
+                )
                 return api_items[:max_items]
 
-            items = await page.query_selector_all('[class*="item-card"], [class*="ItemCard"], [class*="feed-item"]')
-            logger.info(f"Found {len(items)} raw DOM items for keyword '{keyword}'")
-
-            for item in items[:max_items]:
-                try:
-                    data = await self._extract_search_item(item)
-                    if data:
-                        results.append(data)
-                except Exception as e:
-                    logger.debug(f"Failed to extract item: {e}")
-                    continue
-
-            logger.info(f"Extracted {len(results)} valid items for '{keyword}'")
+            logger.warning(
+                f"No API items for '{keyword}', page URL: {page.url[:80]}"
+            )
         except Exception as e:
             logger.error(f"Search failed for '{keyword}': {e}")
         finally:
             page.remove_listener("response", _capture_search_api)
             await page.close()
-        return results or api_items[:max_items]
-
-    async def _extract_search_item(self, element) -> dict | None:
-        """Extract product data from a search result element."""
-        title_el = await element.query_selector('[class*="title"], h3, [class*="name"]')
-        price_el = await element.query_selector('[class*="price"], [class*="Price"]')
-        link_el = await element.query_selector('a[href*="item"]')
-        img_el = await element.query_selector('img')
-        want_el = await element.query_selector('[class*="want"], [class*="Want"]')
-
-        if not title_el or not price_el:
-            return None
-
-        title = (await title_el.inner_text()).strip()
-        price_text = (await price_el.inner_text()).strip()
-        price = self._parse_price(price_text)
-        if price is None:
-            return None
-
-        href = await link_el.get_attribute("href") if link_el else ""
-        item_id = self._extract_item_id(href)
-        img_url = await img_el.get_attribute("src") if img_el else None
-        want_text = (await want_el.inner_text()).strip() if want_el else "0"
-        want_count = self._parse_number(want_text)
-
-        return {
-            "title": title,
-            "price": price,
-            "item_id": item_id,
-            "url": f"https://www.goofish.com/item?id={item_id}" if item_id else href,
-            "image_url": img_url,
-            "want_count": want_count,
-        }
+        return api_items[:max_items]
 
     async def get_item_detail(self, context, item_id: str) -> dict | None:
         """Get detailed information for a single Xianyu listing."""
@@ -134,19 +200,28 @@ class XianyuCrawler:
             await _random_delay(2, 4)
 
             title = await self._safe_text(page, '[class*="title"], h1')
-            price = self._parse_price(await self._safe_text(page, '[class*="price"], [class*="Price"]'))
-            desc = await self._safe_text(page, '[class*="desc"], [class*="description"]')
-            want_text = await self._safe_text(page, '[class*="want"], [class*="Want"]')
+            price = self._parse_price(
+                await self._safe_text(page, '[class*="price"], [class*="Price"]')
+            )
+            desc = await self._safe_text(
+                page, '[class*="desc"], [class*="description"]'
+            )
+            want_text = await self._safe_text(
+                page, '[class*="want"], [class*="Want"]'
+            )
 
             images = []
-            img_elements = await page.query_selector_all('[class*="slider"] img, [class*="gallery"] img, [class*="main-pic"] img')
+            img_elements = await page.query_selector_all(
+                '[class*="slider"] img, [class*="gallery"] img, [class*="main-pic"] img'
+            )
             for img in img_elements[:10]:
                 src = await img.get_attribute("src")
                 if src:
                     images.append(src)
 
-            seller_el = await page.query_selector('[class*="seller"], [class*="user-info"], [class*="avatar"]')
-            seller_name = await self._safe_text(page, '[class*="seller-name"], [class*="nickname"]')
+            seller_name = await self._safe_text(
+                page, '[class*="seller-name"], [class*="nickname"]'
+            )
 
             return {
                 "item_id": item_id,
@@ -166,21 +241,27 @@ class XianyuCrawler:
 
     async def collect_market_data(self, context, keyword: str) -> dict:
         """Collect aggregate market data for a keyword on Xianyu."""
-        items = await self.search_products(context, keyword, max_items=50)
+        items = await self.search_products(context, keyword, max_items=100)
         if not items:
-            return {"keyword": keyword, "active_listings": 0}
+            return {"keyword": keyword, "active_listings": 0, "items": []}
 
         prices = [i["price"] for i in items if i.get("price")]
         wants = [i.get("want_count", 0) for i in items]
 
         price_avg = sum(prices) / len(prices) if prices else 0
-        price_std = (sum((p - price_avg) ** 2 for p in prices) / len(prices)) ** 0.5 if len(prices) > 1 else 0
+        price_std = (
+            (sum((p - price_avg) ** 2 for p in prices) / len(prices)) ** 0.5
+            if len(prices) > 1
+            else 0
+        )
         price_cv = (price_std / price_avg * 100) if price_avg > 0 else 0
 
-        sorted_by_wants = sorted(items, key=lambda x: x.get("want_count", 0), reverse=True)
+        sorted_by_wants = sorted(
+            items, key=lambda x: x.get("want_count", 0), reverse=True
+        )
         top5 = sorted_by_wants[:5]
 
-        sellers = {}
+        sellers: dict[str, int] = {}
         for item in items:
             seller = item.get("seller_name", "unknown")
             sellers[seller] = sellers.get(seller, 0) + 1
@@ -193,7 +274,14 @@ class XianyuCrawler:
             "price_max": max(prices) if prices else None,
             "price_avg": round(price_avg, 2),
             "price_cv": round(price_cv, 2),
-            "top5_sales": [{"title": i["title"], "price": i["price"], "wants": i.get("want_count", 0)} for i in top5],
+            "top5_sales": [
+                {
+                    "title": i["title"],
+                    "price": i["price"],
+                    "wants": i.get("want_count", 0),
+                }
+                for i in top5
+            ],
             "seller_distribution": sellers,
             "items": items,
         }
@@ -209,24 +297,24 @@ class XianyuCrawler:
     def _parse_price(text: str) -> float | None:
         if not text:
             return None
-        match = re.search(r'[\d,]+\.?\d*', text.replace(',', ''))
+        match = re.search(r"[\d,]+\.?\d*", text.replace(",", ""))
         return float(match.group()) if match else None
 
     @staticmethod
     def _extract_item_id(href: str) -> str | None:
         if not href:
             return None
-        match = re.search(r'id=(\d+)', href)
+        match = re.search(r"id=(\d+)", href)
         if match:
             return match.group(1)
-        match = re.search(r'/item/(\d+)', href)
+        match = re.search(r"/item/(\d+)", href)
         return match.group(1) if match else None
 
     @staticmethod
     def _parse_number(text: str) -> int:
         if not text:
             return 0
-        match = re.search(r'(\d+)', text.replace(',', ''))
+        match = re.search(r"(\d+)", text.replace(",", ""))
         return int(match.group(1)) if match else 0
 
 

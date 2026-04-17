@@ -62,8 +62,9 @@ async def resolve_proxy(proxy_url: str | None) -> str | None:
 
 
 async def _resolve_qgnet_longterm(proxy_url: str) -> str | None:
-    """Query 青果 long-term proxy; auto-extract if none available."""
+    """Query 青果 long-term proxy; auto-release & re-extract if expired or wrong area."""
     key, extra_params = _parse_qgnet_config(proxy_url)
+    desired_area = extra_params.get("area", DEFAULT_AREA)
 
     if not key:
         logger.error("青果代理配置格式错误，缺少 key")
@@ -80,15 +81,60 @@ async def _resolve_qgnet_longterm(proxy_url: str) -> str | None:
 
     result = await _query_existing_proxy(key)
 
+    if result:
+        deadline_str = result.get("deadline", "")
+        area_code = str(result.get("area_code", ""))
+        desired_codes = [c.strip() for c in desired_area.split(",") if c.strip()]
+        is_expired = _is_proxy_expired(deadline_str)
+        is_wrong_area = bool(desired_codes) and bool(area_code) and area_code not in desired_codes
+
+        if is_expired or is_wrong_area:
+            reason = "expired" if is_expired else f"wrong area ({result.get('area', '')})"
+            logger.info(f"Current proxy {result.get('server')} {reason}, releasing...")
+            await _release_proxy(key, result.get("proxy_ip", ""))
+            result = None
+
     if not result:
-        area = extra_params.get("area", DEFAULT_AREA)
-        logger.info(f"No active proxy found, auto-extracting new IP (area={area})")
-        result = await _extract_new_proxy(key, area)
+        logger.info(f"No suitable proxy, auto-extracting new IP (area={desired_area})")
+        result = await _extract_new_proxy(key, desired_area)
 
     if not result:
         return None
 
     return _cache_proxy_result(key, result)
+
+
+def _is_proxy_expired(deadline_str: str) -> bool:
+    """Check if proxy has passed its deadline (青果 returns Beijing time)."""
+    if not deadline_str:
+        return False
+    try:
+        from datetime import datetime, timezone, timedelta
+        deadline_local = datetime.strptime(deadline_str, "%Y-%m-%d %H:%M:%S")
+        deadline_utc = deadline_local.replace(tzinfo=timezone(timedelta(hours=8)))
+        return datetime.now(timezone.utc) > deadline_utc
+    except Exception:
+        return False
+
+
+async def _release_proxy(key: str, proxy_ip: str):
+    """Release an existing proxy IP so a new one can be extracted."""
+    if not proxy_ip:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://proxy.qg.net/release",
+                params={"Key": key, "IP": proxy_ip},
+            )
+            data = resp.json()
+        if data.get("Code") == 0:
+            logger.info(f"青果代理已释放: {proxy_ip}")
+            _proxy_cache.pop(key, None)
+        else:
+            logger.warning(f"青果代理释放返回: {data}")
+    except Exception as e:
+        logger.warning(f"青果代理释放失败: {e}")
 
 
 async def _query_existing_proxy(key: str) -> dict | None:
