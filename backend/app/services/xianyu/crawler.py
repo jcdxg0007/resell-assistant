@@ -22,13 +22,21 @@ async def _human_scroll(page, times: int = 3):
 
 
 async def _dismiss_goofish_modal(page):
-    """Dismiss the login/announcement modal that goofish.com shows to visitors."""
+    """Dismiss the login/announcement modal goofish shows to visitors.
+
+    Also restores body scroll: the modal locks body overflow to 'hidden',
+    which prevents our pagination clicks from working after modal removal.
+    """
     try:
         await page.keyboard.press("Escape")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
         await page.evaluate(
-            '() => document.querySelectorAll(".ant-modal-wrap, .ant-modal-mask")'
-            ".forEach(el => el.remove())"
+            '() => { '
+            'document.querySelectorAll(".ant-modal-wrap, .ant-modal-mask")'
+            '.forEach(el => el.remove()); '
+            'document.body.style.overflow = "auto"; '
+            'document.documentElement.style.overflow = "auto"; '
+            '}'
         )
     except Exception:
         pass
@@ -99,7 +107,10 @@ class XianyuCrawler:
         async def _capture_search_api(response):
             nonlocal api_page_count
             url = response.url
-            if "mtop." not in url or "search" not in url.lower():
+            # Only the list-results endpoint; shade/activate are autocomplete/sidebars.
+            if "mtop.taobao.idlemtopsearch.pc.search" not in url:
+                return
+            if "shade" in url or "activate" in url:
                 return
             try:
                 data = await response.json()
@@ -139,9 +150,25 @@ class XianyuCrawler:
             await _dismiss_goofish_modal(page)
             await asyncio.sleep(1)
 
-            search_input = page.locator(
-                'input[class*="search"], input[placeholder*="搜索"]'
-            ).first
+            search_selectors = [
+                'input.search-input--WY2l9QD3',
+                'input[class*="search-input"]',
+                'input[class*="search"]',
+                'input[placeholder*="搜索"]',
+            ]
+            search_input = None
+            for sel in search_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    await loc.wait_for(state="visible", timeout=8000)
+                    search_input = loc
+                    logger.info(f"Search input found via selector: {sel}")
+                    break
+                except Exception:
+                    continue
+            if search_input is None:
+                raise RuntimeError("Search input not found on goofish homepage")
+
             await search_input.click()
             await asyncio.sleep(0.5)
             await search_input.fill(keyword)
@@ -150,30 +177,39 @@ class XianyuCrawler:
             logger.info(f"Search triggered for '{keyword}', waiting for first page...")
 
             await asyncio.sleep(8)
+            # Search page may re-mount the login modal; unlock body scroll again.
+            await _dismiss_goofish_modal(page)
 
-            max_scroll_rounds = 10
-            stall_rounds = 0
-            for scroll_round in range(max_scroll_rounds):
+            # goofish PC search uses traditional pagination, not infinite scroll.
+            # Click the "next page" arrow repeatedly until enough items gathered.
+            max_pages = 10
+            for page_num in range(2, max_pages + 2):
                 if len(api_items) >= max_items:
-                    logger.info(f"Reached {len(api_items)} items, stopping scroll")
+                    logger.info(f"Reached {len(api_items)} items, stopping")
                     break
 
                 prev_count = len(api_items)
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await asyncio.sleep(random.uniform(1.5, 2.5))
-                await _human_scroll(page, times=2)
-                await asyncio.sleep(random.uniform(2.0, 4.0))
 
+                # Scroll pagination bar into view then click "next page" arrow.
+                next_arrow = page.locator(
+                    'div.search-pagination-arrow-right--CKU78u4z, '
+                    'div[class*="search-pagination-arrow-right"]'
+                ).first
+                try:
+                    await next_arrow.scroll_into_view_if_needed(timeout=3000)
+                    await asyncio.sleep(random.uniform(0.4, 0.9))
+                    await next_arrow.click(timeout=5000)
+                    logger.info(f"Clicked next-page arrow (page {page_num})")
+                except Exception as e:
+                    logger.info(f"Next-page arrow not clickable: {e}, stopping")
+                    break
+
+                await asyncio.sleep(random.uniform(2.5, 4.0))
                 if len(api_items) == prev_count:
-                    stall_rounds += 1
-                    if stall_rounds >= 2:
-                        logger.info(
-                            f"No new items after {stall_rounds} stalled rounds, "
-                            f"stopping at {len(api_items)} items"
-                        )
-                        break
-                else:
-                    stall_rounds = 0
+                    logger.info(
+                        f"Page {page_num} returned no new items, stopping at {len(api_items)}"
+                    )
+                    break
 
             if api_items:
                 logger.info(

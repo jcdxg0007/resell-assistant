@@ -17,12 +17,48 @@ from app.services.browser import browser_manager
 
 
 def run_async(coro):
-    """Helper to run async code from sync Celery tasks."""
+    """Helper to run async code from sync Celery tasks.
+
+    Also tears down the browser_manager singleton on this loop so the next
+    Celery task (which creates a new loop) starts with a clean slate, instead
+    of inheriting a Playwright transport attached to a dead loop.
+    """
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         return loop.run_until_complete(coro)
     finally:
+        try:
+            loop.run_until_complete(_shutdown_per_loop_resources())
+        except Exception as e:
+            logger.debug(f"Loop teardown ignored: {e}")
         loop.close()
+        asyncio.set_event_loop(None)
+
+
+async def _shutdown_per_loop_resources():
+    """Dispose Playwright and SQLAlchemy engine so the next task starts clean.
+
+    Both are bound to the current event loop; without explicit teardown the
+    next Celery task reuses stale connections and hangs with
+    'attached to a different loop' errors.
+    """
+    try:
+        if browser_manager._browser and browser_manager._current_loop_matches():
+            await browser_manager.stop()
+    except Exception:
+        pass
+    finally:
+        browser_manager._browser = None
+        browser_manager._playwright = None
+        browser_manager._contexts.clear()
+        browser_manager._loop_id = None
+
+    try:
+        from app.core.database import engine
+        await engine.dispose()
+    except Exception:
+        pass
 
 
 def _find_active_account_sync(platform: str) -> dict | None:

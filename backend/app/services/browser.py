@@ -70,12 +70,31 @@ class BrowserManager:
         self._playwright = None
         self._browser = None
         self._contexts: dict[str, Any] = {}
+        self._loop_id: int | None = None
+
+    def _current_loop_matches(self) -> bool:
+        """Playwright transport is bound to the loop that created it.
+        Using it from a different loop deadlocks. Detect and force restart."""
+        import asyncio
+        try:
+            current = id(asyncio.get_running_loop())
+            return self._loop_id == current
+        except RuntimeError:
+            return False
 
     async def start(self):
+        import asyncio
+        # Reset if the cached browser belongs to a different/closed loop.
+        if self._browser is not None and not self._current_loop_matches():
+            logger.info("Browser belongs to stale loop, discarding for restart")
+            self._playwright = None
+            self._browser = None
+            self._contexts.clear()
         try:
             import shutil
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
+            self._loop_id = id(asyncio.get_running_loop())
 
             launch_kwargs: dict[str, Any] = {
                 "headless": True,
@@ -110,10 +129,10 @@ class BrowserManager:
 
     async def get_context(self, account_id: str, account_config: dict) -> Any:
         """Get or create an isolated browser context for an account."""
-        if not self._browser:
-            raise RuntimeError("Browser not started. Call start() first.")
+        if not self._browser or not self._current_loop_matches():
+            await self.start()
 
-        if account_id in self._contexts:
+        if account_id in self._contexts and self._current_loop_matches():
             return self._contexts[account_id]
 
         state_path = STATES_DIR / f"{account_id}.json"
@@ -132,11 +151,17 @@ class BrowserManager:
             else:
                 logger.warning(f"Proxy resolution failed for {account_id}, proceeding without proxy")
 
-        if account_config.get("user_agent"):
-            context_options["user_agent"] = account_config["user_agent"]
+        # Always set a realistic UA; headless Chromium defaults to "HeadlessChrome"
+        # which is instantly flagged by goofish/xianyu anti-bot.
+        context_options["user_agent"] = (
+            account_config.get("user_agent")
+            or "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
 
-        if account_config.get("viewport"):
-            context_options["viewport"] = account_config["viewport"]
+        context_options["viewport"] = (
+            account_config.get("viewport") or {"width": 1366, "height": 768}
+        )
 
         # Try file first, then restore from database
         if state_path.exists():
