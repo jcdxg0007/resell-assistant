@@ -32,3 +32,4 @@ backend/playwright_states/
 backend/storage/images/*
 !backend/storage/images/.gitkeep
 kubectl
+backend/celerybeat-schedule.db

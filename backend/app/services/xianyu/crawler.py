@@ -6,9 +6,52 @@ extracts market data, and collects listing details.
 import asyncio
 import random
 import re
+import time
 from datetime import datetime, timezone
 
 from loguru import logger
+
+
+# Global risk-control cooldown. When we see "验证码"/"异常访问"/"请登录" etc.,
+# we refuse to crawl until this timestamp has passed. Prevents hammering the
+# site after it's already flagged us.
+_RISK_COOLDOWN_UNTIL: float = 0.0
+_RISK_COOLDOWN_SECONDS = 24 * 3600
+_RISK_SIGNALS = (
+    "验证码",
+    "异常访问",
+    "请登录",
+    "访问异常",
+    "操作太频繁",
+    "系统繁忙",
+    "RGV587",
+)
+
+
+def is_risk_blocked() -> tuple[bool, float]:
+    remaining = _RISK_COOLDOWN_UNTIL - time.time()
+    return (remaining > 0, remaining if remaining > 0 else 0)
+
+
+def _trigger_risk_cooldown(reason: str):
+    global _RISK_COOLDOWN_UNTIL
+    _RISK_COOLDOWN_UNTIL = time.time() + _RISK_COOLDOWN_SECONDS
+    logger.error(
+        f"Risk control signal detected: {reason!r} — cooldown {_RISK_COOLDOWN_SECONDS}s"
+    )
+
+
+async def _check_page_for_risk(page) -> bool:
+    """Return True if the page text contains a risk-control signal."""
+    try:
+        text = await page.evaluate("() => document.body.innerText || ''")
+    except Exception:
+        return False
+    for signal in _RISK_SIGNALS:
+        if signal in text:
+            _trigger_risk_cooldown(signal)
+            return True
+    return False
 
 
 async def _random_delay(min_s: float = 1.0, max_s: float = 3.0):
@@ -21,19 +64,72 @@ async def _human_scroll(page, times: int = 3):
         await _random_delay(0.5, 1.5)
 
 
+async def _human_type(page, locator, text: str):
+    """Type into an input character-by-character with natural pacing.
+
+    Occasional typos with backspace-correction to mimic real human input.
+    """
+    await locator.click()
+    await asyncio.sleep(random.uniform(0.2, 0.5))
+    try:
+        await locator.fill("")  # clear any existing text
+    except Exception:
+        pass
+    await asyncio.sleep(random.uniform(0.1, 0.3))
+
+    for i, ch in enumerate(text):
+        # ~5% chance of a typo — type wrong char, pause, backspace, correct char
+        if random.random() < 0.05 and i > 0:
+            wrong = random.choice("abcdefghijklmnop")
+            await page.keyboard.type(wrong)
+            await asyncio.sleep(random.uniform(0.15, 0.4))
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(random.uniform(0.1, 0.25))
+
+        await page.keyboard.type(ch)
+        # Pause distribution: fast majority, occasional "thinking" pause
+        if random.random() < 0.08:
+            await asyncio.sleep(random.uniform(0.4, 1.1))
+        else:
+            await asyncio.sleep(random.uniform(0.05, 0.22))
+
+
 async def _dismiss_goofish_modal(page):
     """Dismiss the login/announcement modal goofish shows to visitors.
 
-    Also restores body scroll: the modal locks body overflow to 'hidden',
-    which prevents our pagination clicks from working after modal removal.
+    Prefer clicking the real close button (less fingerprint) and fall back to
+    removal only if the button isn't found. Always restores body overflow so
+    subsequent clicks/scrolls work.
     """
     try:
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.3)
+        # Try the natural way first — close button or escape
+        close_selectors = [
+            ".ant-modal-close",
+            "button[aria-label='Close']",
+            "button[aria-label='关闭']",
+            "[class*='close'][class*='modal']",
+        ]
+        closed = False
+        for sel in close_selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click(timeout=2000)
+                    closed = True
+                    break
+            except Exception:
+                continue
+
+        if not closed:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+
+        # Final safety net: detach leftover mask elements, restore scroll.
+        # Modal sometimes re-locks overflow even after close.
         await page.evaluate(
             '() => { '
             'document.querySelectorAll(".ant-modal-wrap, .ant-modal-mask")'
-            '.forEach(el => el.remove()); '
+            '.forEach(el => el.style.display = "none"); '
             'document.body.style.overflow = "auto"; '
             'document.documentElement.style.overflow = "auto"; '
             '}'
@@ -99,6 +195,13 @@ class XianyuCrawler:
         Going through the homepage lets the security SDK initialise first.
         Scrolls repeatedly to trigger lazy-load API pages until max_items reached.
         """
+        blocked, remaining = is_risk_blocked()
+        if blocked:
+            logger.error(
+                f"Crawler in risk-control cooldown, {int(remaining)}s remaining — skipping '{keyword}'"
+            )
+            return []
+
         page = await context.new_page()
         api_items: list[dict] = []
         seen_ids: set[str] = set()
@@ -167,21 +270,28 @@ class XianyuCrawler:
                 except Exception:
                     continue
             if search_input is None:
+                # Page might be a risk-control intercept, not the homepage
+                if await _check_page_for_risk(page):
+                    return []
                 raise RuntimeError("Search input not found on goofish homepage")
 
-            await search_input.click()
-            await asyncio.sleep(0.5)
-            await search_input.fill(keyword)
-            await asyncio.sleep(0.3)
+            # Character-by-character typing with human pacing + occasional typos
+            await _human_type(page, search_input, keyword)
+            await asyncio.sleep(random.uniform(0.6, 1.4))
             await page.keyboard.press("Enter")
             logger.info(f"Search triggered for '{keyword}', waiting for first page...")
 
-            await asyncio.sleep(8)
+            await asyncio.sleep(random.uniform(7, 10))
             # Search page may re-mount the login modal; unlock body scroll again.
             await _dismiss_goofish_modal(page)
 
+            # First-page risk check (text-based, catches CAPTCHA/login walls)
+            if await _check_page_for_risk(page):
+                return []
+
             # goofish PC search uses traditional pagination, not infinite scroll.
             # Click the "next page" arrow repeatedly until enough items gathered.
+            # Long 8-15s pauses between pages reduce request-rate fingerprint.
             max_pages = 10
             for page_num in range(2, max_pages + 2):
                 if len(api_items) >= max_items:
@@ -190,21 +300,34 @@ class XianyuCrawler:
 
                 prev_count = len(api_items)
 
-                # Scroll pagination bar into view then click "next page" arrow.
+                # Human-like pre-click behaviour: small scrolls, then the click
+                try:
+                    await page.mouse.wheel(0, random.randint(200, 500))
+                    await asyncio.sleep(random.uniform(0.5, 1.2))
+                except Exception:
+                    pass
+
                 next_arrow = page.locator(
                     'div.search-pagination-arrow-right--CKU78u4z, '
                     'div[class*="search-pagination-arrow-right"]'
                 ).first
                 try:
                     await next_arrow.scroll_into_view_if_needed(timeout=3000)
-                    await asyncio.sleep(random.uniform(0.4, 0.9))
+                    await asyncio.sleep(random.uniform(0.6, 1.4))
                     await next_arrow.click(timeout=5000)
                     logger.info(f"Clicked next-page arrow (page {page_num})")
                 except Exception as e:
                     logger.info(f"Next-page arrow not clickable: {e}, stopping")
                     break
 
-                await asyncio.sleep(random.uniform(2.5, 4.0))
+                # Long inter-page pause: 8-15s (was 2.5-4s) to reduce click-rate
+                await asyncio.sleep(random.uniform(8, 15))
+
+                # Check for risk signals after each page
+                if await _check_page_for_risk(page):
+                    logger.warning(f"Risk signal on page {page_num}, stopping")
+                    break
+
                 if len(api_items) == prev_count:
                     logger.info(
                         f"Page {page_num} returned no new items, stopping at {len(api_items)}"

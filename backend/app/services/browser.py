@@ -4,6 +4,7 @@ Handles multi-account browser context isolation with anti-detection.
 Cookies are persisted to PostgreSQL to survive container restarts.
 """
 import json
+import random
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,37 @@ from app.core.database import AsyncSessionLocal
 settings = get_settings()
 STATES_DIR = Path(__file__).parent.parent.parent / "playwright_states"
 STATES_DIR.mkdir(exist_ok=True)
+
+
+# Rotating UA pool — realistic residential desktop Chrome on Win/Mac/Linux.
+# Weighted implicitly by list length (Win most common).
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+]
+
+_VIEWPORT_POOL = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+]
+
+
+def _random_fingerprint() -> dict[str, Any]:
+    """Return a randomised UA + viewport combo for an anonymous session."""
+    return {
+        "user_agent": random.choice(_UA_POOL),
+        "viewport": random.choice(_VIEWPORT_POOL),
+    }
 
 
 async def _save_cookies_to_db(account_id: str, state_json: str):
@@ -189,6 +221,54 @@ class BrowserManager:
 
         self._contexts[account_id] = context
         logger.info(f"Browser context created for account {account_id}")
+        return context
+
+    async def get_anonymous_context(self, proxy_url: str | None = None) -> Any:
+        """Create a disposable, cookie-free browser context.
+
+        Use this for crawling public pages (search results, listings) so the
+        traffic is not tied to any logged-in account. Randomises UA and
+        viewport each call to reduce fingerprint concentration.
+        """
+        if not self._browser or not self._current_loop_matches():
+            await self.start()
+
+        fp = _random_fingerprint()
+        context_options: dict[str, Any] = {
+            "locale": "zh-CN",
+            "timezone_id": "Asia/Shanghai",
+            "user_agent": fp["user_agent"],
+            "viewport": fp["viewport"],
+        }
+
+        if proxy_url:
+            from app.services.proxy_service import resolve_proxy
+            resolved = await resolve_proxy(proxy_url)
+            if resolved:
+                context_options["proxy"] = {"server": resolved}
+                logger.info(f"Anonymous context proxy: {resolved}")
+            else:
+                logger.warning("Anonymous context: proxy resolution failed, direct")
+
+        context = await self._browser.new_context(**context_options)
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) =>
+                parameters.name === 'notifications'
+                    ? Promise.resolve({state: Notification.permission})
+                    : originalQuery(parameters);
+            delete navigator.__proto__.webdriver;
+        """)
+        # Track so _shutdown_per_loop_resources can close it too
+        anon_key = f"_anon_{id(context)}"
+        self._contexts[anon_key] = context
+        logger.info(
+            f"Anonymous context created (UA=...{fp['user_agent'][-30:]}, "
+            f"vp={fp['viewport']['width']}x{fp['viewport']['height']})"
+        )
         return context
 
     async def save_state(self, account_id: str):

@@ -334,32 +334,25 @@ def source_stock_check():
 
 @celery_app.task(name="app.tasks.selection.instant_search")
 def instant_search(keyword: str, platform: str = "xianyu"):
-    """User-triggered instant search on a platform."""
+    """User-triggered instant search on a platform.
+
+    Deliberately crawls anonymously (no login cookie). Only reads the account
+    record for its proxy_url — we don't want search traffic tied to any
+    logged-in account, which is the fastest path to a ban.
+    """
     logger.info(f"Instant search: '{keyword}' on {platform}")
-    # Look up logged-in account in sync context (own event loop, no conflict)
     account = _find_active_account_sync(platform)
-    if account:
-        logger.info(f"Will use account '{account['account_name']}' for search")
-    else:
-        logger.warning(f"No active {platform} account, search may return empty results")
-    return run_async(_instant_search(keyword, platform, account))
+    proxy_url = account.get("proxy_url") if account else None
+    if proxy_url:
+        logger.info(f"Using proxy from '{account['account_name']}' (no login cookie)")
+    return run_async(_instant_search(keyword, platform, proxy_url))
 
 
-async def _instant_search(keyword: str, platform: str, account: dict | None = None):
+async def _instant_search(keyword: str, platform: str, proxy_url: str | None = None):
     if platform != "xianyu":
         return {"error": f"Platform {platform} not yet supported"}
 
-    if account:
-        context = await _get_crawler_context(
-            account_id=account["id"],
-            account_config={
-                "proxy_url": account.get("proxy_url"),
-                "user_agent": account.get("user_agent"),
-                "viewport": account.get("viewport"),
-            },
-        )
-    else:
-        context = await _get_crawler_context()
+    context = await browser_manager.get_anonymous_context(proxy_url=proxy_url)
     market_data = await xianyu_crawler.collect_market_data(context, keyword)
     items = market_data.get("items", [])
     if not items:
@@ -379,6 +372,9 @@ async def _instant_search(keyword: str, platform: str, account: dict | None = No
                 )
             )
             product = existing.scalar_one_or_none()
+            # products.title is VARCHAR(512); some sellers cram the full listing
+            # description into the title field, which overflows. Truncate safely.
+            safe_title = (item.get("title") or "")[:500]
             if product:
                 product.price = item.get("price", product.price)
                 product.last_crawled_at = datetime.now(timezone.utc)
@@ -387,7 +383,7 @@ async def _instant_search(keyword: str, platform: str, account: dict | None = No
                     source_platform=Platform.XIANYU,
                     source_url=item.get("url", ""),
                     source_id=item["item_id"],
-                    title=item["title"],
+                    title=safe_title,
                     price=item["price"],
                     image_urls=[item["image_url"]] if item.get("image_url") else None,
                     category=keyword,

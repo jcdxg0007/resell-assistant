@@ -337,6 +337,42 @@ async def account_proxy_status(
     return await get_proxy_status(account.proxy_url)
 
 
+@router.post("/{account_id}/rotate-proxy", summary="手动释放并换一个新代理IP")
+async def account_rotate_proxy(
+    account_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Force-release the current qg.net IP and extract a fresh one.
+
+    Consumes daily release+extract quota. Use when you suspect the current
+    IP is flagged, or after a risk-control cooldown expires.
+    """
+    result = await db.execute(select(Account).where(Account.id == account_id))
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if not account.proxy_url:
+        raise HTTPException(status_code=400, detail="该账号未配置代理")
+
+    from app.services.proxy_service import force_rotate_qgnet
+    return await force_rotate_qgnet(account.proxy_url)
+
+
+@router.get("/crawler/risk-status", summary="查询爬虫风控冷却状态")
+async def crawler_risk_status(user: User = Depends(get_current_user)):
+    from app.services.xianyu.crawler import is_risk_blocked
+    blocked, remaining = is_risk_blocked()
+    return {
+        "risk_blocked": blocked,
+        "remaining_seconds": int(remaining),
+        "message": (
+            f"触发风控冷却中，剩余 {int(remaining/60)} 分钟"
+            if blocked else "正常"
+        ),
+    }
+
+
 def _account_to_dict(a: Account) -> dict:
     return {
         "id": str(a.id),

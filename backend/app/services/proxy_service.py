@@ -217,6 +217,41 @@ def _cache_proxy_result(key: str, ip_info: dict) -> str:
     return proxy_formatted
 
 
+async def force_rotate_qgnet(proxy_url: str) -> dict:
+    """Manually release the current 青果 IP and extract a new one.
+
+    Useful when risk-control is suspected, or when preparing a fresh session.
+    Currently consumes daily release+extract quota — use sparingly on a
+    single-channel account. With multi-channel plans this is the per-keyword
+    rotation hook.
+    """
+    if not proxy_url or not proxy_url.startswith("qgnet:"):
+        return {"status": "error", "message": "not a qgnet proxy"}
+
+    key, extra = _parse_qgnet_config(proxy_url)
+    desired_area = extra.get("area", DEFAULT_AREA)
+    if not key:
+        return {"status": "error", "message": "invalid qgnet config"}
+
+    await _ensure_whitelist(key)
+
+    current = await _query_existing_proxy(key)
+    if current and current.get("proxy_ip"):
+        await _release_proxy(key, current["proxy_ip"])
+
+    new_ip = await _extract_new_proxy(key, desired_area)
+    if not new_ip:
+        return {"status": "error", "message": "failed to extract new ip (quota?)"}
+
+    _cache_proxy_result(key, new_ip)
+    return {
+        "status": "ok",
+        "server": new_ip.get("server"),
+        "area": new_ip.get("area"),
+        "isp": new_ip.get("isp"),
+    }
+
+
 async def get_proxy_status(proxy_url: str | None) -> dict:
     """Get current proxy status (for API/debug display)."""
     if not proxy_url:
