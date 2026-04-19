@@ -176,10 +176,16 @@ class BrowserManager:
         raw_proxy = account_config.get("proxy_url")
         if raw_proxy:
             from app.services.proxy_service import resolve_proxy
-            resolved = await resolve_proxy(raw_proxy)
+            # Logged-in contexts don't have a platform grouping context, so
+            # fall back to account_id as the group name. For short-term
+            # proxies this means each logged-in account gets its own IP.
+            resolved = await resolve_proxy(raw_proxy, platform=account_id)
             if resolved:
-                context_options["proxy"] = {"server": resolved}
-                logger.info(f"Proxy resolved for {account_id}: {resolved}")
+                context_options["proxy"] = resolved
+                logger.info(
+                    f"Proxy resolved for {account_id}: {resolved['server']} "
+                    f"(auth={'yes' if resolved.get('username') else 'no'})"
+                )
             else:
                 logger.warning(f"Proxy resolution failed for {account_id}, proceeding without proxy")
 
@@ -223,12 +229,19 @@ class BrowserManager:
         logger.info(f"Browser context created for account {account_id}")
         return context
 
-    async def get_anonymous_context(self, proxy_url: str | None = None) -> Any:
+    async def get_anonymous_context(
+        self,
+        proxy_url: str | None = None,
+        platform: str | None = None,
+    ) -> Any:
         """Create a disposable, cookie-free browser context.
 
         Use this for crawling public pages (search results, listings) so the
         traffic is not tied to any logged-in account. Randomises UA and
         viewport each call to reduce fingerprint concentration.
+
+        `platform` is passed through to the proxy resolver so short-term
+        proxies can pick the right IP group for risk isolation.
         """
         if not self._browser or not self._current_loop_matches():
             await self.start()
@@ -243,10 +256,14 @@ class BrowserManager:
 
         if proxy_url:
             from app.services.proxy_service import resolve_proxy
-            resolved = await resolve_proxy(proxy_url)
+            resolved = await resolve_proxy(proxy_url, platform=platform)
             if resolved:
-                context_options["proxy"] = {"server": resolved}
-                logger.info(f"Anonymous context proxy: {resolved}")
+                context_options["proxy"] = resolved
+                logger.info(
+                    f"Anonymous context proxy: {resolved['server']}"
+                    f" (auth={'yes' if resolved.get('username') else 'no'}, "
+                    f"platform={platform})"
+                )
             else:
                 logger.warning("Anonymous context: proxy resolution failed, direct")
 

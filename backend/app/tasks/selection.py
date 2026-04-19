@@ -352,11 +352,28 @@ async def _instant_search(keyword: str, platform: str, proxy_url: str | None = N
     if platform != "xianyu":
         return {"error": f"Platform {platform} not yet supported"}
 
-    context = await browser_manager.get_anonymous_context(proxy_url=proxy_url)
-    market_data = await xianyu_crawler.collect_market_data(context, keyword)
-    items = market_data.get("items", [])
+    # Retry once if the first attempt returns nothing — short-term proxies
+    # occasionally hand out IPs that can't reach goofish. Invalidate the
+    # group's cached IP so the second attempt pulls a fresh one.
+    items: list = []
+    market_data: dict = {}
+    for attempt in range(2):
+        context = await browser_manager.get_anonymous_context(
+            proxy_url=proxy_url, platform=platform
+        )
+        market_data = await xianyu_crawler.collect_market_data(context, keyword)
+        items = market_data.get("items", [])
+        if items:
+            break
+        if attempt == 0 and proxy_url and proxy_url.startswith("qgshort:"):
+            from app.services.proxy_service import invalidate_short_group
+            logger.warning(
+                f"Instant search '{keyword}': first attempt empty, rotating IP and retrying"
+            )
+            await invalidate_short_group(platform)
+
     if not items:
-        logger.warning(f"Instant search '{keyword}': no items found")
+        logger.warning(f"Instant search '{keyword}': no items found after retries")
         return market_data
 
     async with AsyncSessionLocal() as db:

@@ -1,17 +1,27 @@
 """
 Dynamic proxy resolution service.
-Supports static proxy URLs and 青果网络 (qg.net) long-term proxy API.
+Supports static proxy URLs, 青果 long-term, and 青果 short-term (按量) proxies.
 
 Usage in account proxy_url field:
   - Static proxy: "http://ip:port" or "socks5://user:pass@ip:port"
-  - 青果长效代理: "qgnet:YOUR_KEY"  (auto-queries assigned IP)
-  - 青果长效代理+地区: "qgnet:YOUR_KEY:area=440100,440300"
+  - 青果长效代理: "qgnet:YOUR_KEY" (auto-queries, area support)
+  - 青果短效代理: "qgshort:KEY:PWD" (auth-based, shared-pool, platform-grouped)
+
+Short-term proxy platform groups — keeps risk isolation between platforms
+that share the same risk-control system (Alibaba sees xianyu+taobao as one):
+  - group_a: xianyu, pdd           (single IP)
+  - group_b: taobao, xiaohongshu   (single IP)
+  - group_c: jd                    (single IP)
+Tasks of the same group reuse the group's live IP; tasks of different groups
+get different IPs, so Alibaba never sees xianyu and taobao from one IP.
 
 Features:
-  - Auto-queries assigned proxy IP from 青果 API
-  - Auto-extracts new IP when current one expires (with area preference)
-  - Auto-adds container IP to 青果 whitelist on startup
+  - Auto-queries / auto-extracts / auto-releases 青果 long-term proxy
+  - Auto-rotates 青果 short-term proxy when IP is <90s from expiry
+  - Thread-safe per-group IP cache with asyncio locks
+  - Auto-adds container IP to 青果 whitelist (long-term only)
 """
+import asyncio
 import time
 from typing import Any
 
@@ -21,11 +31,29 @@ from loguru import logger
 _proxy_cache: dict[str, dict[str, Any]] = {}
 _whitelist_registered: dict[str, str] = {}
 
+# Short-term proxy pool is stored in Redis (shared across Celery workers).
+# See _SHORT_POOL_REDIS_PREFIX / _SHORT_LOCK_REDIS_PREFIX below.
+
 QG_LONGTERM_QUERY = "https://longterm.proxy.qg.net/query"
 QG_LONGTERM_GET = "https://longterm.proxy.qg.net/get"
+QG_SHORT_GET = "https://share.proxy.qg.net/get"
 QG_WHITELIST_ADD = "https://proxy.qg.net/whitelist/add"
 
 DEFAULT_AREA = "440100,440300"
+
+# Platform -> risk-isolation group. See module docstring.
+PLATFORM_GROUP: dict[str, str] = {
+    "xianyu": "group_a",
+    "pdd": "group_a",
+    "taobao": "group_b",
+    "xiaohongshu": "group_b",
+    "jd": "group_c",
+}
+DEFAULT_GROUP = "group_default"
+
+# When cached IP has less than this many seconds left, rotate preemptively
+# so mid-task IP expiry never happens.
+SHORT_MIN_REMAINING_SECONDS = 90
 
 
 def _parse_qgnet_config(proxy_url: str) -> tuple[str, dict[str, str]]:
@@ -44,21 +72,231 @@ def _parse_qgnet_config(proxy_url: str) -> tuple[str, dict[str, str]]:
     return key, params
 
 
-async def resolve_proxy(proxy_url: str | None) -> str | None:
-    """Resolve a proxy_url to an actual usable proxy address.
+async def resolve_proxy(
+    proxy_url: str | None,
+    platform: str | None = None,
+) -> dict[str, str] | None:
+    """Resolve a proxy_url to a Playwright-compatible proxy config.
 
-    Returns a URL like "http://ip:port" that Playwright can use,
-    or None if no proxy is configured / resolution fails.
+    Returns a dict like {"server": "http://host:port"} (optionally with
+    "username"/"password") that can be passed directly to Playwright's
+    new_context(proxy=...). Returns None if no proxy / resolution failed.
+
+    The `platform` argument is used for short-term proxies to pick the
+    right IP group (see PLATFORM_GROUP). Ignored for static / long-term.
     """
     if not proxy_url:
         return None
 
     proxy_url = proxy_url.strip()
 
-    if proxy_url.startswith("qgnet:"):
-        return await _resolve_qgnet_longterm(proxy_url)
+    if proxy_url.startswith("qgshort:"):
+        return await _resolve_qgnet_short(proxy_url, platform)
 
-    return proxy_url
+    if proxy_url.startswith("qgnet:"):
+        server = await _resolve_qgnet_longterm(proxy_url)
+        return {"server": server} if server else None
+
+    return {"server": proxy_url}
+
+
+def _parse_qgshort_config(proxy_url: str) -> tuple[str, str, dict[str, str]]:
+    """Parse 'qgshort:KEY:PWD' or 'qgshort:KEY:PWD:area=xxx' into (key, pwd, params)."""
+    parts = proxy_url.split(":", 3)
+    key = parts[1] if len(parts) >= 2 else ""
+    pwd = parts[2] if len(parts) >= 3 else ""
+    extra = parts[3] if len(parts) >= 4 else ""
+
+    params: dict[str, str] = {}
+    if extra:
+        for pair in extra.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                params[k.strip()] = v.strip()
+
+    return key, pwd, params
+
+
+async def _extract_qgnet_short(key: str, area: str | None) -> dict | None:
+    """Extract one short-term IP via 青果 share API (按量 billing).
+
+    Consumes one IP from the daily quota each successful call.
+    """
+    params: dict[str, str] = {"key": key, "num": "1", "format": "json"}
+    if area:
+        params["area"] = area
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(QG_SHORT_GET, params=params)
+            data = resp.json()
+        if data.get("code") != "SUCCESS":
+            logger.error(
+                f"青果短效提取失败: {data.get('code')} - {data.get('msg') or data.get('message')}"
+            )
+            return None
+        ip_list = data.get("data", [])
+        if not ip_list:
+            logger.error("青果短效提取返回空列表")
+            return None
+        info = ip_list[0]
+        logger.info(
+            f"青果短效 IP 已提取: {info.get('server')} (出口 {info.get('proxy_ip')}, "
+            f"{info.get('area', '')} {info.get('isp', '')}, 到期 {info.get('deadline', '')})"
+        )
+        return info
+    except Exception as e:
+        logger.error(f"青果短效提取异常: {e}")
+        return None
+
+
+_SHORT_POOL_REDIS_PREFIX = "proxy:short:pool:"
+_SHORT_LOCK_REDIS_PREFIX = "proxy:short:lock:"
+
+
+class _PerCallRedis:
+    """Context manager that gives a fresh redis client and closes it afterwards.
+
+    Avoids the module-level singleton binding to a stale event loop when
+    Celery tasks run across different loops.
+    """
+    async def __aenter__(self):
+        import redis.asyncio as aioredis
+        from app.core.config import get_settings
+        self._client = aioredis.from_url(
+            get_settings().REDIS_URL,
+            decode_responses=True,
+            max_connections=5,
+        )
+        return self._client
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            await self._client.aclose()
+        except Exception:
+            pass
+
+
+async def _resolve_qgnet_short(
+    proxy_url: str,
+    platform: str | None,
+) -> dict[str, str] | None:
+    """Resolve short-term proxy with per-group IP sharing (Redis-backed).
+
+    Tasks in the same PLATFORM_GROUP reuse the group's active IP until it
+    expires; tasks in different groups get different IPs. Shared across all
+    Celery worker processes via Redis.
+    """
+    key, pwd, extra = _parse_qgshort_config(proxy_url)
+    if not key or not pwd:
+        logger.error("青果短效代理配置错误: 需要 qgshort:KEY:PWD")
+        return None
+    area = extra.get("area")
+
+    group = PLATFORM_GROUP.get(platform or "", DEFAULT_GROUP)
+    pool_key = f"{_SHORT_POOL_REDIS_PREFIX}{group}"
+    lock_key = f"{_SHORT_LOCK_REDIS_PREFIX}{group}"
+
+    async with _PerCallRedis() as redis_client:
+        # Fast path: cached IP still fresh, return without locking
+        cached = await _read_pool_entry(redis_client, pool_key)
+        now = time.time()
+        if cached and cached["deadline_ts"] - now > SHORT_MIN_REMAINING_SECONDS:
+            return _short_pool_to_playwright(cached, key, pwd)
+
+        # Slow path: acquire Redis lock so only one worker calls /get per group
+        acquired = await _acquire_redis_lock(redis_client, lock_key, ttl_s=20)
+        try:
+            if not acquired:
+                for _ in range(16):
+                    await asyncio.sleep(0.5)
+                    cached = await _read_pool_entry(redis_client, pool_key)
+                    if cached and cached["deadline_ts"] - time.time() > SHORT_MIN_REMAINING_SECONDS:
+                        return _short_pool_to_playwright(cached, key, pwd)
+                logger.warning(f"青果短效池 [{group}] 等锁超时，强制重取")
+
+            cached = await _read_pool_entry(redis_client, pool_key)
+            now = time.time()
+            if cached and cached["deadline_ts"] - now > SHORT_MIN_REMAINING_SECONDS:
+                return _short_pool_to_playwright(cached, key, pwd)
+
+            info = await _extract_qgnet_short(key, area)
+            if not info:
+                return None
+
+            try:
+                from datetime import datetime
+                deadline_ts = datetime.strptime(
+                    info.get("deadline", ""), "%Y-%m-%d %H:%M:%S"
+                ).timestamp()
+            except Exception:
+                deadline_ts = now + 180
+
+            entry = {
+                "server": info["server"],
+                "proxy_ip": info.get("proxy_ip", ""),
+                "area": info.get("area", ""),
+                "isp": info.get("isp", ""),
+                "deadline_ts": deadline_ts,
+            }
+            await _write_pool_entry(redis_client, pool_key, entry, deadline_ts)
+            logger.info(
+                f"青果短效池 [{group}]: {entry['server']} → 出口 {entry['proxy_ip']} "
+                f"({entry['area']}), {int(deadline_ts - now)}s 可用"
+            )
+            return _short_pool_to_playwright(entry, key, pwd)
+        finally:
+            if acquired:
+                await _release_redis_lock(redis_client, lock_key)
+
+
+async def invalidate_short_group(platform: str | None):
+    """Drop the cached IP for the platform's group.
+
+    Call this after a crawling failure that you suspect was IP-related, so
+    the next task forces a fresh IP instead of reusing a bad one.
+    """
+    group = PLATFORM_GROUP.get(platform or "", DEFAULT_GROUP)
+    async with _PerCallRedis() as redis_client:
+        await redis_client.delete(f"{_SHORT_POOL_REDIS_PREFIX}{group}")
+    logger.info(f"青果短效池 [{group}] 已失效，下次重新提取")
+
+
+async def _read_pool_entry(redis_client, pool_key: str) -> dict | None:
+    import json
+    raw = await redis_client.get(pool_key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+async def _write_pool_entry(redis_client, pool_key: str, entry: dict, deadline_ts: float):
+    import json
+    ttl = max(10, int(deadline_ts - time.time()))
+    await redis_client.set(pool_key, json.dumps(entry), ex=ttl)
+
+
+async def _acquire_redis_lock(redis_client, lock_key: str, ttl_s: int) -> bool:
+    # SET NX EX — returns None/False if key already exists
+    result = await redis_client.set(lock_key, "1", nx=True, ex=ttl_s)
+    return bool(result)
+
+
+async def _release_redis_lock(redis_client, lock_key: str):
+    try:
+        await redis_client.delete(lock_key)
+    except Exception:
+        pass
+
+
+def _short_pool_to_playwright(entry: dict, key: str, pwd: str) -> dict[str, str]:
+    return {
+        "server": f"http://{entry['server']}",
+        "username": key,
+        "password": pwd,
+    }
 
 
 async def _resolve_qgnet_longterm(proxy_url: str) -> str | None:
@@ -258,6 +496,29 @@ async def get_proxy_status(proxy_url: str | None) -> dict:
         return {"type": "none", "status": "未配置代理"}
 
     proxy_url = proxy_url.strip()
+
+    if proxy_url.startswith("qgshort:"):
+        now = time.time()
+        groups: dict[str, dict] = {}
+        known_groups = set(PLATFORM_GROUP.values()) | {DEFAULT_GROUP}
+        async with _PerCallRedis() as redis_client:
+            for g in known_groups:
+                entry = await _read_pool_entry(redis_client, f"{_SHORT_POOL_REDIS_PREFIX}{g}")
+                if not entry:
+                    continue
+                groups[g] = {
+                    "server": entry.get("server"),
+                    "proxy_ip": entry.get("proxy_ip"),
+                    "area": entry.get("area"),
+                    "isp": entry.get("isp"),
+                    "remaining_seconds": max(0, int(entry.get("deadline_ts", 0) - now)),
+                }
+        return {
+            "type": "qgnet_short",
+            "status": "active" if groups else "idle",
+            "groups": groups,
+            "platform_mapping": PLATFORM_GROUP,
+        }
 
     if proxy_url.startswith("qgnet:"):
         key, _ = _parse_qgnet_config(proxy_url)
