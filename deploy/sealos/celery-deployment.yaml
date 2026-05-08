@@ -17,15 +17,11 @@ spec:
     spec:
       containers:
         - name: celery
+          # 与 backend 共用同一份镜像，按 APP_MODE=celery 在 entrypoint.sh 内切模式
           image: crpi-ryxzfb3l96vqk28a.cn-shenzhen.personal.cr.aliyuncs.com/resell-assistant/backend:latest
-          command:
-            - celery
-            - -A
-            - app.core.celery_app:celery_app
-            - worker
-            - --beat
-            - --loglevel=info
-            - --concurrency=2
+          env:
+            - name: APP_MODE
+              value: celery
           envFrom:
             - secretRef:
                 name: resell-secret

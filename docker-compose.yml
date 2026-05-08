@@ -24,9 +24,11 @@ services:
   celery:
     build:
       context: ./backend
-      dockerfile: Dockerfile.celery
+      dockerfile: Dockerfile
     container_name: resell-celery
     env_file: ./backend/.env
+    environment:
+      APP_MODE: celery
     volumes:
       - playwright_states:/app/playwright_states
       - image_storage:/app/storage/images

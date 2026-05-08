@@ -109,13 +109,14 @@ jobs:
           deploy_app() {
             local APP=$1
             local NEEDS_BUILD=$2
-            echo "--- Deploying $APP ---"
+            local IMAGE_REPO=${3:-$APP}
+            echo "--- Deploying $APP (image repo: $IMAGE_REPO) ---"
 
             CNAME=$(get_container_name "$APP")
             echo "Container name: $CNAME"
 
             if [ "$NEEDS_BUILD" = "true" ]; then
-              NEW_IMG="$IMG_BASE/$APP:$SHA"
+              NEW_IMG="$IMG_BASE/$IMAGE_REPO:$SHA"
               echo "Updating image to $NEW_IMG (imagePullPolicy=Always)"
               PATCH="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"kubectl.kubernetes.io/restartedAt\":\"$NOW\"}},\"spec\":{\"containers\":[{\"name\":\"$CNAME\",\"image\":\"$NEW_IMG\",\"imagePullPolicy\":\"Always\"}]}}}}"
             else
@@ -142,6 +143,8 @@ jobs:
           BACKEND_CHANGED="${{ needs.changes.outputs.backend }}"
           FRONTEND_CHANGED="${{ needs.changes.outputs.frontend }}"
 
+          # celery deployment 复用 backend 镜像（同一份代码，按 APP_MODE=celery 切模式）
+          # 这样只构建一份镜像，CI 时间减半，避免镜像漂移。
           deploy_app "backend"  "$BACKEND_CHANGED"
-          deploy_app "celery"   "$BACKEND_CHANGED"
+          deploy_app "celery"   "$BACKEND_CHANGED" "backend"
           deploy_app "frontend" "$FRONTEND_CHANGED"

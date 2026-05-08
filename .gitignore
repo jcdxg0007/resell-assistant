@@ -33,3 +33,11 @@ backend/storage/images/*
 !backend/storage/images/.gitkeep
 kubectl
 backend/celerybeat-schedule.db
+
+# Runtime logs
+backend/logs/
+*.log
+
+# Token / 临时凭据文件（防误提交）
+_new_token.txt
+temp_git_edit*
