@@ -1,5 +1,4 @@
 """Session health check Celery task."""
-import asyncio
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -8,14 +7,7 @@ from sqlalchemy import select
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionLocal
 from app.models.system import Account
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+from app.tasks._async_runner import run_async
 
 
 async def _check_all_sessions():

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 from loguru import logger
 
+from app.services import anti_risk
+
 
 # Global risk-control cooldown. When we see "验证码"/"异常访问"/"请登录" etc.,
 # we refuse to crawl until this timestamp has passed. Prevents hammering the
@@ -41,8 +43,15 @@ def _trigger_risk_cooldown(reason: str):
     )
 
 
-async def _check_page_for_risk(page) -> bool:
-    """Return True if the page text contains a risk-control signal."""
+async def _check_page_for_risk(
+    page, sink: list | None = None,
+) -> bool:
+    """Return True if the page text contains a risk-control signal.
+
+    If ``sink`` is provided, append an :class:`anti_risk.RiskSignal` to it
+    so the caller can aggregate signals for DingTalk alerting. The
+    module-level 24-hour cooldown still fires either way.
+    """
     try:
         text = await page.evaluate("() => document.body.innerText || ''")
     except Exception:
@@ -50,6 +59,17 @@ async def _check_page_for_risk(page) -> bool:
     for signal in _RISK_SIGNALS:
         if signal in text:
             _trigger_risk_cooldown(signal)
+            if sink is not None:
+                try:
+                    url = page.url
+                except Exception:
+                    url = None
+                sink.append(anti_risk.RiskSignal(
+                    platform="xianyu",
+                    signal_type="risk_keyword",
+                    detail=signal,
+                    url=url,
+                ))
             return True
     return False
 
@@ -156,8 +176,37 @@ def _extract_card_item(card: dict) -> dict | None:
             or ex.get("detailParams", {}).get("soldPrice", "")
         )
         pic_url = ex.get("picUrl", "")
-        want = int(args.get("wantNum", 0) or 0)
+
+        # Goofish's `args.wantNum` is almost always 0 in the new API (it tracks
+        # a different metric). The visible "XXX人想要" tag is actually inside
+        # fishTags.r3.tagList[0].data.content. Parse that first, fall back
+        # to wantNum for older responses.
+        want = 0
+        try:
+            tag_lists = (
+                ex.get("fishTags", {})
+                .get("r3", {})
+                .get("tagList", [])
+            )
+            for tag in tag_lists:
+                content = (tag.get("data", {}) or {}).get("content") or ""
+                m = re.search(r"(\d[\d,]*)\s*人想要", content)
+                if m:
+                    want = int(m.group(1).replace(",", ""))
+                    break
+        except Exception:
+            pass
+        if want == 0:
+            want = int(args.get("wantNum", 0) or 0)
+
         seller = ex.get("userNickName", "")
+
+        # publishTime is a millisecond epoch; used for "链接新鲜度" scoring.
+        publish_ms = 0
+        try:
+            publish_ms = int(args.get("publishTime", 0) or 0)
+        except (TypeError, ValueError):
+            publish_ms = 0
 
         if not item_id or not title:
             return None
@@ -177,6 +226,7 @@ def _extract_card_item(card: dict) -> dict | None:
             "image_url": pic_url,
             "want_count": want,
             "seller_name": seller,
+            "publish_time_ms": publish_ms,
         }
     except Exception:
         return None
@@ -188,12 +238,22 @@ class XianyuCrawler:
     SEARCH_URL = "https://www.goofish.com/search?q={keyword}"
     ITEM_URL = "https://www.goofish.com/item?id={item_id}"
 
-    async def search_products(self, context, keyword: str, max_items: int = 100) -> list[dict]:
+    async def search_products(
+        self,
+        context,
+        keyword: str,
+        max_items: int = 100,
+        risks_sink: list | None = None,
+    ) -> list[dict]:
         """Search Xianyu by typing in homepage search bar.
 
         Navigating directly to search URL triggers anti-bot (RGV587_ERROR).
         Going through the homepage lets the security SDK initialise first.
         Scrolls repeatedly to trigger lazy-load API pages until max_items reached.
+
+        If ``risks_sink`` is provided, risk-control signals encountered
+        during the run are appended as :class:`anti_risk.RiskSignal`
+        entries so the orchestrator can aggregate DingTalk alerts.
         """
         blocked, remaining = is_risk_blocked()
         if blocked:
@@ -271,7 +331,7 @@ class XianyuCrawler:
                     continue
             if search_input is None:
                 # Page might be a risk-control intercept, not the homepage
-                if await _check_page_for_risk(page):
+                if await _check_page_for_risk(page, risks_sink):
                     return []
                 raise RuntimeError("Search input not found on goofish homepage")
 
@@ -286,7 +346,7 @@ class XianyuCrawler:
             await _dismiss_goofish_modal(page)
 
             # First-page risk check (text-based, catches CAPTCHA/login walls)
-            if await _check_page_for_risk(page):
+            if await _check_page_for_risk(page, risks_sink):
                 return []
 
             # goofish PC search uses traditional pagination, not infinite scroll.
@@ -324,7 +384,7 @@ class XianyuCrawler:
                 await asyncio.sleep(random.uniform(8, 15))
 
                 # Check for risk signals after each page
-                if await _check_page_for_risk(page):
+                if await _check_page_for_risk(page, risks_sink):
                     logger.warning(f"Risk signal on page {page_num}, stopping")
                     break
 
@@ -399,10 +459,23 @@ class XianyuCrawler:
             await page.close()
 
     async def collect_market_data(self, context, keyword: str) -> dict:
-        """Collect aggregate market data for a keyword on Xianyu."""
-        items = await self.search_products(context, keyword, max_items=100)
+        """Collect aggregate market data for a keyword on Xianyu.
+
+        Captures risk signals (CAPTCHA / RGV587 / login wall) into the
+        returned ``risk_signals`` list so the orchestrator can aggregate
+        DingTalk alerts across platforms.
+        """
+        risks: list[anti_risk.RiskSignal] = []
+        items = await self.search_products(
+            context, keyword, max_items=100, risks_sink=risks,
+        )
         if not items:
-            return {"keyword": keyword, "active_listings": 0, "items": []}
+            return {
+                "keyword": keyword,
+                "active_listings": 0,
+                "items": [],
+                "risk_signals": risks,
+            }
 
         prices = [i["price"] for i in items if i.get("price")]
         wants = [i.get("want_count", 0) for i in items]
@@ -425,6 +498,18 @@ class XianyuCrawler:
             seller = item.get("seller_name", "unknown")
             sellers[seller] = sellers.get(seller, 0) + 1
 
+        # 链接新鲜度: percentage of listings published within the last 7 days.
+        # keyword_scoring._score_link_freshness expects a 0-100 percentage.
+        now_ms = int(time.time() * 1000)
+        seven_days_ms = 7 * 86400 * 1000
+        datable = [i for i in items if i.get("publish_time_ms")]
+        fresh_count = sum(
+            1 for i in datable if (now_ms - i["publish_time_ms"]) <= seven_days_ms
+        )
+        new_listing_ratio_7d = (
+            round(fresh_count / len(datable) * 100, 2) if datable else 0.0
+        )
+
         return {
             "keyword": keyword,
             "active_listings": len(items),
@@ -433,6 +518,7 @@ class XianyuCrawler:
             "price_max": max(prices) if prices else None,
             "price_avg": round(price_avg, 2),
             "price_cv": round(price_cv, 2),
+            "new_listing_ratio_7d": new_listing_ratio_7d,
             "top5_sales": [
                 {
                     "title": i["title"],
@@ -443,6 +529,7 @@ class XianyuCrawler:
             ],
             "seller_distribution": sellers,
             "items": items,
+            "risk_signals": risks,
         }
 
     @staticmethod

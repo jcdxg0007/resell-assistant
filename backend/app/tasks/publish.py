@@ -2,7 +2,6 @@
 Publishing Celery tasks.
 Handles scheduled publishing, batch refresh, and listing health monitoring.
 """
-import asyncio
 import random
 from datetime import datetime, timezone, timedelta
 
@@ -17,14 +16,7 @@ from app.services.publish.xianyu_publisher import (
     publish_listing, refresh_listing, is_safe_time,
 )
 from app.services.notification import notification_service
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+from app.tasks._async_runner import run_async
 
 
 @celery_app.task(name="app.tasks.publish.execute_publish")

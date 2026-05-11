@@ -75,6 +75,7 @@ def _parse_qgnet_config(proxy_url: str) -> tuple[str, dict[str, str]]:
 async def resolve_proxy(
     proxy_url: str | None,
     platform: str | None = None,
+    area_override: str | None = None,
 ) -> dict[str, str] | None:
     """Resolve a proxy_url to a Playwright-compatible proxy config.
 
@@ -82,8 +83,20 @@ async def resolve_proxy(
     "username"/"password") that can be passed directly to Playwright's
     new_context(proxy=...). Returns None if no proxy / resolution failed.
 
-    The `platform` argument is used for short-term proxies to pick the
-    right IP group (see PLATFORM_GROUP). Ignored for static / long-term.
+    Arguments:
+        proxy_url: "qgshort:KEY:PWD[:area=...]" or similar provider URL.
+        platform: Used for short-term proxies to pick the risk-isolation
+            IP group (see PLATFORM_GROUP). Ignored for static / long-term.
+        area_override: Per-account GB-T 2260 area code (e.g. "350100"
+            for 福州市, or "350000" for 福建省). When supplied it takes
+            precedence over the ``area`` param embedded in proxy_url,
+            AND the IP pool is keyed by area instead of by platform
+            group — so an account bound to 福建 gets an IP from 福建,
+            and every other account bound to 福建 shares that same IP
+            (so the out-of-pocket cost is still bounded by area count,
+            not account count). This is the "one account, one area"
+            stickiness that makes the traffic look like geographically
+            consistent real users.
     """
     if not proxy_url:
         return None
@@ -91,7 +104,7 @@ async def resolve_proxy(
     proxy_url = proxy_url.strip()
 
     if proxy_url.startswith("qgshort:"):
-        return await _resolve_qgnet_short(proxy_url, platform)
+        return await _resolve_qgnet_short(proxy_url, platform, area_override)
 
     if proxy_url.startswith("qgnet:"):
         server = await _resolve_qgnet_longterm(proxy_url)
@@ -179,22 +192,37 @@ class _PerCallRedis:
 async def _resolve_qgnet_short(
     proxy_url: str,
     platform: str | None,
+    area_override: str | None = None,
 ) -> dict[str, str] | None:
     """Resolve short-term proxy with per-group IP sharing (Redis-backed).
 
-    Tasks in the same PLATFORM_GROUP reuse the group's active IP until it
-    expires; tasks in different groups get different IPs. Shared across all
-    Celery worker processes via Redis.
+    Two pool-keying strategies:
+    - When ``area_override`` is supplied → pool keyed by
+      ``area:{area}``. All accounts bound to the same area share one
+      IP until it expires. Different areas → different IPs. This is
+      the crawler-account geographic-stickiness path.
+    - Otherwise → pool keyed by ``group:{platform_group}`` (legacy
+      path, used by guest-mode crawls and non-account tasks).
     """
     key, pwd, extra = _parse_qgshort_config(proxy_url)
     if not key or not pwd:
         logger.error("青果短效代理配置错误: 需要 qgshort:KEY:PWD")
         return None
-    area = extra.get("area")
+    # area_override (per-account) > embedded area param > no area
+    area = area_override or extra.get("area")
 
-    group = PLATFORM_GROUP.get(platform or "", DEFAULT_GROUP)
-    pool_key = f"{_SHORT_POOL_REDIS_PREFIX}{group}"
-    lock_key = f"{_SHORT_LOCK_REDIS_PREFIX}{group}"
+    if area_override:
+        # Per-area pool: an area is a mini-platform in itself. Two
+        # different accounts bound to "350100" (Fuzhou) will share the
+        # same IP for that area's lifetime — which is what we want,
+        # since they're supposed to look like "Fuzhou users".
+        pool_scope = f"area:{area_override}"
+    else:
+        group = PLATFORM_GROUP.get(platform or "", DEFAULT_GROUP)
+        pool_scope = f"group:{group}"
+
+    pool_key = f"{_SHORT_POOL_REDIS_PREFIX}{pool_scope}"
+    lock_key = f"{_SHORT_LOCK_REDIS_PREFIX}{pool_scope}"
 
     async with _PerCallRedis() as redis_client:
         # Fast path: cached IP still fresh, return without locking
@@ -212,7 +240,7 @@ async def _resolve_qgnet_short(
                     cached = await _read_pool_entry(redis_client, pool_key)
                     if cached and cached["deadline_ts"] - time.time() > SHORT_MIN_REMAINING_SECONDS:
                         return _short_pool_to_playwright(cached, key, pwd)
-                logger.warning(f"青果短效池 [{group}] 等锁超时，强制重取")
+                logger.warning(f"青果短效池 [{pool_scope}] 等锁超时，强制重取")
 
             cached = await _read_pool_entry(redis_client, pool_key)
             now = time.time()
@@ -222,6 +250,10 @@ async def _resolve_qgnet_short(
             info = await _extract_qgnet_short(key, area)
             if not info:
                 return None
+            logger.info(
+                f"青果短效新 IP 入池 [{pool_scope}]: {info.get('proxy_ip')} "
+                f"({info.get('area','')}/{info.get('isp','')})"
+            )
 
             try:
                 from datetime import datetime
@@ -240,7 +272,7 @@ async def _resolve_qgnet_short(
             }
             await _write_pool_entry(redis_client, pool_key, entry, deadline_ts)
             logger.info(
-                f"青果短效池 [{group}]: {entry['server']} → 出口 {entry['proxy_ip']} "
+                f"青果短效池 [{pool_scope}]: {entry['server']} → 出口 {entry['proxy_ip']} "
                 f"({entry['area']}), {int(deadline_ts - now)}s 可用"
             )
             return _short_pool_to_playwright(entry, key, pwd)
@@ -249,16 +281,27 @@ async def _resolve_qgnet_short(
                 await _release_redis_lock(redis_client, lock_key)
 
 
-async def invalidate_short_group(platform: str | None):
-    """Drop the cached IP for the platform's group.
+async def invalidate_short_group(
+    platform: str | None, area: str | None = None
+):
+    """Drop the cached IP for a platform group or a specific area.
 
-    Call this after a crawling failure that you suspect was IP-related, so
-    the next task forces a fresh IP instead of reusing a bad one.
+    Call this after a crawling failure that you suspect was IP-related,
+    so the next task forces a fresh IP instead of reusing a bad one.
+
+    When ``area`` is supplied, only that area's per-area pool is
+    invalidated — other areas (and thus other bound accounts) keep
+    their IPs. This matches the per-area pool topology introduced
+    with account stickiness.
     """
-    group = PLATFORM_GROUP.get(platform or "", DEFAULT_GROUP)
+    if area:
+        scope = f"area:{area}"
+    else:
+        group = PLATFORM_GROUP.get(platform or "", DEFAULT_GROUP)
+        scope = f"group:{group}"
     async with _PerCallRedis() as redis_client:
-        await redis_client.delete(f"{_SHORT_POOL_REDIS_PREFIX}{group}")
-    logger.info(f"青果短效池 [{group}] 已失效，下次重新提取")
+        await redis_client.delete(f"{_SHORT_POOL_REDIS_PREFIX}{scope}")
+    logger.info(f"青果短效池 [{scope}] 已失效，下次重新提取")
 
 
 async def _read_pool_entry(redis_client, pool_key: str) -> dict | None:

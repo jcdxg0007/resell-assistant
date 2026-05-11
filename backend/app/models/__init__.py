@@ -9,6 +9,7 @@ from app.models.order import Order, Logistics
 from app.models.customer import Conversation, Message, ReplyTemplate
 from app.models.ai_ops import DailyReport, DailyCheck, AiSuggestion
 from app.models.system import Account, Task, Notification, SystemConfig, User
+from app.models.selection import Category, Keyword, KeywordProduct, KeywordScore
 
 __all__ = [
     "Product", "PriceSnapshot", "ProductMatch", "ProductScore", "ProductImage",
@@ -20,4 +21,5 @@ __all__ = [
     "Conversation", "Message", "ReplyTemplate",
     "DailyReport", "DailyCheck", "AiSuggestion",
     "Account", "Task", "Notification", "SystemConfig", "User",
+    "Category", "Keyword", "KeywordProduct", "KeywordScore",
 ]

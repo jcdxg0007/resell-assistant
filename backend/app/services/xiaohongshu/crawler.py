@@ -3,6 +3,7 @@ Xiaohongshu (XHS) crawler service.
 Playwright-based scraping of notes, topics, trending keywords, and comments.
 """
 import asyncio
+import math
 import random
 import re
 from datetime import datetime, timezone
@@ -331,6 +332,91 @@ class XhsCrawler:
             "total_comments_analyzed": total_comments_analyzed,
             "purchase_intent_comments": purchase_intent_comments,
             "detailed_notes": detailed[:10],
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # P4: temporary placeholder. XHS is the hardest to crawl as a guest
+    # and its risk of banning the account is high enough that we leave it
+    # offline until we do a dedicated XHS workstream. The scoring pipeline
+    # treats ``unavailable=True`` as "neutral score, data not yet wired",
+    # same as PDD/taobao on first rollout.
+    _XHS_DISABLED: bool = True
+
+    async def collect_market_data(
+        self, context, keyword: str, max_notes: int = 50
+    ) -> dict:
+        """Lightweight keyword-level heat snapshot for selection scoring.
+
+        Intentionally skips the expensive per-note detail / comment-intent
+        passes in :meth:`collect_category_data` — for instant_search we just
+        need note-count and engagement magnitude. Returns the standard shape
+        used by other platform crawlers.
+
+        ``heat_score = total_notes * log10(1 + avg_likes)`` gives a combined
+        "how much is the topic being talked about and how engaging is it"
+        signal that's robust to either dimension being 0.
+
+        Behaviour is gated by :attr:`_XHS_DISABLED`; when True we short-
+        circuit and return an explicit-placeholder shape so the
+        orchestrator can tag the dimension without actually burning a
+        crawl attempt on XHS (which tends to flag the cookie-less session
+        immediately).
+        """
+        if self._XHS_DISABLED:
+            logger.info(
+                f"XHS collect_market_data: placeholder mode (keyword='{keyword}'). "
+                f"Flip _XHS_DISABLED to False when the dedicated XHS workstream ships."
+            )
+            return {
+                "platform": "xhs",
+                "keyword": keyword,
+                "total_notes": 0,
+                "avg_likes": 0,
+                "heat_score": 0.0,
+                "items": [],
+                "placeholder": True,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        notes: list[dict] = []
+        try:
+            notes = await self.search_notes(context, keyword, max_notes=max_notes)
+        except Exception as e:
+            logger.warning(f"XHS search failed for '{keyword}': {e}")
+
+        if not notes:
+            return {
+                "platform": "xhs",
+                "keyword": keyword,
+                "total_notes": 0,
+                "avg_likes": 0,
+                "heat_score": 0.0,
+                "items": [],
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        likes_list = [n.get("likes", 0) or 0 for n in notes]
+        avg_likes = sum(likes_list) / len(likes_list) if likes_list else 0
+        product_notes = sum(1 for n in notes if n.get("has_product_link"))
+        product_ratio = (product_notes / len(notes) * 100) if notes else 0.0
+
+        heat_score = round(len(notes) * math.log10(1 + avg_likes), 2)
+
+        return {
+            "platform": "xhs",
+            "keyword": keyword,
+            "total_notes": len(notes),
+            "avg_likes": round(avg_likes, 1),
+            "product_note_ratio": round(product_ratio, 1),
+            "heat_score": heat_score,
+            "items": [
+                {
+                    "title": n.get("title", ""),
+                    "likes": n.get("likes", 0),
+                    "has_product_link": n.get("has_product_link", False),
+                }
+                for n in notes[:20]
+            ],
             "captured_at": datetime.now(timezone.utc).isoformat(),
         }
 

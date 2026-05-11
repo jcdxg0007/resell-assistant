@@ -1,5 +1,4 @@
 """Customer message collection Celery tasks."""
-import asyncio
 from loguru import logger
 from sqlalchemy import select
 from app.core.celery_app import celery_app
@@ -7,14 +6,7 @@ from app.core.database import AsyncSessionLocal
 from app.models.system import Account
 from app.models.customer import Conversation, Message
 from app.services.customer.message_hub import collect_xianyu_messages, classify_intent, generate_ai_reply
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+from app.tasks._async_runner import run_async
 
 
 @celery_app.task(name="app.tasks.customer.check_messages")

@@ -39,9 +39,15 @@ celery_app.conf.beat_schedule = {
     },
 
     # === Selection Engine ===
+    # Schedule design:
+    # - price_monitor / discovery / xhs tasks ALL run inside
+    #   COMPLIANCE_ACTIVE_HOURS_BEIJING (08:00 - 次日 02:00).
+    # - price_monitor (50 keyword × ~75s gate = ~60min per round) is
+    #   deliberately spaced 4h apart AND offset from discovery (hour
+    #   9/21) so the two never fight for the xianyu pacing slot.
     "xianyu-price-monitor": {
         "task": "app.tasks.selection.xianyu_price_monitor",
-        "schedule": crontab(minute=0, hour="*/4"),
+        "schedule": crontab(minute=0, hour="10,14,18,22"),
     },
     "xianyu-product-discovery": {
         "task": "app.tasks.selection.xianyu_product_discovery",
@@ -93,6 +99,16 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.session.check_all_sessions",
         "schedule": crontab(minute=0, hour="*/2"),
     },
+
+    # === Compliance ===
+    # Keeps the product library ≤ PRODUCT_LIBRARY_CAP (100k by default)
+    # via FIFO rotation on last_crawled_at. Runs once a day in low-
+    # traffic hours. See app.services.compliance for the four hard
+    # rules this supports.
+    "enforce-product-cap": {
+        "task": "app.tasks.compliance.enforce_product_cap",
+        "schedule": crontab(minute=15, hour=4),
+    },
 }
 
 celery_app.autodiscover_tasks([
@@ -102,4 +118,5 @@ celery_app.autodiscover_tasks([
     "app.tasks.customer",
     "app.tasks.ai_ops",
     "app.tasks.session",
+    "app.tasks.compliance",
 ])

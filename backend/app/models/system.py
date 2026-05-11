@@ -52,6 +52,20 @@ class Account(Base, UUIDMixin, TimestampMixin):
     # Persistent cookie storage (survives container restarts)
     cookies_data: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Crawler-pool rotation (used when platform LIKE '%_crawler').
+    # selection_service picks the account with the oldest last_used_at
+    # whose cooldown_until is NULL or in the past; see
+    # app.services.crawler_accounts for the implementation.
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Geographic stickiness for crawler accounts.
+    # 绑定了该账号每次出口的"家乡"——对应青果短效 `area` 参数（GB-T 2260
+    # 6 位区划码，省略后两位即可表示省/市）。一号一 area 让平台看到
+    # 的是"一个福建用户偶尔刷 APP"，而不是"同一账号从全国各地登录"。
+    # NULL 表示尚未绑定（首次 pick 时自动分配并持久化）。
+    bound_proxy_area: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
 
 class Task(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "tasks"

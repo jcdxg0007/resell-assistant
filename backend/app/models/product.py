@@ -98,7 +98,7 @@ class ProductScore(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "product_scores"
 
     product_id: Mapped[str] = mapped_column(UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
-    score_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "xianyu_10d" or "xhs_5d"
+    score_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "product_10d" or "xhs_5d"
     total_score: Mapped[float] = mapped_column(Float, nullable=False)
     dimension_scores: Mapped[dict] = mapped_column(JSON, nullable=False)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)  # "strong_recommend" / "worth_try" / "average" / "skip"

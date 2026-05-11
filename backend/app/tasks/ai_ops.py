@@ -1,16 +1,8 @@
 """AI Operations Celery tasks."""
-import asyncio
 from loguru import logger
 from app.core.celery_app import celery_app
 from app.services.ai_ops.daily_check import run_daily_self_check, run_daily_report
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+from app.tasks._async_runner import run_async
 
 
 @celery_app.task(name="app.tasks.ai_ops.daily_self_check")

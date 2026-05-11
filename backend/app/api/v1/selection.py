@@ -11,7 +11,8 @@ from app.models.xianyu import XianyuMarketData
 from app.models.system import User
 from app.schemas.product import ScoreRequest
 from app.services.selection.scoring import (
-    ScoringInput, calculate_xianyu_score, DECISION_LABELS,
+    ProductScoringInput, calculate_product_score, DECISION_LABELS,
+    PriceStats,
 )
 from app.services.selection.pricing import smart_pricing
 
@@ -30,7 +31,7 @@ async def xianyu_recommendations(
     query = (
         select(Product, ProductScore)
         .join(ProductScore, ProductScore.product_id == Product.id)
-        .where(ProductScore.score_type == "xianyu_10d")
+        .where(ProductScore.score_type == "product_10d")
         .where(ProductScore.total_score >= min_score)
         .where(Product.is_active == True)
     )
@@ -88,37 +89,32 @@ async def score_product(
     market = market_result.scalar_one_or_none()
 
     active_listings = market.active_listings if market else 0
-    price_cv = market.price_cv if market else 0
-    total_wants = market.total_wants if market else 0
-    new_ratio = (market.new_listings_7d / market.total_listings_7d * 100) if market and market.total_listings_7d else 0
-
-    # Calculate seller concentration
-    seller_dist = market.seller_distribution if market else {}
-    top1_ratio = 0.0
-    if seller_dist:
-        total_sellers = sum(seller_dist.values())
-        top1_count = max(seller_dist.values()) if seller_dist else 0
-        top1_ratio = (top1_count / total_sellers * 100) if total_sellers > 0 else 0
-
     xianyu_avg = market.price_avg if market else None
-    cross_gap = ((xianyu_avg - req.source_price) / req.source_price * 100) if xianyu_avg and req.source_price > 0 else 0
-    profit_margin = ((xianyu_avg - req.source_price - req.shipping_fee) / req.source_price * 100) if xianyu_avg and req.source_price > 0 else 0
+    price_min = (market.price_min if market else None) or 0.0
+    price_max = (market.price_max if market else None) or 0.0
 
-    scoring_input = ScoringInput(
-        active_listings=active_listings,
-        price_cv=price_cv,
-        total_wants=total_wants,
-        weekly_growth_rate=req.weekly_growth_rate,
-        top1_seller_ratio=top1_ratio,
-        profit_margin=profit_margin,
-        cross_platform_gap=cross_gap,
-        new_listing_ratio_7d=new_ratio,
-        source_good_review_rate=req.source_good_review_rate,
-        has_compat_complaints=req.has_compat_complaints,
-        unit_price=xianyu_avg or req.source_price * 1.5,
+    # Manual-score entry point doesn't run the full clean_keyword_sample path,
+    # so we fabricate a PriceStats from the stored market aggregates. Using
+    # avg as median and min/max as the quartile edges is an approximation,
+    # but good enough for a one-off score refresh on an individual product.
+    price_stats = PriceStats(
+        median=xianyu_avg or 0.0,
+        p25=price_min,
+        p75=price_max,
+        sample_size=active_listings or 0,
+        suspicious_count=0,
+    )
+    scoring_input = ProductScoringInput(
+        price=float(product.price or 0),
+        item_wants=int(product.sales_count or 0),
+        title=product.title or "",
+        relevance_score=10.0,  # manual score path trusts the operator
+        price_stats=price_stats,
+        taobao_match_price=req.source_price if req.source_price else None,
+        estimated_cost=(req.source_price + req.shipping_fee) if req.source_price else None,
     )
 
-    score_result = calculate_xianyu_score(scoring_input)
+    score_result = calculate_product_score(scoring_input)
 
     # Pricing suggestion
     top5_prices = [i["price"] for i in (market.top5_sales or [])] if market and market.top5_sales else []
@@ -134,7 +130,7 @@ async def score_product(
     dim_dict = {d.name: {"score": d.score, "max": d.max_score, "label": d.label} for d in score_result.dimensions}
     db_score = ProductScore(
         product_id=product_id,
-        score_type="xianyu_10d",
+        score_type="product_10d",
         total_score=score_result.total_score,
         dimension_scores=dim_dict,
         decision=score_result.decision,

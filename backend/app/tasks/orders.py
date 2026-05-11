@@ -2,7 +2,6 @@
 Order fulfillment Celery tasks.
 Handles order detection, auto-purchase, logistics sync, and refund monitoring.
 """
-import asyncio
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -17,14 +16,7 @@ from app.services.orders.fulfillment import fulfillment_service
 from app.services.orders.logistics import check_source_shipment, sync_tracking_to_xianyu
 from app.services.orders.refund import refund_service
 from app.services.notification import notification_service
-
-
-def run_async(coro):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+from app.tasks._async_runner import run_async
 
 
 @celery_app.task(name="app.tasks.orders.detect_new_orders")
