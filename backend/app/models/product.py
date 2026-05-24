@@ -50,6 +50,12 @@ class Product(Base, UUIDMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # PDD APP worker 协作字段（见 docs/PDD-自建采集-roadmap.md §10）
+    # seen_count: 同一 source_id 每被抓到一次就 +1，用户判断 pin 时的参考。
+    # pinned_at: 人工 pin 才设值，非 NULL 永不进每日清库。
+    seen_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     price_snapshots: Mapped[list["PriceSnapshot"]] = relationship(back_populates="product", cascade="all, delete-orphan")
     images: Mapped[list["ProductImage"]] = relationship(back_populates="product", cascade="all, delete-orphan")
 

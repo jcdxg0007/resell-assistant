@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # 4. 商品库硬上限。enforce_product_cap 按 last_crawled_at FIFO 淘汰。
     PRODUCT_LIBRARY_CAP: int = 100_000
 
+    # ─── PDD APP worker（家里 Windows）认证 ────────────────────────────────
+    # 见 docs/PDD-自建采集-roadmap.md。家里 worker 通过 HTTPS 长轮询 backend
+    # 拉任务/推结果，要带这个 Bearer token。生产环境务必从 .env 覆盖。
+    PDD_WORKER_TOKEN: str = "change-me-pdd-worker-token"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 

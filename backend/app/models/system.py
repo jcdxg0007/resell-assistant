@@ -65,6 +65,9 @@ class Account(Base, UUIDMixin, TimestampMixin):
     # 的是"一个福建用户偶尔刷 APP"，而不是"同一账号从全国各地登录"。
     # NULL 表示尚未绑定（首次 pick 时自动分配并持久化）。
     bound_proxy_area: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # 1-机-1-号 strict binding for PDD APP worker. See docs/PDD-自建采集-roadmap.md §4.2.
+    # NULL = not yet bound to a physical phone.
+    bound_device_serial: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class Task(Base, UUIDMixin, TimestampMixin):

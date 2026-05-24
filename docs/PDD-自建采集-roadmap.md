@@ -31,19 +31,24 @@
 - **Sealos devbox**（云端）—— 继续作为开发终端，跑 kubectl / git / 写代码 / 调 K8s
 - **家里 Windows PC**（用户日常远程桌面进的那台）—— 跑 worker，物理连接 USB 手机
 
+**关键架构修正（2026-05-24）**：Sealos Redis 是 K8s 内部 ClusterIP，家里 Windows 无法直连。所以引入 **backend HTTP bridge** —— worker 通过 HTTPS 长轮询 backend 的 `/api/v1/pdd-worker/*` endpoints 间接操作 Redis 队列。这一改动反而提升了安全性（HTTPS + API token）和可观测性（标准 HTTP 日志）。
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Sealos K8s (云端，已有)                                     │
-│  ├─ backend pod      (FastAPI 收 instant_search 请求)         │
+│  ├─ backend pod      (FastAPI)                              │
+│  │   ├─ /api/v1/instant-search          (前台业务)           │
+│  │   ├─ /api/v1/pdd-worker/poll         (worker 拉任务)      │
+│  │   └─ /api/v1/pdd-worker/result       (worker 推结果)      │
 │  ├─ celery_worker    (任务编排)                              │
-│  └─ celery_beat      (定时任务)                              │
+│  └─ celery_beat      (定时任务、每日清库)                    │
 │         │                                                    │
-│         │  rpush('pdd_app_task_q', task_json)                │
-│         │  blpop('pdd_app_result:{task_id}', timeout=120)    │
+│         │  内部 rpush/blpop                                  │
 │         ▼                                                    │
-│  Redis (Sealos 托管，已有)                                   │
+│  Redis (Sealos 托管，K8s 内部 ClusterIP)                     │
 └────────────────────────┬────────────────────────────────────┘
-                         │ 公网 TLS（Sealos Redis 公网入口）
+                         │ HTTPS (Sealos Ingress 域名)
+                         │ + Bearer Token 鉴权
                          │
 ┌────────────────────────▼────────────────────────────────────┐
 │  家里 Windows PC (24h 开机，用户远程桌面登录)                │
@@ -87,8 +92,8 @@
 |---|---|---|---|
 | 自动化框架 | **uiautomator2** | Appium | uiautomator2 是纯 Python + 轻量；Appium 跨平台但慢 |
 | 设备连接 | **USB 主 + WiFi-ADB 备** | 纯 WiFi-ADB | USB 稳定；WiFi 在路由器重启时会掉 |
-| 任务队列 | **复用现有 Redis** | RabbitMQ / NATS | 已有 Redis，避免引入新组件 |
-| 跨网络通信 | **Redis 队列 + Sealos 公网入口** | Tailscale / 反向代理 | 不开公网端口、不增网络复杂度 |
+| 任务队列 | **K8s 内部 Redis（不变）** | RabbitMQ / NATS | 已有 Redis，避免引入新组件 |
+| 跨网络通信 | **HTTPS + Sealos Ingress + Bearer Token**（长轮询）| 直连 Redis / Tailscale | Sealos Redis 不暴露公网，HTTPS 桥同时解决安全和可观测性 |
 | 手机型号 | **任意安卓 7+ 二手机** | iOS / 模拟器 | iOS 自动化贵且 PDD iOS 反爬更重 |
 | 是否 root | **不 root** | root + Frida | uiautomator2 不需要 root，且 PDD 检测 root |
 
