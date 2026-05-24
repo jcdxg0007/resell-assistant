@@ -17,9 +17,15 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from pathlib import Path
 
-from app.core.config import get_settings
-from app.services.pdd_app_queue import (
+# 让脚本无论从哪儿启动都能 import app.*（pod 内 /app 是 backend 根）
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from app.core.config import get_settings  # noqa: E402
+from app.services.pdd_app_queue import (  # noqa: E402
     PddAppResult,
     PddAppTask,
     await_result,
