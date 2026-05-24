@@ -218,6 +218,36 @@ Warning: would violate PodSecurity "restricted:v1.25": ...
 
 这是 Sealos 集群的 namespace 级 PodSecurity 设了 restricted profile，但当前 deployment 没满足。**不影响这次操作**——deployment 已经在跑，集群只是审计性警告，不会拒绝更新。如果未来想消除，需要给容器加 `securityContext.runAsNonRoot=true` 等字段，与本指南无关。
 
+### 4.5 devbox 上的孤儿 celery worker（2026-05 修复留底）
+
+历史现象：在 devbox 上做开发时如果跑过 `celery -A app.core.celery_app:celery_app worker`，**进程不会随终端关闭而退出**，会在后台继续连同一个 Redis broker 拉任务。
+
+危害：
+
+- devbox 跑的代码可能是当时本地未提交的旧版本——**它会"偷"K8s 那边的任务并用旧代码执行**
+- 结果：你以为在测试 K8s 部署的新镜像，但有 ~50% 概率被 devbox 接走，看到的现象跟新代码无关
+- 灾难场景：A/B 测试结论失真、bug 怀疑错地方
+
+**检查 + 清理**：
+
+```bash
+# 在 devbox 看是不是有
+ps -ef | grep -E "celery.*worker" | grep -v grep
+
+# 看集群里所有连着的 worker（应该只有 K8s celery pod 那一个）
+kubectl exec deployment/backend -- python3 -c "
+from app.core.celery_app import celery_app
+print(list((celery_app.control.inspect(timeout=5).active() or {}).keys()))
+"
+# 期望输出形如：['celery@celery-859f654988-xxxxx']
+# 如果还有 'celery@zmzs001' 之类的 devbox hostname，立刻 kill
+
+# 杀掉本地 worker
+pkill -f "celery.*app.core.celery_app"
+```
+
+**规范**：在 devbox 做任何 celery 相关开发，**收尾必须 `pkill -f celery`**。
+
 ---
 
 ## 5. 我可以做、绝对不能做的命令清单
@@ -236,6 +266,91 @@ Warning: would violate PodSecurity "restricted:v1.25": ...
 - `kubectl apply -f deploy/sealos/`（见 §4.1）
 - `kubectl delete deployment/...`（删了得手动重建）
 - `kubectl delete namespace ns-3zn44u6p`（删除整个项目）
+
+---
+
+## 5.5 V3/V4：账号指纹 + frozen cookies（2026-05 上线）
+
+### 5.5.1 它在做什么
+
+每个爬虫账号都有一组**稳定的伪硬件画像** + **冻结的平台设备 cookie**，都存在 `accounts.fingerprint` JSON 字段里（无 schema 变更）：
+
+```json
+{
+  "version": 1,
+  "hardware_concurrency": 4,
+  "device_memory": 8,
+  "screen": {"width": 1536, "height": 864, "color_depth": 24},
+  "platform_str": "Win32",
+  "frozen_cookies": {
+    "pdd":   {"_nano_fp": "...", "api_uid": "..."},
+    "1688":  {"cna": "...", "_tb_token_": "..."}
+  }
+}
+```
+
+- **`hardware_concurrency` / `device_memory` / `screen` / `platform_str`**——同一账号每次浏览器跑出来都是这套，不再全员 8/8
+- **`frozen_cookies[<platform>]`**——首次成功爬取后自动捕获 PDD `_nano_fp` 等设备级 cookie，下次进库前覆盖账号库里的旧值，让"设备身份"跨会话稳定
+
+### 5.5.2 查看现状
+
+```bash
+# 看全部账号的指纹分布
+kubectl exec deployment/backend -- python3 scripts/init_account_fingerprints.py
+
+# 输出示例（hw=hardware_concurrency, mem=device_memory）
+# pdd_crawler_0043  pdd_crawler   4  8  1536x864    Win32
+```
+
+### 5.5.3 新账号入库后
+
+`get_or_init_fingerprint` 会在该账号第一次被 pick 时**自动**生成并落库，不需要人工介入。但你也可以提前批量回填，避免第一次爬取时多一次 DB 写：
+
+```bash
+kubectl exec deployment/backend -- python3 scripts/init_account_fingerprints.py --auto --apply
+```
+
+### 5.5.4 强制重抽某个账号的指纹
+
+如果某账号被分到了一组太冷门的值（比如 16 核 / 4K 屏 / MacIntel 这种概率组合），偶尔需要重抽：
+
+```bash
+kubectl exec deployment/backend -- python3 scripts/init_account_fingerprints.py \
+  --reroll pdd_crawler_0043 --apply
+```
+
+`frozen_cookies` 会保留（只重抽硬件）。
+
+### 5.5.5 frozen_cookies 一直是空怎么办
+
+`frozen_cookies` **只在成功爬取（`active_listings > 0`）时**才自动写入。如果你看到 `frozen: none-yet` 一直填不上，原因一定是：
+
+1. 该账号的 cookies 已过期，爬取本身在登录墙截止（PDD H5 跳 login.html）
+2. 青果代理这一时段网络不稳，goto 一直 timeout
+3. 该账号被 quarantine 了，根本没被 pick
+
+排查顺序：
+
+```bash
+# 1. 看池现状
+kubectl exec deployment/backend -- python3 scripts/list_crawler_accounts.py
+
+# 2. 看该账号最近一次 cooldown 原因（日志）
+kubectl logs deployment/celery --since=2h | grep "quarantined" | grep <account_id>
+
+# 3. 单号体检（不走 V4 自动 freeze，纯探活）
+kubectl exec deployment/backend -- python3 scripts/test_pdd_account.py --suffix 0043
+```
+
+### 5.5.6 紧急关闭 V4 freeze（如果某天怀疑它引起问题）
+
+V4 的入口在 `app/tasks/selection.py` 的 `_pdd_call` / `_1688_call`，注释掉两行就行（`merge_frozen_into` 和 `freeze_platform_cookies`）。V3 不能关——关了等于回退到全 8/8。
+
+完整禁用方案：把 `accounts.fingerprint` 整列设为 NULL，所有路径会 fallback 到 V3/V4 之前的 8/8 默认行为：
+
+```bash
+kubectl exec deployment/backend -- python3 scripts/init_account_fingerprints.py --reset --apply
+```
 
 ---
 
