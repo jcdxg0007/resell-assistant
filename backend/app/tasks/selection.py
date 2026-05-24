@@ -30,6 +30,19 @@ from app.services.selection.product_scoring import (
 )
 
 
+# ────────────────────────── 数据源开关（临时禁用）─────────
+# 2026-05-23: PDD H5 端搜索已被官方关闭（对所有用户返空），1688
+# 受连带影响。详见 docs/开发文档_转卖助手.md §1.4 —— 已确定要走
+# APP 端方案或第三方电商数据 API 替代。在新通道上线前，临时把这
+# 两条线从 instant_search 主链路里摘掉以避免：
+#   - 持续消耗账号（反复触发 quarantine）
+#   - 噪音风控预警（每次跑都触发 DingTalk）
+#   - 浪费 compliance gate slot / 代理 IP
+# 切回 False 即可恢复 —— V3/V4 代码、账号池、SOP 都保留完整。
+_PDD_DISABLED: bool = True
+_ALIBABA_1688_DISABLED: bool = True
+
+
 def run_async(coro):
     """Helper to run async code from sync Celery tasks.
 
@@ -491,24 +504,32 @@ def instant_search(keyword: str, platform: str = "xianyu"):
     # We still try so the orchestrator can report risk signals and
     # score the keyword on whatever platforms did succeed.
     from app.services.crawler_accounts import pick_crawler_account_sync
-    pdd_account = pick_crawler_account_sync("pdd")
-    alibaba_account = pick_crawler_account_sync("1688")
-    if pdd_account:
-        _, name, cookies, area = (*pdd_account, None)[:4]
-        logger.info(
-            f"PDD pool pick: {name} ({len(cookies)} cookies, "
-            f"bound_area={area or '(unbound)'})"
-        )
+    if _PDD_DISABLED:
+        pdd_account = None
+        logger.info("PDD pool pick skipped (_PDD_DISABLED=True, see §1.4)")
     else:
-        logger.warning("PDD crawler pool exhausted (all accounts in cooldown or missing)")
-    if alibaba_account:
-        _, name, cookies, area = (*alibaba_account, None)[:4]
-        logger.info(
-            f"1688 pool pick: {name} ({len(cookies)} cookies, "
-            f"bound_area={area or '(unbound)'})"
-        )
+        pdd_account = pick_crawler_account_sync("pdd")
+        if pdd_account:
+            _, name, cookies, area = (*pdd_account, None)[:4]
+            logger.info(
+                f"PDD pool pick: {name} ({len(cookies)} cookies, "
+                f"bound_area={area or '(unbound)'})"
+            )
+        else:
+            logger.warning("PDD crawler pool exhausted (all accounts in cooldown or missing)")
+    if _ALIBABA_1688_DISABLED:
+        alibaba_account = None
+        logger.info("1688 pool pick skipped (_ALIBABA_1688_DISABLED=True, see §1.4)")
     else:
-        logger.warning("1688 crawler pool exhausted (all accounts in cooldown or missing)")
+        alibaba_account = pick_crawler_account_sync("1688")
+        if alibaba_account:
+            _, name, cookies, area = (*alibaba_account, None)[:4]
+            logger.info(
+                f"1688 pool pick: {name} ({len(cookies)} cookies, "
+                f"bound_area={area or '(unbound)'})"
+            )
+        else:
+            logger.warning("1688 crawler pool exhausted (all accounts in cooldown or missing)")
 
     # ── Crash-safety wrapper:
     # ``pick_crawler_account_sync`` already bumped ``last_used_at`` on
@@ -849,6 +870,13 @@ async def _instant_search(
     )
 
     async def _pdd_call() -> dict:
+        if _PDD_DISABLED:
+            return {
+                "platform": "pdd",
+                "__unavailable__": True,
+                "error": "platform_disabled:pdd_h5_search_closed",
+                "risk_signals": [],
+            }
         blocked = await _pass_gate("pdd")
         if blocked:
             return blocked
@@ -886,6 +914,13 @@ async def _instant_search(
         return result
 
     async def _1688_call() -> dict:
+        if _ALIBABA_1688_DISABLED:
+            return {
+                "platform": "1688",
+                "__unavailable__": True,
+                "error": "platform_disabled:upstream_consistently_returns_empty",
+                "risk_signals": [],
+            }
         blocked = await _pass_gate("1688")
         if blocked:
             return blocked
@@ -948,8 +983,14 @@ async def _instant_search(
     # PDD and 1688 run together fine (they're short, ~10s combined) so
     # we keep that parallelism. Total wall-clock goes up by ~10s in the
     # worst case; in return we get consistent cross-platform data.
+    _phase1_active = [
+        n for n, off in [("pdd", _PDD_DISABLED), ("1688", _ALIBABA_1688_DISABLED)]
+        if not off
+    ]
     logger.info(
-        f"Instant search '{keyword}': phase 1 → pdd + 1688"
+        f"Instant search '{keyword}': phase 1 → "
+        + (" + ".join(_phase1_active) if _phase1_active
+           else "disabled (pdd+1688 short-circuit, see §1.4)")
     )
     pdd_result, tb_result = await asyncio.gather(
         _gated("pdd",
