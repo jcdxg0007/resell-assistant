@@ -79,7 +79,7 @@ async def check_backend() -> bool:
         print(f"✅ backend 可达 + token 鉴权通过  worker_status={status}")
         return True
     except Exception as exc:
-        print(f"❌ backend 连接/鉴权失败: {exc}")
+        print(f"❌ backend 连接/鉴权失败: {type(exc).__name__}: {exc!r}")
         if "401" in str(exc):
             print("   修复：WORKER_TOKEN 跟 backend 不匹配。")
             print("   到 Sealos 控制台改 backend deploy 的 env PDD_WORKER_TOKEN，")
