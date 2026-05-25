@@ -105,15 +105,21 @@
 
 > 用号策略：4310 调通技术链路，稳定后切到 5514 金号验数据真实性。
 
-| 工作日 | 任务 | 验收 |
-|---|---|---|
-| Day 0 | Windows host 准备：装 Python 3.11+ / Android Platform Tools / scrcpy；手机开开发者选项 + USB 调试；关闭 PDD 自动更新 | `adb devices` 能看到 1 台手机 |
-| Day 1 | `pip install uiautomator2 && python -m uiautomator2 init`（自动装 atx-agent 到手机）；跑通官方 demo | Python 能截屏并保存 PNG |
-| Day 2 | 写 `pdd_app_client.py`：登录态检测、PDD APP 启动、搜索框定位、结果列表解析 | 命令行能输入关键词，返回 JSON 列表 |
-| Day 3 | 加健壮性层：开屏广告关闭、弹窗处理、网络异常重试、APP 闪退自动重启 + 贝塞尔曲线滑动 | 跑 50 次不挂 |
-| Day 4 | 写 `pdd_app_worker.py`：Redis 长轮询、任务 schema、结果回写；Windows 任务计划程序设开机自启 | 从 K8s 发任务，worker 接到并执行 |
-| Day 5 | 改 `backend/app/tasks/selection.py`：取消 `_PDD_DISABLED` 短路，把 PDD 分支切到走 Redis 队列；同步实现每日清库 beat | `instant_search('运动鞋')` 端到端能拿到 PDD 数据 |
-| Day 6-7 | 跑 72h 稳定性测试，日志收集 | 成功率 ≥ 90%，平均耗时 ≤ 30s/任务 |
+| 工作日 | 任务 | 验收 | 状态 |
+|---|---|---|---|
+| Day 0 | Windows host 准备：装 Python 3.11+ / Android Platform Tools / scrcpy；手机开开发者选项 + USB 调试；关闭 PDD 自动更新 | `adb devices` 能看到 1 台手机 | ✅ **2026-05-25**：Python 3.14、adb、scrcpy 全装好；OXF-AN10（荣耀 X20）serial=PKT0220416005274 已连通 |
+| Day 1 | HTTP bridge + worker 骨架；stub 任务端到端 | backend `enqueue → worker poll → result` 一次往返 | ✅ **2026-05-25**：stub 任务 1.4s 走通，3 ✅ 烟测通过 |
+| Day 2 | 写 `pdd_app_client.py`：登录态检测、PDD APP 启动、搜索框定位、结果列表解析 | 命令行能输入关键词，返回 JSON 列表 | ✅ **2026-05-25**：搜索栏 XPath（content-desc="搜索"）、IME 输入、提交全走通；50s 完整流程；商品卡解析待 Day 3 真机校准 |
+| Day 3 | 加健壮性层：开屏广告关闭、弹窗处理、网络异常重试、APP 闪退自动重启 + 贝塞尔曲线滑动；填实结果页商品卡 XPath | 跑 50 次不挂 | 🚧 进行中：`_dump_visible_cards` 已实装（基于价格元素几何聚类，不依赖混淆的 resource-id），待真机 dump 校准阈值 |
+| Day 4 | Windows 任务计划程序设开机自启；每日 self_check 任务 + 钉钉告警；锁屏防御已落地（4 策略） | 重启 Windows 后 5 分钟内 worker 自动上线 | pending |
+| Day 5 | 改 `backend/app/tasks/selection.py`：取消 `_PDD_DISABLED` 短路 + 拔 `_PDD_USE_APP_WORKER` 开关；同步实现每日清库 beat | `instant_search('运动鞋')` 端到端能拿到 PDD 数据 | 脚手架已就位（`_pdd_search_via_app_worker` 已写好），等 Day 3 验收过后拔开关 |
+| Day 6-7 | 跑 72h 稳定性测试，日志收集 | 成功率 ≥ 90%，平均耗时 ≤ 30s/任务 | pending |
+
+> 📝 **Day 2 中暴露的坑**（已修，留作后续参考）：
+> 1. **Honor X20 锁屏**：`d.swipe()` 不够强，需要走 `adb shell input swipe` + 极端坐标。已加 4 策略级联（builtin / shell-swipe / KEYCODE_MENU / long-press HOME）
+> 2. **PDD resource-id 全部混淆为 `id/pdd`**：3 个不同元素共用同 rid，rid 不可作为唯一定位 → 改 `content-desc="搜索"`
+> 3. **PDD 首页搜索栏是 TextView 不是 EditText**：点了之后才进二级搜索页有 EditText
+> 4. **uiautomator2 控制下 `app_current()` 可能跟实际屏幕显示不一致**：被锁屏覆盖时，PDD 显示在 activity stack 顶部但屏幕上是锁屏
 
 **Phase 1 出口标准**：
 
