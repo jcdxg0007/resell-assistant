@@ -60,26 +60,147 @@ async def _heartbeat_loop(client: "BackendClient") -> None:
 
 
 async def _process_task(task: dict[str, Any]) -> dict[str, Any]:
-    """Phase 1 Day 1：占位实现，返回 not_implemented。
+    """根据 task.kind 分派到具体 handler。
 
-    Day 2 接 PddAppClient 后会被替换。
+    Phase 1 Day 2 起接 PddAppClient。kind=search 走真采集；其他 kind 暂时还
+    没实现，返回 not_implemented 便于上游识别。
     """
     started = time.monotonic()
     task_id = task["task_id"]
     kind = task["kind"]
-    logger.info(f"[stub] received task {task_id} kind={kind}")
-    # 模拟 1 秒"工作"
-    await asyncio.sleep(1.0)
-    elapsed_ms = int((time.monotonic() - started) * 1000)
+    payload = task.get("payload") or {}
+    logger.info(f"received task {task_id} kind={kind} payload={payload}")
+
+    try:
+        if kind == "search":
+            return await _handle_search(task_id, payload, started)
+        if kind == "self_check":
+            return await _handle_self_check(task_id, payload, started)
+        # detail / history_price 等 Day 3+ 才实现
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "items": [],
+            "risk_signals": [],
+            "device_serial": None,
+            "account_name": None,
+            "elapsed_ms": elapsed_ms,
+            "error": f"not_implemented_yet:kind={kind}",
+            "raw_screenshot_path": None,
+        }
+    except Exception as exc:
+        logger.exception(f"task {task_id} dispatcher crashed: {exc}")
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "items": [],
+            "risk_signals": [],
+            "device_serial": None,
+            "account_name": None,
+            "elapsed_ms": elapsed_ms,
+            "error": f"dispatcher_exception:{type(exc).__name__}:{exc}",
+            "raw_screenshot_path": None,
+        }
+
+
+async def _handle_search(task_id: str, payload: dict[str, Any], started_at: float) -> dict[str, Any]:
+    """kind=search：连第一台健康设备，跑 PddAppClient.search。
+
+    Phase 1 Day 2 状态：链路通到 PddAppClient，但 _dump_visible_cards 还是
+    占位（Day 3 用真机校准 XPath 后才能真正取到商品）。所以现在能验：
+      - 开 PDD APP 不崩
+      - 搜索栏能输入关键词
+      - 没出风控墙
+      - 但 items=[] 是预期的
+    """
+    keyword = payload.get("keyword") or ""
+    mode = payload.get("mode", "fast")
+    if not keyword:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "items": [],
+            "risk_signals": [],
+            "device_serial": None,
+            "account_name": None,
+            "elapsed_ms": elapsed_ms,
+            "error": "missing_keyword",
+            "raw_screenshot_path": None,
+        }
+
+    from pdd_app_worker.device_manager import healthy_serials
+    from pdd_app_worker.pdd_app_client import PddAppClient
+
+    devices = healthy_serials()
+    if not devices:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "items": [],
+            "risk_signals": ["no_device"],
+            "device_serial": None,
+            "account_name": None,
+            "elapsed_ms": elapsed_ms,
+            "error": "no_healthy_device",
+            "raw_screenshot_path": None,
+        }
+    serial = devices[0]  # Phase 1 单机；Phase 2 按 account.bound_device_serial 路由
+
+    async with PddAppClient(serial) as cli:
+        search_result = await cli.search(keyword, mode=mode)
+
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    if search_result.error:
+        status = "risk_blocked" if any(
+            s in ("slide_verify", "captcha", "login_wall", "rate_limited")
+            for s in search_result.risk_signals
+        ) else "failed"
+        return {
+            "task_id": task_id,
+            "status": status,
+            "items": [],
+            "risk_signals": search_result.risk_signals,
+            "device_serial": serial,
+            "account_name": None,  # Day 3 加账号绑定后填
+            "elapsed_ms": elapsed_ms,
+            "error": search_result.error,
+            "raw_screenshot_path": search_result.raw_screenshot_path,
+        }
     return {
         "task_id": task_id,
-        "status": "failed",
-        "items": [],
-        "risk_signals": [],
-        "device_serial": None,
+        "status": "ok",
+        "items": search_result.items,
+        "risk_signals": search_result.risk_signals,
+        "device_serial": serial,
         "account_name": None,
         "elapsed_ms": elapsed_ms,
-        "error": "not_implemented_yet:phase1_day1_stub",
+        "error": None,
+        "raw_screenshot_path": search_result.raw_screenshot_path,
+    }
+
+
+async def _handle_self_check(task_id: str, payload: dict[str, Any], started_at: float) -> dict[str, Any]:
+    """kind=self_check：每天 backend 派一个空查询，看 worker + 手机 + PDD APP 是否健康。
+
+    Day 4 接入；这里先返回简单的设备探测结果。
+    """
+    from pdd_app_worker.device_manager import list_devices, healthy_serials
+
+    devices = list_devices()
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    return {
+        "task_id": task_id,
+        "status": "ok" if healthy_serials() else "failed",
+        "items": [{"serial": d.serial, "state": d.state} for d in devices],
+        "risk_signals": [] if healthy_serials() else ["no_device"],
+        "device_serial": healthy_serials()[0] if healthy_serials() else None,
+        "account_name": None,
+        "elapsed_ms": elapsed_ms,
+        "error": None if healthy_serials() else "no_healthy_device",
         "raw_screenshot_path": None,
     }
 

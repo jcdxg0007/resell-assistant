@@ -42,6 +42,15 @@ from app.services.selection.product_scoring import (
 _PDD_DISABLED: bool = True
 _ALIBABA_1688_DISABLED: bool = True
 
+# ────────────────── PDD APP worker 通道（Phase 1 联调用）──
+# True 时把 PDD 路径切到家里 Windows worker + 物理手机方案（见
+# docs/PDD-自建采集-roadmap.md）。注意必须同时把 `_PDD_DISABLED`
+# 翻成 False，否则上面 §1.4 的禁用早早 short-circuit 就过不到这里。
+#
+# Phase 1 Day 1 状态：worker 端到端通了（拿 stub 验过），pdd_app_client
+# 还没接 uiautomator2 真采集 → Day 2 完成后才能拔此开关 + 拔 _PDD_DISABLED。
+_PDD_USE_APP_WORKER: bool = False
+
 
 def run_async(coro):
     """Helper to run async code from sync Celery tasks.
@@ -221,6 +230,121 @@ async def _get_crawler_context(account_id: str | None = None, account_config: di
     config = account_config or {"proxy_url": None}
     ctx_id = account_id or "crawler_default"
     return await browser_manager.get_context(ctx_id, config)
+
+
+async def _pdd_search_via_app_worker(keyword: str, mode: str = "fast") -> dict:
+    """走家里 Windows worker + 物理手机 PDD APP 通道采集。
+
+    输入：关键词 + mode（fast/deep）。
+    输出：与 ``pdd_crawler.collect_market_data`` 兼容的 dict（active_listings,
+    items, price_min, robust_price_min, price_median, total_sales 等），
+    方便上游 scoring 流程不用改任何字段映射。
+
+    任何失败（worker 离线 / 超时 / worker 内部 status != ok）都返回
+    ``{"__unavailable__": True, "error": "..."}``，由 ``_fetch_platform_with_retry``
+    处理重试和降级，保持与 H5 路径同样的容错形状。
+
+    详见 docs/PDD-自建采集-roadmap.md §3.
+    """
+    from app.services.pdd_app_queue import (
+        PddAppTask, enqueue_task, await_result, get_worker_status,
+    )
+
+    status = await get_worker_status()
+    if not status.get("online"):
+        logger.warning(f"PDD APP worker offline (devices={status.get('devices', [])})")
+        return {
+            "platform": "pdd",
+            "__unavailable__": True,
+            "error": "pdd_app_worker_offline",
+            "active_listings": 0,
+            "items": [],
+            "risk_signals": [],
+        }
+
+    timeout_s = 180 if mode == "deep" else 90
+    task = PddAppTask(
+        kind="search",
+        payload={"keyword": keyword, "mode": mode},
+        timeout_s=timeout_s,
+    )
+    logger.info(
+        f"PDD APP worker: enqueue task_id={task.task_id} keyword='{keyword}' "
+        f"mode={mode} timeout={timeout_s}s worker_devices={status.get('devices')}"
+    )
+    await enqueue_task(task)
+    # 多给 30s buffer 覆盖 worker → backend HTTPS 往返
+    result = await await_result(task.task_id, timeout_s=timeout_s + 30)
+
+    if result is None:
+        logger.warning(f"PDD APP worker: task_id={task.task_id} timed out")
+        return {
+            "platform": "pdd",
+            "__unavailable__": True,
+            "error": "pdd_app_worker_timeout",
+            "active_listings": 0,
+            "items": [],
+            "risk_signals": [],
+        }
+
+    if result.status != "ok":
+        logger.warning(
+            f"PDD APP worker: task_id={task.task_id} status={result.status} "
+            f"error={result.error} risk_signals={result.risk_signals}"
+        )
+        # 把 worker 报的风控信号转成 anti_risk.RiskSignal 兼容形状，
+        # 让 _instant_search 的 DingTalk 聚合层能直接吃。
+        from app.services.anti_risk import RiskSignal
+        risk_objs = [
+            RiskSignal(
+                platform="pdd",
+                signal_type=sig,
+                detail=f"pdd_app_worker:{result.task_id}",
+            )
+            for sig in (result.risk_signals or [])
+        ]
+        return {
+            "platform": "pdd",
+            "__unavailable__": True,
+            "error": f"pdd_app_worker:{result.status}:{result.error or 'unknown'}",
+            "active_listings": 0,
+            "items": [],
+            "risk_signals": risk_objs,
+        }
+
+    # 把 worker 返回的商品列表映射回 H5 形状
+    items = result.items or []
+    prices = [float(it["price"]) for it in items if it.get("price")]
+    sorted_prices = sorted(prices)
+    # robust_price_min：去掉最低 5%，避免 1 元钓鱼链接干扰
+    drop_n = max(1, int(len(sorted_prices) * 0.05)) if len(sorted_prices) > 20 else 0
+    trimmed = sorted_prices[drop_n:] if drop_n else sorted_prices
+    median = (
+        sorted_prices[len(sorted_prices) // 2]
+        if sorted_prices else None
+    )
+
+    payload = {
+        "platform": "pdd",
+        "active_listings": len(items),
+        "items": items,
+        "price_min": sorted_prices[0] if sorted_prices else None,
+        "price_max": sorted_prices[-1] if sorted_prices else None,
+        "price_avg": (sum(prices) / len(prices)) if prices else None,
+        "robust_price_min": trimmed[0] if trimmed else None,
+        "price_median": median,
+        "total_sales": sum(it.get("sales", 0) for it in items),
+        "device_serial": result.device_serial,
+        "account_name": result.account_name,
+        "risk_signals": [],  # ok 路径没有要冒泡的信号
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+    }
+    logger.info(
+        f"PDD APP worker: task_id={task.task_id} OK — "
+        f"items={len(items)} price_min={payload['price_min']} "
+        f"robust_min={payload['robust_price_min']} device={result.device_serial}"
+    )
+    return payload
 
 
 @celery_app.task(name="app.tasks.selection.xianyu_price_monitor")
@@ -877,6 +1001,13 @@ async def _instant_search(
                 "error": "platform_disabled:pdd_h5_search_closed",
                 "risk_signals": [],
             }
+        # Phase 1：APP worker 通道分支。bypass H5 的 compliance_gate /
+        # browser_manager / proxy_pool —— APP 路径是物理设备 + 用户家庭
+        # 网络，跟服务端代理池/反爬 cookie 完全脱钩，所以这里短路。
+        # APP 通道自带速率控制（worker 端 _MIN_GAP_SECONDS）+ 账号绑定，
+        # 不需要重复加 server-side 闸口。
+        if _PDD_USE_APP_WORKER:
+            return await _pdd_search_via_app_worker(keyword, mode="fast")
         blocked = await _pass_gate("pdd")
         if blocked:
             return blocked
