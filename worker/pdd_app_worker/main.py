@@ -16,11 +16,12 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
