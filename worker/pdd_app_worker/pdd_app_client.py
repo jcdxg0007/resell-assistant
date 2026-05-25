@@ -331,13 +331,22 @@ class PddAppClient:
     async def _tap_search_entry(self) -> None:
         """点首页顶部搜索栏。
 
-        TODO Day 3：用真机 weditor 抓 resource-id 替换 text fallback。
+        2026-04 实测 PDD 首页搜索栏特征：
+        - class=android.widget.TextView（不是 EditText！EditText 在二级搜索页）
+        - resource-id="com.xunmeng.pinduoduo:id/pdd"（注意此 rid 被 PDD 全局
+          复用，单独不可作为唯一定位）
+        - content-desc="搜索"（**唯一可靠定位**）
+        - text 是占位符（上一次搜索关键词，比如"蒸蛋盖"）
+        - 旁边 [941,176] 有"拍照搜索" desc='拍照搜索'，不要误点
         """
         await _sleep_jitter(0.8)
         candidates = [
-            '//*[@resource-id="com.xunmeng.pinduoduo:id/pdd"]/android.widget.EditText',
+            # 主选：精确匹配 content-desc="搜索"（排除"拍照搜索"等组合词）
+            '//android.widget.TextView[@content-desc="搜索"]',
+            # 次选：所有 desc="搜索" 元素（万一 PDD 把 TextView 换成别的 class）
+            '//*[@content-desc="搜索"]',
+            # 兜底（留着以防 PDD 又换回 EditText 形态）
             '//android.widget.EditText[contains(@text, "搜索")]',
-            '//android.view.View[contains(@content-desc, "搜索框")]',
         ]
         clicked = False
         for xpath in candidates:
@@ -348,9 +357,10 @@ class PddAppClient:
                 if el:
                     await asyncio.to_thread(lambda x=xpath: self._d.xpath(x).click())
                     clicked = True
-                    logger.debug(f"[{self.serial}] tapped search entry: {xpath}")
+                    logger.info(f"[{self.serial}] tapped search entry via: {xpath}")
                     break
-            except Exception:
+            except Exception as exc:
+                logger.debug(f"[{self.serial}] tap_search_entry candidate failed: {xpath} -> {exc}")
                 continue
         if not clicked:
             raise RuntimeError("找不到首页搜索入口 —— 检查 PDD 是否在首页且 UI 没大改")
