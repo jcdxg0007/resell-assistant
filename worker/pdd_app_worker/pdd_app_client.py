@@ -420,43 +420,91 @@ class PddAppClient:
         return None
 
     async def _wait_search_results(self) -> None:
-        """等结果列表 RecyclerView 出现。"""
-        def _do():
-            # PDD 搜索结果用的是 RecyclerView，先简单等一下
-            time.sleep(1.5)
-            return True
+        """等结果列表 RecyclerView 出现。
 
-        await asyncio.to_thread(_do)
+        PDD 反爬手段之一是 **lazy-render 价格/销量**：标题渲染快，价格/销量延
+        迟渲染或只渲染中心卡片。所以这里：
+        1. 多等一会（3s）让首屏稳定
+        2. 做一次"暖屏滚动"（下滑 300px + 上滑回来）强制 PDD 渲染所有可见卡片
+        """
+        def _do_sync():
+            time.sleep(3.0)
+            w, h = self._d.window_size()
+            mid_x = w // 2
+            # 暖屏：下滑 300px 触发懒加载
+            self._d.swipe(mid_x, int(h * 0.6), mid_x, int(h * 0.6) - 300, 0.4)
+            time.sleep(0.8)
+            # 滑回原位
+            self._d.swipe(mid_x, int(h * 0.6) - 300, mid_x, int(h * 0.6), 0.4)
+            time.sleep(1.0)
+
+        await asyncio.to_thread(_do_sync)
 
     async def _collect_items(
         self, target_count: int, scroll_screens: int
     ) -> list[dict[str, Any]]:
         """抓商品卡片。先 dump 当前屏的所有 item，再滚动 N 次合并去重。
 
-        商品卡片在 PDD APP 里的特征（Day 2 初稿，Day 3 校准）：
-        - 容器：RecyclerView 直接子 ViewGroup
-        - 标题：商品标题 TextView，通常 2 行截断
-        - 价格：以"¥"开头的 TextView，或带 ¥ 符号的小字
-        - 销量/拼单数：含"已拼"或"件已拼"或"+人已拼"的 TextView
+        每屏内部如果发现 ≥ 50% 卡片缺价（lazy-render 未完成），延迟 1s 再 dump
+        一次，按 title 合并、更晚 dump 的非零价格覆盖较早的零价格。
         """
-        seen_titles: set[str] = set()
-        items: list[dict[str, Any]] = []
+        seen_titles: dict[str, dict[str, Any]] = {}  # title → 最新数据
 
         for screen_idx in range(scroll_screens):
-            cards = await self._dump_visible_cards()
+            cards = await self._dump_with_lazy_recovery()
             for card in cards:
                 title = card.get("title", "").strip()
-                if not title or title in seen_titles:
+                if not title:
                     continue
-                seen_titles.add(title)
-                items.append(card)
-                if len(items) >= target_count:
-                    return items
-            # 还要继续滚就 swipe
+                if title in seen_titles:
+                    # 已存在 → 非零字段补全（lazy-render 二次抓到的值优先）
+                    existing = seen_titles[title]
+                    for k in ("price", "sales"):
+                        if not existing.get(k) and card.get(k):
+                            existing[k] = card[k]
+                    continue
+                seen_titles[title] = card
+                if len(seen_titles) >= target_count:
+                    return list(seen_titles.values())
             if screen_idx < scroll_screens - 1:
                 await self._human_scroll_down()
                 await _sleep_jitter(1.0)
-        return items
+        return list(seen_titles.values())
+
+    async def _dump_with_lazy_recovery(self) -> list[dict[str, Any]]:
+        """dump 一次；如果 ≥ 50% 卡片缺价，等 1s 再 dump 一次，按 title 合并。
+
+        合并规则：第二次 dump 拿到的非零 price/sales 覆盖第一次的零值。
+        """
+        first = await self._dump_visible_cards()
+        if not first:
+            return first
+        missing = sum(1 for c in first if not c.get("price"))
+        if missing < len(first) * 0.5:
+            return first
+
+        logger.info(
+            f"[{self.serial}] {missing}/{len(first)} cards missing price — "
+            f"waiting 1s and re-dumping"
+        )
+        await asyncio.sleep(1.0)
+        second = await self._dump_visible_cards()
+        if not second:
+            return first
+
+        by_title: dict[str, dict[str, Any]] = {c["title"]: dict(c) for c in first}
+        for c in second:
+            t = c.get("title")
+            if not t:
+                continue
+            if t not in by_title:
+                by_title[t] = dict(c)
+                continue
+            # 第二次拿到非零的就覆盖第一次的零
+            for k in ("price", "sales"):
+                if not by_title[t].get(k) and c.get(k):
+                    by_title[t][k] = c[k]
+        return list(by_title.values())
 
     async def _dump_visible_cards(self) -> list[dict[str, Any]]:
         """解析当前屏可见的商品卡片列表（Day 3 真机校准版）。
@@ -520,6 +568,7 @@ class PddAppClient:
             return []
 
         # 2. 每个标题 → 一个商品卡片
+        CARD_UP_EXTEND = 70     # 标题上方延伸 70px 捕获"广告"标识
         CARD_DOWN_EXTEND = 250  # 标题向下延伸 250px 算同卡片
         CARD_X_PAD = 50         # x 方向容差，应对子元素稍微出格
 
@@ -529,7 +578,7 @@ class PddAppClient:
         items: list[dict[str, Any]] = []
         for t in title_anchors:
             tx1, ty1, tx2, ty2 = t["bounds"]
-            card_y_min = ty1 - 10  # 给上方一点空间收"广告"标识
+            card_y_min = ty1 - CARD_UP_EXTEND
             card_y_max = ty2 + CARD_DOWN_EXTEND
             card_x_min = tx1 - CARD_X_PAD
             card_x_max = tx2 + CARD_X_PAD
