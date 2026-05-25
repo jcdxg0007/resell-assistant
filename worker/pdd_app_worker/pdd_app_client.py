@@ -124,55 +124,97 @@ class PddAppClient:
         await self._unlock_if_needed()
 
     async def _unlock_if_needed(self) -> None:
-        """处理空锁屏：亮屏 + 上滑。
+        """处理空锁屏：亮屏 + 多策略上滑。
 
-        只能解开"无密码"锁屏（手势/PIN/指纹都不行）。建议在手机设置里
-        把锁屏完全关掉，让 worker 不依赖这一步。
-
-        实现：
-        1. 屏幕熄屏 → screen_on
-        2. dump 当前 UI，看是不是只有 systemui / keyguard 元素 → 上滑
-        3. 上滑后再 dump 验证（如果还是 systemui → 说明有密码锁，报错让人工介入）
+        策略链（首个成功的就 return）：
+        1. uiautomator2 内置 d.unlock()
+        2. 通过 adb input shell 强滑（屏幕底 →顶，0.6s 慢滑）×3
+        3. KEYCODE_MENU（部分锁屏对菜单键敏感）
+        全失败才报错。只能解开"无密码"锁屏；密码/手势/指纹都不行。
         """
         def _do_unlock() -> str:
             d = self._d
             if not d.info.get("screenOn"):
                 d.screen_on()
-                time.sleep(0.5)
-            # 检测是否被锁屏覆盖
-            xml = d.dump_hierarchy()
-            # 锁屏特征：dump 出来全是 com.android.systemui / .keyguard 元素
-            #         且看不到任何 PDD / launcher 包名
-            looks_locked = (
-                "com.android.systemui" in xml
-                and "com.xunmeng.pinduoduo" not in xml
-                and "launcher" not in xml.lower()
+                time.sleep(1.0)
+
+            def _looks_locked() -> tuple[bool, int, int, int]:
+                """返回 (是否锁屏, 总节点数, systemui节点数, PDD节点数)。"""
+                xml = d.dump_hierarchy()
+                total = xml.count("<node ")
+                sysui = xml.count("com.android.systemui")
+                pdd = xml.count("com.xunmeng.pinduoduo")
+                launcher = xml.lower().count("launcher")
+                # 锁屏特征：节点很少 + 几乎全是 systemui + 完全没有 PDD/launcher
+                locked = (
+                    total < 25
+                    and sysui >= 1
+                    and pdd == 0
+                    and launcher == 0
+                )
+                return locked, total, sysui, pdd
+
+            locked, total, sysui, pdd_n = _looks_locked()
+            logger.info(
+                f"[{self.serial}] initial dump: total={total} sysui={sysui} pdd={pdd_n} "
+                f"→ {'LOCKED' if locked else 'UNLOCKED'}"
             )
-            if not looks_locked:
+            if not locked:
                 return "not_locked"
-            # 上滑解锁
+
+            # ── Strategy 1: built-in d.unlock()
+            try:
+                d.unlock()
+                time.sleep(1.5)
+                locked, *_ = _looks_locked()
+                if not locked:
+                    return "unlocked_builtin"
+            except Exception as e:
+                logger.debug(f"d.unlock() raised: {e}")
+
+            # ── Strategy 2: aggressive shell-swipe from very bottom to very top
             w, h = d.window_size()
-            d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.15), 0.3)
-            time.sleep(0.8)
-            # 验证是否解开
-            xml2 = d.dump_hierarchy()
-            still_locked = (
-                "com.android.systemui" in xml2
-                and "launcher" not in xml2.lower()
-                and "com.xunmeng.pinduoduo" not in xml2
-            )
-            return "still_locked_after_swipe" if still_locked else "unlocked"
+            for attempt in range(3):
+                # `input swipe x1 y1 x2 y2 duration_ms` —— 直接走 Android input
+                # subsystem，比 d.swipe() 更接近真实输入
+                d.shell(f"input swipe {w // 2} {h - 5} {w // 2} 5 600")
+                time.sleep(1.3)
+                locked, total, sysui, pdd_n = _looks_locked()
+                logger.info(
+                    f"[{self.serial}] shell-swipe attempt {attempt + 1}: "
+                    f"total={total} sysui={sysui} pdd={pdd_n} "
+                    f"→ {'still locked' if locked else 'UNLOCKED'}"
+                )
+                if not locked:
+                    return f"unlocked_shell_swipe_attempt_{attempt + 1}"
+
+            # ── Strategy 3: MENU key
+            d.shell("input keyevent 82")
+            time.sleep(1.0)
+            locked, *_ = _looks_locked()
+            if not locked:
+                return "unlocked_menu_key"
+
+            # ── Strategy 4: long press home (Honor-specific)
+            d.shell("input keyevent --longpress KEYCODE_HOME")
+            time.sleep(1.0)
+            locked, *_ = _looks_locked()
+            if not locked:
+                return "unlocked_long_home"
+
+            return "still_locked"
 
         status = await asyncio.to_thread(_do_unlock)
         if status == "not_locked":
             logger.debug(f"[{self.serial}] screen not locked, skip unlock")
-        elif status == "unlocked":
-            logger.info(f"[{self.serial}] unlocked via swipe-up")
+        elif status.startswith("unlocked"):
+            logger.info(f"[{self.serial}] unlock OK via: {status}")
         else:
-            # 上滑后还是 systemui → 大概率是密码/手势锁
             raise RuntimeError(
-                "lock_screen_has_password: 上滑解锁失败，手机上配置了密码/手势/指纹锁。"
-                "请到手机【设置 → 安全 → 锁屏密码】把锁屏完全关掉，worker 才能工作。"
+                "lock_screen_unlock_failed: 4 种策略都没解开锁屏。"
+                "如果手机上配置了密码/手势/指纹，请到【设置→安全→锁屏密码】关掉。"
+                "如果没密码却还是失败，可能是 Honor Magic UI 锁屏对自动滑动有特殊过滤，"
+                "需要去【设置→系统和更新→开发人员选项→关闭防止误触】或换 swipe 实现。"
             )
 
     async def _post_task_cleanup(self) -> None:
