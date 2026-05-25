@@ -472,9 +472,11 @@ class PddAppClient:
         return list(seen_titles.values())
 
     async def _dump_with_lazy_recovery(self) -> list[dict[str, Any]]:
-        """dump 一次；如果 ≥ 50% 卡片缺价，等 1s 再 dump 一次，按 title 合并。
+        """dump 一次；如果 ≥ 50% 卡片缺价，做微滚动 + 再 dump，按 title 合并。
 
-        合并规则：第二次 dump 拿到的非零 price/sales 覆盖第一次的零值。
+        关键差异（vs 上一版本）：第二次 dump 前**强制触发 RecyclerView
+        重新 bind ViewHolder** —— 做一个小幅度上下滚动让所有 view 重新进入
+        viewport center，PDD 才会渲染价格/销量。
         """
         first = await self._dump_visible_cards()
         if not first:
@@ -485,25 +487,48 @@ class PddAppClient:
 
         logger.info(
             f"[{self.serial}] {missing}/{len(first)} cards missing price — "
-            f"waiting 1s and re-dumping"
+            f"micro-scroll + redump"
         )
-        await asyncio.sleep(1.0)
+
+        # 微滚动：上滑 100 → 下滑 100，让 RecyclerView 重 bind 所有 ViewHolder
+        def _micro_scroll():
+            w, h = self._d.window_size()
+            mx = w // 2
+            self._d.swipe(mx, int(h * 0.6), mx, int(h * 0.6) - 150, 0.3)
+            time.sleep(0.6)
+            self._d.swipe(mx, int(h * 0.6) - 150, mx, int(h * 0.6), 0.3)
+            time.sleep(1.0)
+
+        await asyncio.to_thread(_micro_scroll)
         second = await self._dump_visible_cards()
         if not second:
             return first
 
+        # 还缺 → 再来一次（最多 3 次 dump）
+        still_missing = sum(1 for c in second if not c.get("price"))
+        if still_missing >= len(second) * 0.5:
+            logger.info(
+                f"[{self.serial}] still {still_missing}/{len(second)} missing — "
+                f"one more micro-scroll + redump"
+            )
+            await asyncio.to_thread(_micro_scroll)
+            third = await self._dump_visible_cards()
+        else:
+            third = []
+
         by_title: dict[str, dict[str, Any]] = {c["title"]: dict(c) for c in first}
-        for c in second:
-            t = c.get("title")
-            if not t:
-                continue
-            if t not in by_title:
-                by_title[t] = dict(c)
-                continue
-            # 第二次拿到非零的就覆盖第一次的零
-            for k in ("price", "sales"):
-                if not by_title[t].get(k) and c.get(k):
-                    by_title[t][k] = c[k]
+        for dump_pass in (second, third):
+            for c in dump_pass:
+                t = c.get("title")
+                if not t:
+                    continue
+                if t not in by_title:
+                    by_title[t] = dict(c)
+                    continue
+                # 非零的覆盖零的（多次 dump 取最完整的字段）
+                for k in ("price", "sales"):
+                    if not by_title[t].get(k) and c.get(k):
+                        by_title[t][k] = c[k]
         return list(by_title.values())
 
     async def _dump_visible_cards(self) -> list[dict[str, Any]]:
