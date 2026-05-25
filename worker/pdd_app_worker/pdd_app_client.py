@@ -461,18 +461,122 @@ class PddAppClient:
     async def _dump_visible_cards(self) -> list[dict[str, Any]]:
         """解析当前屏可见的商品卡片列表。
 
-        Day 2 占位实现：返回空列表 + 一条 TODO 日志。Day 3 用真机做 UI dump
-        后填充实际的 XPath / 解析逻辑。
+        实现思路（Day 3 校准后的版本）：
+        - PDD 结果页商品卡片用 RecyclerView 渲染，每个卡片是一个 ViewGroup
+        - 一个完整卡片节点子树里通常会同时出现：
+            * 标题（一段 ≥ 6 个汉字的 TextView）
+            * 价格（带 ¥ 或 ￥ 的 TextView）
+            * 销量（含"已拼"或"已售"的 TextView）
+        - 我们不强求标题/销量必须能取到，但**价格必须有**（没价格的不算商品卡）
+
+        解析策略：先按 RecyclerView 容器框定范围，然后按 bounds 把元素聚合
+        成卡片 —— 同一卡片内的元素 y 坐标接近（差距 < CARD_HEIGHT_THRESHOLD）。
         """
-        # TODO(Day 3): 把以下伪代码实现：
-        #   1. self._d.dump_hierarchy() 拿当前 UI XML
-        #   2. xml.etree 解析，找所有商品卡片 ViewGroup
-        #   3. 每个卡片里取 title + price + sales + image_url（element bounds → 截图裁剪）
-        #   4. 返回 [{"title": ..., "price": float, "sales": int, ...}, ...]
-        logger.warning(
-            f"[{self.serial}] _dump_visible_cards: NOT IMPLEMENTED — Day 3 will fill"
+        import xml.etree.ElementTree as ET
+
+        def _do_dump():
+            return self._d.dump_hierarchy()
+
+        xml_str = await asyncio.to_thread(_do_dump)
+        try:
+            root = ET.fromstring(xml_str)
+        except ET.ParseError as e:
+            logger.warning(f"[{self.serial}] dump_hierarchy unparseable: {e}")
+            return []
+
+        # 1. 收集所有"价格 TextView"作为卡片锚点
+        price_elements: list[dict[str, Any]] = []
+        text_elements: list[dict[str, Any]] = []
+        sales_elements: list[dict[str, Any]] = []
+        for n in root.iter("node"):
+            cls = n.get("class", "")
+            if "TextView" not in cls:
+                continue
+            text = (n.get("text") or "").strip()
+            if not text:
+                continue
+            bounds = _parse_bounds(n.get("bounds", ""))
+            if bounds is None:
+                continue
+            x1, y1, x2, y2 = bounds
+            element = {
+                "text": text,
+                "bounds": bounds,
+                "center": ((x1 + x2) // 2, (y1 + y2) // 2),
+                "node": n,
+            }
+            if "¥" in text or "￥" in text:
+                price_elements.append(element)
+            elif "已拼" in text or "已售" in text:
+                sales_elements.append(element)
+            else:
+                # 过滤掉明显的系统栏 / 装饰文本
+                if "android.systemui" in n.get("resource-id", ""):
+                    continue
+                if len(text) < 4 or text.isdigit():
+                    continue
+                text_elements.append(element)
+
+        if not price_elements:
+            logger.warning(
+                f"[{self.serial}] no price elements found in dump "
+                f"(may be on splash/loading screen)"
+            )
+            return []
+
+        # 2. 把每个价格元素当作一个商品卡片的锚点，向上/左/下找标题、销量
+        CARD_HEIGHT = 600  # 经验值：单屏最多 ~4 个卡片 / 屏高 2400 ≈ 600
+        items: list[dict[str, Any]] = []
+        for price_el in price_elements:
+            px, py = price_el["center"]
+            # 找标题：同卡片内（|y - py| < CARD_HEIGHT/2）+ x 接近 + 文本最长
+            title_candidates = [
+                e for e in text_elements
+                if abs(e["center"][1] - py) < CARD_HEIGHT // 2
+                and abs(e["center"][0] - px) < 600  # 同列卡片
+                and e["center"][1] < py  # 标题在价格上方
+            ]
+            title_candidates.sort(key=lambda e: -len(e["text"]))
+            title = title_candidates[0]["text"] if title_candidates else None
+
+            # 找销量：同卡片内 + 价格附近（通常在价格右边）
+            sales_candidates = [
+                e for e in sales_elements
+                if abs(e["center"][1] - py) < CARD_HEIGHT // 2
+                and abs(e["center"][0] - px) < 600
+            ]
+            sales = (
+                parse_sales(sales_candidates[0]["text"])
+                if sales_candidates else 0
+            )
+
+            price = parse_price(price_el["text"])
+            if price is None or price <= 0:
+                continue
+            if not title:
+                continue  # 没标题没法去重 / 后续 scoring，跳过
+            items.append({
+                "title": title,
+                "price": price,
+                "sales": sales or 0,
+                "bounds": price_el["bounds"],
+            })
+
+        # 去重：title 相同的合并（同一卡片不同区域多次匹配）
+        seen_titles: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        for it in items:
+            if it["title"] in seen_titles:
+                continue
+            seen_titles.add(it["title"])
+            deduped.append(it)
+
+        logger.info(
+            f"[{self.serial}] dumped {len(deduped)} cards from current screen "
+            f"(price_anchors={len(price_elements)}, "
+            f"title_pool={len(text_elements)}, sales_pool={len(sales_elements)})"
         )
-        return []
+        return deduped
 
     async def _human_scroll_down(self) -> None:
         """人类化向下滑动一屏，触发 RecyclerView 懒加载。"""
@@ -487,6 +591,15 @@ class PddAppClient:
 
 _PRICE_RE = re.compile(r"[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)")
 _SALES_RE = re.compile(r"([0-9.]+)([万千]?)")
+_BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def _parse_bounds(s: str) -> tuple[int, int, int, int] | None:
+    """'[0,398][540,1100]' → (0, 398, 540, 1100)。"""
+    m = _BOUNDS_RE.match(s or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.groups())  # type: ignore[return-value]
 
 
 def parse_price(text: str) -> float | None:
