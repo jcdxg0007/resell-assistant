@@ -121,6 +121,59 @@ class PddAppClient:
             return d
 
         self._d = await asyncio.to_thread(_do_connect)
+        await self._unlock_if_needed()
+
+    async def _unlock_if_needed(self) -> None:
+        """处理空锁屏：亮屏 + 上滑。
+
+        只能解开"无密码"锁屏（手势/PIN/指纹都不行）。建议在手机设置里
+        把锁屏完全关掉，让 worker 不依赖这一步。
+
+        实现：
+        1. 屏幕熄屏 → screen_on
+        2. dump 当前 UI，看是不是只有 systemui / keyguard 元素 → 上滑
+        3. 上滑后再 dump 验证（如果还是 systemui → 说明有密码锁，报错让人工介入）
+        """
+        def _do_unlock() -> str:
+            d = self._d
+            if not d.info.get("screenOn"):
+                d.screen_on()
+                time.sleep(0.5)
+            # 检测是否被锁屏覆盖
+            xml = d.dump_hierarchy()
+            # 锁屏特征：dump 出来全是 com.android.systemui / .keyguard 元素
+            #         且看不到任何 PDD / launcher 包名
+            looks_locked = (
+                "com.android.systemui" in xml
+                and "com.xunmeng.pinduoduo" not in xml
+                and "launcher" not in xml.lower()
+            )
+            if not looks_locked:
+                return "not_locked"
+            # 上滑解锁
+            w, h = d.window_size()
+            d.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.15), 0.3)
+            time.sleep(0.8)
+            # 验证是否解开
+            xml2 = d.dump_hierarchy()
+            still_locked = (
+                "com.android.systemui" in xml2
+                and "launcher" not in xml2.lower()
+                and "com.xunmeng.pinduoduo" not in xml2
+            )
+            return "still_locked_after_swipe" if still_locked else "unlocked"
+
+        status = await asyncio.to_thread(_do_unlock)
+        if status == "not_locked":
+            logger.debug(f"[{self.serial}] screen not locked, skip unlock")
+        elif status == "unlocked":
+            logger.info(f"[{self.serial}] unlocked via swipe-up")
+        else:
+            # 上滑后还是 systemui → 大概率是密码/手势锁
+            raise RuntimeError(
+                "lock_screen_has_password: 上滑解锁失败，手机上配置了密码/手势/指纹锁。"
+                "请到手机【设置 → 安全 → 锁屏密码】把锁屏完全关掉，worker 才能工作。"
+            )
 
     async def _post_task_cleanup(self) -> None:
         """任务结束清场：随机滚动一下首页或返回桌面，避免下次进来卡在结果页。"""
