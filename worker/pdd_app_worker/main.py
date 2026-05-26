@@ -32,6 +32,11 @@ logger = logging.getLogger("pdd_app_worker")
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", "45"))
 WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
 
+# Phase 1 单设备阶段：这台 worker 上当前 PDD APP 登录的账号 account_name。
+# 仅作 audit/日志用途（worker 不切账号，PDD APP 实际登录的是谁就用谁）。
+# 换号时同步改这个值；为空就用 "unknown"。
+BOUND_PDD_ACCOUNT = os.environ.get("BOUND_PDD_ACCOUNT", "unknown")
+
 _shutdown = asyncio.Event()
 
 
@@ -156,7 +161,8 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     if search_result.error:
         status = "risk_blocked" if any(
-            s in ("slide_verify", "captcha", "login_wall", "rate_limited")
+            s in ("slide_verify", "captcha", "login_wall",
+                  "rate_limited", "real_name_wall")
             for s in search_result.risk_signals
         ) else "failed"
         return {
@@ -165,7 +171,7 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
             "items": [],
             "risk_signals": search_result.risk_signals,
             "device_serial": serial,
-            "account_name": None,  # Day 3 加账号绑定后填
+            "account_name": BOUND_PDD_ACCOUNT,
             "elapsed_ms": elapsed_ms,
             "error": search_result.error,
             "raw_screenshot_path": search_result.raw_screenshot_path,
@@ -176,7 +182,7 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
         "items": search_result.items,
         "risk_signals": search_result.risk_signals,
         "device_serial": serial,
-        "account_name": None,
+        "account_name": BOUND_PDD_ACCOUNT,
         "elapsed_ms": elapsed_ms,
         "error": None,
         "raw_screenshot_path": search_result.raw_screenshot_path,
@@ -239,7 +245,16 @@ async def main() -> int:
     # 延迟 import 避免 .env 读不到
     from pdd_app_worker.http_client import BackendClient
 
-    logger.info(f"pdd_app_worker {WORKER_NAME} starting")
+    logger.info(
+        f"pdd_app_worker {WORKER_NAME} starting "
+        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT})"
+    )
+    if BOUND_PDD_ACCOUNT == "unknown":
+        logger.warning(
+            "BOUND_PDD_ACCOUNT 未设置 —— 任务结果里 account_name=unknown，"
+            "出问题难定位是哪个号干的。建议在 .env 里加一行 "
+            "`BOUND_PDD_ACCOUNT=pdd_crawler_xxxx`"
+        )
     _setup_signals()
 
     client = BackendClient()

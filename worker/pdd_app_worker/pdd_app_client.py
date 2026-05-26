@@ -398,15 +398,25 @@ class PddAppClient:
         await asyncio.to_thread(self._d.press, "enter")
 
     async def _detect_risk_walls(self) -> str | None:
-        """识别风控/登录墙信号。命中返回信号名，否则 None。"""
+        """识别风控/登录墙信号。命中返回信号名，否则 None。
+
+        实名认证 / 身份验证 = PDD 对账号本身的风控（不是设备级），命中说明
+        这个账号已经污染了，应该 quarantine 换号；继续在同一设备上重登一个
+        新号通常能恢复。
+        """
         risk_signatures = [
-            ("slide_verify",  '//*[contains(@text, "拖动滑块")]'),
-            ("slide_verify",  '//*[contains(@text, "向右滑动")]'),
-            ("captcha",       '//*[contains(@text, "验证码")]'),
-            ("login_wall",    '//*[contains(@text, "登录拼多多")]'),
-            ("login_wall",    '//*[contains(@text, "请先登录")]'),
-            ("rate_limited",  '//*[contains(@text, "操作过于频繁")]'),
-            ("rate_limited",  '//*[contains(@text, "稍后再试")]'),
+            ("slide_verify",      '//*[contains(@text, "拖动滑块")]'),
+            ("slide_verify",      '//*[contains(@text, "向右滑动")]'),
+            ("captcha",           '//*[contains(@text, "验证码")]'),
+            ("login_wall",        '//*[contains(@text, "登录拼多多")]'),
+            ("login_wall",        '//*[contains(@text, "请先登录")]'),
+            ("rate_limited",      '//*[contains(@text, "操作过于频繁")]'),
+            ("rate_limited",      '//*[contains(@text, "稍后再试")]'),
+            # 实名认证墙：触发条件多为账号被风控、异地登录、短时间内大量搜索
+            ("real_name_wall",    '//*[contains(@text, "实名认证")]'),
+            ("real_name_wall",    '//*[contains(@text, "身份验证")]'),
+            ("real_name_wall",    '//*[contains(@text, "请完成实名")]'),
+            ("real_name_wall",    '//*[contains(@text, "上传身份证")]'),
         ]
         for sig, xpath in risk_signatures:
             try:
