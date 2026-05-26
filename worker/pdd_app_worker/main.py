@@ -58,27 +58,31 @@ async def _heartbeat_loop(client: "BackendClient") -> None:
     while not _shutdown.is_set():
         devices = healthy_serials()
         await client.send_heartbeat(devices)
-        # 设备列表变化时打 INFO（拔插数据线 / 手机重启时立刻看得到）；
-        # 没变化时打 DEBUG（默认 LOG_LEVEL=INFO 下不显示，避免刷屏）
-        if devices != last_devices:
-            if last_devices is None:
-                logger.info(f"heartbeat: initial devices={devices}")
-            elif not devices and last_devices:
-                logger.warning(
-                    f"heartbeat: device(s) DISCONNECTED "
-                    f"(was {last_devices}, now [])"
-                )
-            elif devices and not last_devices:
-                logger.info(
-                    f"heartbeat: device(s) RECONNECTED → {devices}"
-                )
-            else:
-                logger.info(
-                    f"heartbeat: devices CHANGED {last_devices} → {devices}"
-                )
-            last_devices = devices
+
+        # 每次心跳都打印设备列表，方便运维肉眼盯线。状态变化时加 tag：
+        #   [initial]      = worker 启动后首条
+        #   [DISCONNECTED] = 上次有、本次空（WARNING 级别，cmd 里会变色）
+        #   [RECONNECTED]  = 上次空、本次有
+        #   [CHANGED]      = 列表变了但都非空（多设备场景）
+        #   (无 tag)       = 跟上次一致
+        if last_devices is None:
+            logger.info(f"heartbeat: devices={devices} [initial]")
+        elif not devices and last_devices:
+            logger.warning(
+                f"heartbeat: devices={devices} [DISCONNECTED, was {last_devices}]"
+            )
+        elif devices and not last_devices:
+            logger.info(
+                f"heartbeat: devices={devices} [RECONNECTED]"
+            )
+        elif devices != last_devices:
+            logger.info(
+                f"heartbeat: devices={devices} [CHANGED, was {last_devices}]"
+            )
         else:
-            logger.debug(f"heartbeat: devices unchanged={devices}")
+            logger.info(f"heartbeat: devices={devices}")
+        last_devices = devices
+
         try:
             await asyncio.wait_for(_shutdown.wait(), timeout=HEARTBEAT_INTERVAL)
         except asyncio.TimeoutError:
