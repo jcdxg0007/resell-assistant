@@ -463,7 +463,33 @@ class PddAppClient:
                             else:
                                 target.click()
                             clicked_detail = True
-                            time.sleep(random.uniform(4.0, 8.0))
+                            # 详情页假装"在看东西"：分块停留 + 60% 概率滑屏看图/评论
+                            # 旧实现是 time.sleep(4-8s) 死盯不动 = 机器人特征
+                            time.sleep(random.uniform(1.5, 2.8))
+                            if random.random() < 0.60:
+                                detail_x = w // 2 + random.randint(-25, 25)
+                                d_y_start = int(h * random.uniform(0.62, 0.78))
+                                d_y_end = int(h * random.uniform(0.20, 0.35))
+                                _humanize_swipe_path(
+                                    self._d,
+                                    (detail_x, d_y_start),
+                                    (detail_x + random.randint(-20, 20), d_y_end),
+                                    duration_s=random.uniform(0.45, 0.85),
+                                )
+                                time.sleep(random.uniform(1.5, 3.0))
+                                # 30% 再滑一次（真人多次滑动看图/读评论）
+                                if random.random() < 0.30:
+                                    detail_x2 = w // 2 + random.randint(-25, 25)
+                                    _humanize_swipe_path(
+                                        self._d,
+                                        (detail_x2, int(h * random.uniform(0.65, 0.78))),
+                                        (detail_x2, int(h * random.uniform(0.22, 0.35))),
+                                        duration_s=random.uniform(0.45, 0.85),
+                                    )
+                                    time.sleep(random.uniform(1.0, 2.0))
+                            else:
+                                # 不滑也要再多看一会才走（避免"点开秒回"）
+                                time.sleep(random.uniform(2.0, 4.0))
                             self._d.press("back")
                             time.sleep(random.uniform(0.6, 1.2))
                     except Exception:
@@ -530,19 +556,26 @@ class PddAppClient:
     async def _type_keyword(self, keyword: str) -> None:
         """在搜索输入框里逐字敲关键词，模拟人类打字节奏。
 
-        反爬关键点：PDD 拿不到原始 IME 事件，但能监听 EditText.text 变化的速率。
-        如果一次 send_keys("机械键盘") → text 一帧内从空变成 4 个字，这是机器人
-        100% 的指纹。真用户每字间 200-500ms。
+        反爬关键点：
+        1. PDD 拿不到原始 IME 事件，但能监听 EditText.text 变化的速率。
+           一次 send_keys("机械键盘") → text 一帧内从空变成 4 个字 = 机器人。
+           真用户每字间 200-500ms。
+        2. PDD 可以通过 InputMethodManager.getCurrentInputMethodSubtype()
+           读到"当前输入法是 com.github.uiautomator.adbkeyboard" =
+           **直接命中 uiautomator 爬虫指纹**。所以输入完一定要切回默认输入法，
+           让 PDD 即使去查也只能在 ~输入耗时窗口内看到 ATX，平时是用户的
+           正常输入法。
 
         实现：
-        - set_fastinput_ime 一次性切到 ATX 输入法
+        - set_fastinput_ime(True) 切到 ATX 输入法（中文必须）
         - clear_text 清掉占位符
-        - 然后**每字** send_keys(clear=False) 追加 + 随机 sleep
+        - 每字 send_keys(clear=False) 追加 + 随机 sleep（中文比 ASCII 慢）
         - 偶尔 10% 概率多停顿 0.5-1.2s（模仿"想词"）
-        - 输入完后再 sleep 0.5-1.5s（模仿用户最后确认）
+        - 输入完 sleep 0.5-1.5s
+        - **finally**：set_fastinput_ime(False) 恢复用户默认输入法
 
         每字间隔分布：
-        - 中文字符：0.22-0.55s（中文输入法选词所需时间）
+        - 中文字符：0.22-0.55s（输入法选词时间）
         - 数字/ASCII：0.10-0.28s（按键直接出字符）
         """
         if not keyword:
@@ -553,26 +586,32 @@ class PddAppClient:
             self._d.clear_text()
 
         await asyncio.to_thread(_setup_ime)
-        await _sleep_jitter(0.4, jitter=0.5)
+        try:
+            await _sleep_jitter(0.4, jitter=0.5)
 
-        for i, ch in enumerate(keyword):
-            await asyncio.to_thread(
-                lambda c=ch: self._d.send_keys(c, clear=False)
-            )
-            is_last = (i == len(keyword) - 1)
-            if is_last:
-                continue
-            # 选词时间分布：中文比 ASCII 慢
-            if "\u4e00" <= ch <= "\u9fff":
-                base_delay = random.uniform(0.22, 0.55)
-            else:
-                base_delay = random.uniform(0.10, 0.28)
-            # 10% 概率"想词"额外停顿
-            if random.random() < 0.10:
-                base_delay += random.uniform(0.5, 1.2)
-            await asyncio.sleep(base_delay)
+            for i, ch in enumerate(keyword):
+                await asyncio.to_thread(
+                    lambda c=ch: self._d.send_keys(c, clear=False)
+                )
+                is_last = (i == len(keyword) - 1)
+                if is_last:
+                    continue
+                if "\u4e00" <= ch <= "\u9fff":
+                    base_delay = random.uniform(0.22, 0.55)
+                else:
+                    base_delay = random.uniform(0.10, 0.28)
+                if random.random() < 0.10:
+                    base_delay += random.uniform(0.5, 1.2)
+                await asyncio.sleep(base_delay)
 
-        await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+        finally:
+            # 关键：还原默认 IME，让 PDD 看到的"当前输入法"不是 uiautomator-adbkeyboard。
+            # 这一步失败不抛——再不济搜索还是发出去了。
+            try:
+                await asyncio.to_thread(lambda: self._d.set_fastinput_ime(False))
+            except Exception as exc:
+                logger.debug(f"[{self.serial}] restore default IME failed: {exc}")
 
     async def _submit_search(self) -> None:
         """提交搜索。优先点页面上的"搜索"按钮，回退到键盘 Enter。"""
