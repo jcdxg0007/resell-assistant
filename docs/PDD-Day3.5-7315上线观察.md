@@ -231,3 +231,73 @@ Day 3 (5/25 晚) 4310 手动搜"机械键盘"，滚到第 3 屏 → 实名墙
 7-14 天内         → 上 Day 5 Windows 开机自启 + 钉钉告警
 14 天后           → 拔 _PDD_USE_APP_WORKER 开关，正式接入 instant_search
 ```
+
+## §8 已知的"软件层无法消除"的指纹（必须用账号策略来兜底）
+
+经过两轮深度审计，软件侧能伪装的我都已伪装。下面这些是**框架级硬限制**，短期不可能消除，必须用"账号隔离 + 行为节制"来对冲。
+
+### 8.1 手机上常驻安装的 `com.github.uiautomator` 包【最高优先级风险】
+
+**指纹来源**：
+
+uiautomator2 框架在手机上常驻安装两个 APK：
+
+```text
+com.github.uiautomator
+com.github.uiautomator.test
+```
+
+PDD APP 只要在启动时调一次 `PackageManager.getInstalledPackages()`（Android 最廉价的 API 之一），就能立刻看到这俩包名 → 直接定性"这台手机是 uiautomator 测试设备"。这是**比所有手势、IME 漏洞加起来都重的指纹**。
+
+**为什么这次没修**：
+
+要消除需要做下面任一选项，每条都是大工程：
+
+| 选项 | 工作量 | 副作用 |
+|---|---|---|
+| 重打包 uiautomator2 的 APK，改包名 + 签名 | 2-3 天，每次 u2 升级要重打 | 维护成本高 |
+| 卸载这俩 APK，纯走 adb shell | 1 周 | dump_hierarchy / xpath / click 几乎全不能用，等于重写 worker |
+| 用 Frida / Xposed Hook PackageManager 隐藏这俩包 | 5 天 | 要 root，Honor X20 没解锁 BootLoader |
+| 换 Appium + WebDriverAgent 系 | 1-2 周 | 换汤不换药，Appium 自己也有包名指纹 |
+
+**为什么暂时可以容忍**：
+
+PDD 的封号判定**不是只看一个指纹**，而是看"指纹 + 行为模式 + 账号历史"的综合分。即使被识别为"自动化设备"，只要：
+
+- 账号本身是养熟的（账龄 + 真实消费 + 真人浏览历史）
+- 行为节奏拟人化做到位（已做）
+- 不碰高利润类目（行为约束）
+- 不跑过量（已限 30 次/天）
+
+PDD 也未必触发封号——它有大量真用户也装了 uiautomator2（开发者、测试、薅羊毛用户），全封会误伤。它更可能的策略是"带这俩包的设备降权"：搜索结果排序里少给优惠位、搜索冷却稍长——**这些不影响我们采集主流价格**。
+
+**真正的对冲方案**：
+
+```text
+A. 设备隔离（已做）：Honor X20 是专用机，不和真人手机混用
+B. 账号隔离（已做）：pdd_crawler_7315 不跟自购账号公用
+C. 7315 死了再换 8245 / 9173（账号池策略）
+D. 长期攒一台"二手红米 Note + 拆 uiautomator 包"作为备用机
+   （仅当 worker 设备指纹真成为唯一卡点时才做）
+```
+
+### 8.2 MotionEvent 没有 pressure / size 字段
+
+uiautomator2 走 adb shell input 注入事件，硬性不带压感/触摸面积，PDD 拿到的 MotionEvent.getPressure() = 0、getSize() = 0。真人触摸 ≥ 0.05。
+
+软件路径无解，除非 root + 用 sendevent 直接写 /dev/input/eventN。同样需要解锁 BootLoader。
+
+### 8.3 ADB 调试模式必须开启
+
+`adb devices` 能看到设备 = "USB 调试"必须开。PDD 理论可读这个状态。
+
+**对冲**：使用 USB 直连而非无线 ADB；Honor X20 这台没有"仅充电锁定调试"选项。
+
+### 8.4 本节小结
+
+**说人话**：worker 这边的"软件拟人化"已经做满了，再往下扣是边际收益。下次账号死的时候**不要再花时间继续磨手势 / 时序**，直接：
+
+1. 复盘是不是又踩了 4310 那种类目/消费/节奏雷
+2. 不是的话，就当"被设备指纹拍了"，换备用机 + 新账号
+
+不要陷入"无止境调拟人化"的兔子洞。
