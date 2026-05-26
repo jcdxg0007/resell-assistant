@@ -17,6 +17,7 @@ import random
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,39 +39,166 @@ WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
 # 换号时同步改这个值；为空就用 "unknown"。
 BOUND_PDD_ACCOUNT = os.environ.get("BOUND_PDD_ACCOUNT", "unknown")
 
-# 相邻两次 search 任务之间最少间隔（秒），从 [MIN, MAX] 均匀随机抽。
-# 真用户不会 5s 内连发两次搜索；这个 gap 强制让 worker 表现得更像人。
-# 默认 30-60s；如果某次 7315 又踩雷，可以把下限调到 90+。
-TASK_GAP_SECONDS_MIN = float(os.environ.get("TASK_GAP_SECONDS_MIN", "30"))
-TASK_GAP_SECONDS_MAX = float(os.environ.get("TASK_GAP_SECONDS_MAX", "60"))
-
-# 最近一次 search 任务结束的时间戳（monotonic）。0 = 还没跑过。
-# 用于 _enforce_task_gap() 限速 —— 见 _handle_search()。
-_last_search_finished_at: float = 0.0
+# ── Burst-mode 任务调度配置 ─────────────────────────────────────────────
+#
+# 真人搜购物 APP 不是均匀的"每 30s 一次"，而是阵发性的：
+#   - 想到一个需求 → 短时间内连搜 1-4 次（每次间 5-30s 思考）
+#   - 然后离开几分钟到半小时
+#   - 想到新需求又来一波
+#
+# 调度模型：BURST_SIZE 次搜索（intra_burst gap 短）+ INTER_BURST 静默期长。
+# 每天总搜索数硬上限 DAILY_SEARCH_QUOTA。
+BURST_SIZE_MIN = int(os.environ.get("BURST_SIZE_MIN", "1"))
+BURST_SIZE_MAX = int(os.environ.get("BURST_SIZE_MAX", "4"))
+INTRA_BURST_GAP_SECONDS_MIN = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MIN", "5"))
+INTRA_BURST_GAP_SECONDS_MAX = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MAX", "30"))
+INTER_BURST_GAP_MINUTES_MIN = float(os.environ.get("INTER_BURST_GAP_MINUTES_MIN", "5"))
+INTER_BURST_GAP_MINUTES_MAX = float(os.environ.get("INTER_BURST_GAP_MINUTES_MAX", "30"))
+DAILY_SEARCH_QUOTA = int(os.environ.get("DAILY_SEARCH_QUOTA", "30"))
 
 _shutdown = asyncio.Event()
 
 
-async def _enforce_task_gap() -> None:
-    """如果距上一次 search 结束太近，sleep 到达到随机 gap。
+class QuotaExhausted(RuntimeError):
+    """今日 search quota 用完抛这个，由 _handle_search 转成失败结果。"""
 
-    只对 search 任务生效（self_check 等管理任务不受限）。第一次跑（没有
-    历史时间戳）直接放行。
+
+class BurstScheduler:
+    """阵发式任务调度器：模拟真人"小爆发 + 长间隔"的搜索节奏。
+
+    用法（_handle_search 调用）::
+        await scheduler.enforce_pre_search()   # 可能 sleep 数秒到数十分钟
+        # ...do the actual work...
+        burst_continues = scheduler.mark_search_done()
+        if not burst_continues:
+            await press_home_on_device(serial)  # PDD 退后台
+
+    跨天处理：用 UTC date 做 day key；新一天首次调用自动重置计数器。
     """
-    global _last_search_finished_at
-    if _last_search_finished_at <= 0:
-        return
-    target_gap = random.uniform(TASK_GAP_SECONDS_MIN, TASK_GAP_SECONDS_MAX)
-    elapsed = time.monotonic() - _last_search_finished_at
-    if elapsed >= target_gap:
-        return
-    sleep_s = target_gap - elapsed
-    logger.info(
-        f"task gap: sleeping {sleep_s:.1f}s "
-        f"(last search ended {elapsed:.1f}s ago, "
-        f"target gap [{TASK_GAP_SECONDS_MIN:.0f}, {TASK_GAP_SECONDS_MAX:.0f}]s → {target_gap:.1f}s)"
-    )
-    await asyncio.sleep(sleep_s)
+
+    def __init__(self) -> None:
+        self._searches_today = 0
+        self._day_key = self._today_key()
+        self._burst_remaining = 0
+        self._last_search_at: float = 0.0
+        self._last_burst_ended_at: float = 0.0
+
+    @staticmethod
+    def _today_key() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _maybe_reset_for_new_day(self) -> None:
+        today = self._today_key()
+        if today != self._day_key:
+            logger.info(
+                f"scheduler: new day {today}, "
+                f"yesterday total searches={self._searches_today}; resetting counters"
+            )
+            self._day_key = today
+            self._searches_today = 0
+            self._burst_remaining = 0
+            self._last_burst_ended_at = 0.0
+
+    def status(self) -> str:
+        return (
+            f"day={self._day_key} searches={self._searches_today}/{DAILY_SEARCH_QUOTA} "
+            f"burst_remaining={self._burst_remaining}"
+        )
+
+    async def enforce_pre_search(self) -> None:
+        """阻塞调用：等到下一次搜索可以执行。
+
+        - 如果今天 quota 用完 → raise QuotaExhausted
+        - 如果当前 burst 还没用完 → sleep intra-burst gap (5-30s)
+        - 如果上一个 burst 已结束 → sleep inter-burst gap (5-30min) 后开新 burst
+        """
+        self._maybe_reset_for_new_day()
+
+        if self._searches_today >= DAILY_SEARCH_QUOTA:
+            raise QuotaExhausted(
+                f"daily quota reached: {self._searches_today}/{DAILY_SEARCH_QUOTA} "
+                f"(resets at UTC midnight)"
+            )
+
+        if self._burst_remaining <= 0:
+            # 开新 burst 前要先等长 quiet 期
+            if self._last_burst_ended_at > 0:
+                target_s = random.uniform(
+                    INTER_BURST_GAP_MINUTES_MIN * 60.0,
+                    INTER_BURST_GAP_MINUTES_MAX * 60.0,
+                )
+                elapsed = time.monotonic() - self._last_burst_ended_at
+                if elapsed < target_s:
+                    sleep_s = target_s - elapsed
+                    logger.info(
+                        f"scheduler: inter-burst quiet — sleeping "
+                        f"{sleep_s / 60:.1f} min before new burst "
+                        f"(target gap {target_s / 60:.1f} min, "
+                        f"elapsed since last burst {elapsed / 60:.1f} min)"
+                    )
+                    await asyncio.sleep(sleep_s)
+            # 启动新 burst（剩余配额够时才打满，否则取剩余）
+            remaining_quota = DAILY_SEARCH_QUOTA - self._searches_today
+            desired = random.randint(BURST_SIZE_MIN, BURST_SIZE_MAX)
+            self._burst_remaining = min(desired, remaining_quota)
+            logger.info(
+                f"scheduler: new burst started — "
+                f"{self._burst_remaining} searches planned "
+                f"(daily so far {self._searches_today}/{DAILY_SEARCH_QUOTA})"
+            )
+        else:
+            # burst 内：随机短间隔
+            target_s = random.uniform(
+                INTRA_BURST_GAP_SECONDS_MIN, INTRA_BURST_GAP_SECONDS_MAX
+            )
+            elapsed = time.monotonic() - self._last_search_at
+            if elapsed < target_s:
+                sleep_s = target_s - elapsed
+                logger.info(
+                    f"scheduler: intra-burst gap — sleeping {sleep_s:.1f}s "
+                    f"({self._burst_remaining} left in this burst)"
+                )
+                await asyncio.sleep(sleep_s)
+
+    def mark_search_done(self) -> bool:
+        """搜索完成后调用。
+
+        :return: True = burst 还在继续（PDD 可以留前台等下一次）；
+                 False = burst 刚结束（caller 应该把 PDD 退到后台）。
+        """
+        self._searches_today += 1
+        self._last_search_at = time.monotonic()
+        self._burst_remaining -= 1
+        if self._burst_remaining <= 0:
+            self._last_burst_ended_at = time.monotonic()
+            logger.info(
+                f"scheduler: burst ended — daily total "
+                f"{self._searches_today}/{DAILY_SEARCH_QUOTA}"
+            )
+            return False
+        return True
+
+
+_scheduler = BurstScheduler()
+
+
+async def _press_home_on_device(serial: str) -> None:
+    """通过 adb 把当前 APP 切到后台（KEYCODE_HOME）。
+
+    Burst 结束时调用——真人搜完一波东西不会一直停在 PDD 首页，会回桌面/
+    切别的 APP。让 PDD 退后台几分钟，PDD 自己也会清掉一些短期会话状态，
+    对反爬刻画"高频前台用户"的画像有降权效果。
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_HOME",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=5.0)
+        logger.info(f"[{serial}] PDD pushed to background (KEYCODE_HOME)")
+    except Exception as exc:
+        logger.warning(f"[{serial}] press_home failed: {exc}")
 
 
 def _setup_signals() -> None:
@@ -171,12 +299,11 @@ async def _process_task(task: dict[str, Any]) -> dict[str, Any]:
 async def _handle_search(task_id: str, payload: dict[str, Any], started_at: float) -> dict[str, Any]:
     """kind=search：连第一台健康设备，跑 PddAppClient.search。
 
-    限速：进入实际工作前会调 _enforce_task_gap()，确保距离上一次 search
-    结束至少 TASK_GAP_SECONDS_MIN-MAX 秒之间的随机值（默认 30-60s）。
+    阵发式调度：进入实际工作前调 _scheduler.enforce_pre_search()，可能
+    阻塞数秒（burst 内）到数十分钟（burst 间）。每日 quota 用完会立即
+    返回失败结果（不阻塞 worker，让 backend 看到明确的 quota_exhausted
+    信号决定要不要 fallback 到别的采集通道）。
     """
-    global _last_search_finished_at
-    await _enforce_task_gap()
-
     keyword = payload.get("keyword") or ""
     mode = payload.get("mode", "fast")
     if not keyword:
@@ -190,6 +317,23 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
             "account_name": None,
             "elapsed_ms": elapsed_ms,
             "error": "missing_keyword",
+            "raw_screenshot_path": None,
+        }
+
+    try:
+        await _scheduler.enforce_pre_search()
+    except QuotaExhausted as exc:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.warning(f"task {task_id} denied: {exc}")
+        return {
+            "task_id": task_id,
+            "status": "failed",
+            "items": [],
+            "risk_signals": ["daily_quota_exhausted"],
+            "device_serial": None,
+            "account_name": BOUND_PDD_ACCOUNT,
+            "elapsed_ms": elapsed_ms,
+            "error": f"daily_quota_exhausted: {exc}",
             "raw_screenshot_path": None,
         }
 
@@ -222,7 +366,9 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
                   "rate_limited", "real_name_wall")
             for s in search_result.risk_signals
         ) else "failed"
-        _last_search_finished_at = time.monotonic()
+        burst_continues = _scheduler.mark_search_done()
+        if not burst_continues:
+            await _press_home_on_device(serial)
         return {
             "task_id": task_id,
             "status": status,
@@ -234,7 +380,9 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
             "error": search_result.error,
             "raw_screenshot_path": search_result.raw_screenshot_path,
         }
-    _last_search_finished_at = time.monotonic()
+    burst_continues = _scheduler.mark_search_done()
+    if not burst_continues:
+        await _press_home_on_device(serial)
     return {
         "task_id": task_id,
         "status": "ok",
@@ -306,8 +454,14 @@ async def main() -> int:
 
     logger.info(
         f"pdd_app_worker {WORKER_NAME} starting "
-        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT}, "
-        f"task_gap=[{TASK_GAP_SECONDS_MIN:.0f},{TASK_GAP_SECONDS_MAX:.0f}]s)"
+        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT})"
+    )
+    logger.info(
+        f"scheduler config: "
+        f"burst_size=[{BURST_SIZE_MIN},{BURST_SIZE_MAX}] "
+        f"intra_gap=[{INTRA_BURST_GAP_SECONDS_MIN:.0f},{INTRA_BURST_GAP_SECONDS_MAX:.0f}]s "
+        f"inter_gap=[{INTER_BURST_GAP_MINUTES_MIN:.0f},{INTER_BURST_GAP_MINUTES_MAX:.0f}]min "
+        f"daily_quota={DAILY_SEARCH_QUOTA}"
     )
     if BOUND_PDD_ACCOUNT == "unknown":
         logger.warning(

@@ -86,13 +86,34 @@ initial heartbeat sent: devices=['PKT0220416005274']
 ❌ 任何"XX 元包邮"明显套利的搜索词
 ```
 
-### 任务节奏
+### 任务节奏（worker 内置 Burst 调度自动管控）
+
+worker 现在自动模拟真人的阵发式搜索节奏，**不需要你手动控制派任务的间隔**：
 
 ```text
-任务之间间隔 ≥ 5 分钟（worker 内已有 5s 地板，运维层面拉到 5 分钟）
-单天总任务数上限：≤ 20 次
-连续 3 次任务全部 risk_blocked → 立刻停 worker
+默认配置（.env 里 BURST_SIZE_* / INTRA_BURST_* / INTER_BURST_* / DAILY_SEARCH_QUOTA）：
+  burst_size            = 1-4 次/burst（随机）
+  burst 内任务间隔      = 5-30s（随机）
+  burst 之间静默期      = 5-30 分钟（随机，期间 PDD 自动退后台）
+  每日 quota            = 30 次（到 UTC 0 点重置）
+
+派任务后 worker 自动决定：
+  □ 上次任务后 < 30s 且当前 burst 没用完 → 短间隔，立刻执行
+  □ 当前 burst 用完 → sleep 5-30 分钟 + adb home 把 PDD 退后台 → 开新 burst
+  □ 今日已搜 ≥ 30 次 → 立刻返回 risk_signals=["daily_quota_exhausted"]
 ```
+
+观察日志里这几行就能知道当前调度状态：
+
+```text
+[INFO] scheduler: new burst started — 3 searches planned (daily so far 0/30)
+[INFO] scheduler: intra-burst gap — sleeping 18.7s (2 left in this burst)
+[INFO] scheduler: burst ended — daily total 3/30
+[INFO] [PKT0220416005274] PDD pushed to background (KEYCODE_HOME)
+[INFO] scheduler: inter-burst quiet — sleeping 12.3 min before new burst
+```
+
+**如果连续 3 次任务全部 risk_blocked → 立刻停 worker，进 §5 应急。**
 
 ## §4 观察哪些指标 = 健康 / 不健康
 
