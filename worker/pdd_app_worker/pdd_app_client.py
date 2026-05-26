@@ -79,11 +79,28 @@ def _jittered_point_in_bounds(
     )
 
 
-def _humanize_swipe_path(d, start_xy: tuple[int, int], end_xy: tuple[int, int]) -> None:
-    """非线性滑动：把直线插成 6-10 个点，每点微抖动。
+def _humanize_swipe_path(
+    d,
+    start_xy: tuple[int, int],
+    end_xy: tuple[int, int],
+    duration_s: float | None = None,
+) -> None:
+    """非线性滑动：把直线插成 6-10 个点，每点微抖动 + ease-out 缓动。
 
-    人类滑动不是 1 帧到位，机器学习反爬会盯线性路径。这里用样本点 + 时间
-    扰动模拟手指轨迹。
+    人类滑动不是 1 帧到位，更不是直线。机器学习反爬会盯：
+      1. 直线 vs 曲线 —— 真人手指有微抖动，路径不是完全直线
+      2. 匀速 vs 缓动 —— 真人起步快、末尾减速（手指滑到位会自然减速）
+      3. 单点 vs 多点 —— 真人滑屏 = 一连串采样点，不是 1 起 1 终
+
+    本函数用样本点 + 时间扰动模拟手指轨迹。所有 worker 的滑屏都应该走
+    这个 helper，**不要直接调 d.swipe()**（直线 + 默认匀速 = 一眼机器人）。
+
+    :param duration_s: 整段滑动时长（秒）。None 时随机 0.45-0.85s。
+
+    注意：本函数无法控制 MotionEvent 的 pressure / size 字段——uiautomator2
+    在未 root 设备上发的合成事件 pressure=1.0 / size=1.0 是常量，跟真人
+    手指报告的 0.3-1.0 / 0.1-0.5 浮动差别一眼可见。这是 unrooted 设备的
+    硬限制，软件层无解（要破得刷机/root 改输入子系统）。
     """
     x1, y1 = start_xy
     x2, y2 = end_xy
@@ -91,14 +108,16 @@ def _humanize_swipe_path(d, start_xy: tuple[int, int], end_xy: tuple[int, int]) 
     points = []
     for i in range(steps + 1):
         t = i / steps
-        # 起步快、末尾减速（ease-out），更像滑动
+        # ease-out: 起步快、末尾减速（手指物理学）
         eased = 1 - (1 - t) ** 2
         x = x1 + (x2 - x1) * eased + random.randint(-3, 3)
         y = y1 + (y2 - y1) * eased + random.randint(-3, 3)
         points.append((int(x), int(y)))
-    # uiautomator2 的 swipe_points 接受 [(x, y, t_ms), ...]，t 是相对起点
-    total_ms = random.randint(450, 850)
-    per_step_ms = total_ms // (steps + 1)
+    if duration_s is None:
+        total_ms = random.randint(450, 850)
+    else:
+        total_ms = max(60, int(duration_s * 1000))
+    per_step_ms = max(20, total_ms // (steps + 1))
     points_with_t = [(x, y, per_step_ms * (i + 1)) for i, (x, y) in enumerate(points)]
     d.swipe_points(points_with_t, 0.05)
 
@@ -398,14 +417,21 @@ class PddAppClient:
         try:
             def _do_sync():
                 w, h = self._d.window_size()
-                mid_x = w // 2
 
                 scroll_times = random.randint(2, 3)
                 for i in range(scroll_times):
+                    # 起终点 X / Y 都随机；曲线滑动（_humanize_swipe_path）
+                    x_start = w // 2 + random.randint(-35, 35)
+                    x_end = w // 2 + random.randint(-35, 35)
                     y_start = int(h * random.uniform(0.65, 0.78))
                     y_end = int(h * random.uniform(0.22, 0.35))
                     duration = random.uniform(0.35, 0.85)
-                    self._d.swipe(mid_x, y_start, mid_x, y_end, duration)
+                    _humanize_swipe_path(
+                        self._d,
+                        (x_start, y_start),
+                        (x_end, y_end),
+                        duration_s=duration,
+                    )
                     time.sleep(random.uniform(0.8, 1.8))
 
                 clicked_detail = False
@@ -445,9 +471,16 @@ class PddAppClient:
 
                 up_steps = random.randint(2, 3)
                 for _ in range(up_steps):
+                    x_start = w // 2 + random.randint(-35, 35)
+                    x_end = w // 2 + random.randint(-35, 35)
                     y_start = int(h * random.uniform(0.25, 0.35))
                     y_end = int(h * random.uniform(0.70, 0.82))
-                    self._d.swipe(mid_x, y_start, mid_x, y_end, random.uniform(0.25, 0.45))
+                    _humanize_swipe_path(
+                        self._d,
+                        (x_start, y_start),
+                        (x_end, y_end),
+                        duration_s=random.uniform(0.25, 0.45),
+                    )
                     time.sleep(random.uniform(0.3, 0.6))
 
                 return {"scrolls": scroll_times, "clicked_detail": clicked_detail}
@@ -600,14 +633,20 @@ class PddAppClient:
         def _do_sync():
             time.sleep(random.uniform(2.5, 3.5))
             w, h = self._d.window_size()
-            mid_x = w // 2 + random.randint(-25, 25)
+            # 上下滑用不同的 X，避免"完美在同一条竖线上"
+            x_down = w // 2 + random.randint(-30, 30)
+            x_up = w // 2 + random.randint(-30, 30)
             start_y = int(h * random.uniform(0.55, 0.68))
             shift = random.randint(250, 360)
-            dur_down = random.uniform(0.32, 0.55)
-            dur_up = random.uniform(0.32, 0.55)
-            self._d.swipe(mid_x, start_y, mid_x, start_y - shift, dur_down)
+            _humanize_swipe_path(
+                self._d, (x_down, start_y), (x_down, start_y - shift),
+                duration_s=random.uniform(0.32, 0.55),
+            )
             time.sleep(random.uniform(0.6, 1.1))
-            self._d.swipe(mid_x, start_y - shift, mid_x, start_y, dur_up)
+            _humanize_swipe_path(
+                self._d, (x_up, start_y - shift), (x_up, start_y),
+                duration_s=random.uniform(0.32, 0.55),
+            )
             time.sleep(random.uniform(0.8, 1.3))
 
         await asyncio.to_thread(_do_sync)
@@ -663,16 +702,23 @@ class PddAppClient:
         )
 
         # 微滚动：让 RecyclerView 重 bind 所有 ViewHolder。
-        # 起点 / 距离 / 时长全部随机，避免 PDD 把"暖屏后还小滑两下"
-        # 当成爬虫的固定 fingerprint。
+        # 起点 / 距离 / 时长 / 路径曲率全部随机，避免 PDD 把"暖屏后还
+        # 小滑两下"当成爬虫的固定 fingerprint。
         def _micro_scroll():
             w, h = self._d.window_size()
-            mx = w // 2 + random.randint(-20, 20)
+            x_down = w // 2 + random.randint(-25, 25)
+            x_up = w // 2 + random.randint(-25, 25)
             start_y = int(h * random.uniform(0.55, 0.68))
             shift = random.randint(120, 200)
-            self._d.swipe(mx, start_y, mx, start_y - shift, random.uniform(0.22, 0.42))
+            _humanize_swipe_path(
+                self._d, (x_down, start_y), (x_down, start_y - shift),
+                duration_s=random.uniform(0.22, 0.42),
+            )
             time.sleep(random.uniform(0.45, 0.85))
-            self._d.swipe(mx, start_y - shift, mx, start_y, random.uniform(0.22, 0.42))
+            _humanize_swipe_path(
+                self._d, (x_up, start_y - shift), (x_up, start_y),
+                duration_s=random.uniform(0.22, 0.42),
+            )
             time.sleep(random.uniform(0.8, 1.3))
 
         await asyncio.to_thread(_micro_scroll)
