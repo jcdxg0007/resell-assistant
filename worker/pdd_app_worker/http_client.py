@@ -54,9 +54,25 @@ class BackendClient:
                         "确认 backend .env 和 worker .env 里的 PDD_WORKER_TOKEN 一致。"
                     )
                 if r.status_code == 503:
+                    # 区分两种 503：
+                    #  1) backend app 自己 raise 的（token 是默认值）: body 是 JSON
+                    #     {"detail": "..."}
+                    #  2) Sealos/k8s ingress 返回的（upstream connect error，
+                    #     backend pod 在重启/未 ready）: body 是 plain text
+                    #     "upstream connect error or disconnect/reset ..."
+                    body = r.text[:200]
+                    if "upstream connect error" in body or "no healthy upstream" in body:
+                        logger.warning(
+                            f"poll_task: backend ingress 暂时连不上 upstream "
+                            f"（backend pod 可能在重启）；{backoff:.1f}s 后自动重试。"
+                            f" body={body!r}"
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 30.0)
+                        continue
                     raise RuntimeError(
-                        "503 from backend: backend 还没配 PDD_WORKER_TOKEN。"
-                        "把 backend .env 里的 PDD_WORKER_TOKEN 改成非默认值后重启 backend pod。"
+                        f"503 from backend (app-level): {body}. "
+                        "如果提示 'PDD_WORKER_TOKEN'，去 backend .env 改成非默认值后重启 backend pod。"
                     )
                 r.raise_for_status()
                 return r.json().get("task")
