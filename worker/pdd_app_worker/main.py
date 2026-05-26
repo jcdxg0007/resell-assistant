@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -37,7 +38,39 @@ WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
 # 换号时同步改这个值；为空就用 "unknown"。
 BOUND_PDD_ACCOUNT = os.environ.get("BOUND_PDD_ACCOUNT", "unknown")
 
+# 相邻两次 search 任务之间最少间隔（秒），从 [MIN, MAX] 均匀随机抽。
+# 真用户不会 5s 内连发两次搜索；这个 gap 强制让 worker 表现得更像人。
+# 默认 30-60s；如果某次 7315 又踩雷，可以把下限调到 90+。
+TASK_GAP_SECONDS_MIN = float(os.environ.get("TASK_GAP_SECONDS_MIN", "30"))
+TASK_GAP_SECONDS_MAX = float(os.environ.get("TASK_GAP_SECONDS_MAX", "60"))
+
+# 最近一次 search 任务结束的时间戳（monotonic）。0 = 还没跑过。
+# 用于 _enforce_task_gap() 限速 —— 见 _handle_search()。
+_last_search_finished_at: float = 0.0
+
 _shutdown = asyncio.Event()
+
+
+async def _enforce_task_gap() -> None:
+    """如果距上一次 search 结束太近，sleep 到达到随机 gap。
+
+    只对 search 任务生效（self_check 等管理任务不受限）。第一次跑（没有
+    历史时间戳）直接放行。
+    """
+    global _last_search_finished_at
+    if _last_search_finished_at <= 0:
+        return
+    target_gap = random.uniform(TASK_GAP_SECONDS_MIN, TASK_GAP_SECONDS_MAX)
+    elapsed = time.monotonic() - _last_search_finished_at
+    if elapsed >= target_gap:
+        return
+    sleep_s = target_gap - elapsed
+    logger.info(
+        f"task gap: sleeping {sleep_s:.1f}s "
+        f"(last search ended {elapsed:.1f}s ago, "
+        f"target gap [{TASK_GAP_SECONDS_MIN:.0f}, {TASK_GAP_SECONDS_MAX:.0f}]s → {target_gap:.1f}s)"
+    )
+    await asyncio.sleep(sleep_s)
 
 
 def _setup_signals() -> None:
@@ -138,13 +171,12 @@ async def _process_task(task: dict[str, Any]) -> dict[str, Any]:
 async def _handle_search(task_id: str, payload: dict[str, Any], started_at: float) -> dict[str, Any]:
     """kind=search：连第一台健康设备，跑 PddAppClient.search。
 
-    Phase 1 Day 2 状态：链路通到 PddAppClient，但 _dump_visible_cards 还是
-    占位（Day 3 用真机校准 XPath 后才能真正取到商品）。所以现在能验：
-      - 开 PDD APP 不崩
-      - 搜索栏能输入关键词
-      - 没出风控墙
-      - 但 items=[] 是预期的
+    限速：进入实际工作前会调 _enforce_task_gap()，确保距离上一次 search
+    结束至少 TASK_GAP_SECONDS_MIN-MAX 秒之间的随机值（默认 30-60s）。
     """
+    global _last_search_finished_at
+    await _enforce_task_gap()
+
     keyword = payload.get("keyword") or ""
     mode = payload.get("mode", "fast")
     if not keyword:
@@ -190,6 +222,7 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
                   "rate_limited", "real_name_wall")
             for s in search_result.risk_signals
         ) else "failed"
+        _last_search_finished_at = time.monotonic()
         return {
             "task_id": task_id,
             "status": status,
@@ -201,6 +234,7 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
             "error": search_result.error,
             "raw_screenshot_path": search_result.raw_screenshot_path,
         }
+    _last_search_finished_at = time.monotonic()
     return {
         "task_id": task_id,
         "status": "ok",
@@ -272,7 +306,8 @@ async def main() -> int:
 
     logger.info(
         f"pdd_app_worker {WORKER_NAME} starting "
-        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT})"
+        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT}, "
+        f"task_gap=[{TASK_GAP_SECONDS_MIN:.0f},{TASK_GAP_SECONDS_MAX:.0f}]s)"
     )
     if BOUND_PDD_ACCOUNT == "unknown":
         logger.warning(

@@ -58,6 +58,27 @@ async def _sleep_jitter(base: float, jitter: float = 0.4) -> None:
     await asyncio.sleep(max(0.05, base + delta))
 
 
+def _jittered_point_in_bounds(
+    bounds: dict[str, int], jitter_px: int = 12
+) -> tuple[int, int]:
+    """在 bounds 矩形内取一个"偏离中心"的随机点，给 _human_click 用。
+
+    边界保护：抖动量不超过控件 1/3 边长，避免极端瘦控件点出框外。
+    """
+    left = int(bounds.get("left", 0))
+    right = int(bounds.get("right", 0))
+    top = int(bounds.get("top", 0))
+    bottom = int(bounds.get("bottom", 0))
+    cx = (left + right) // 2
+    cy = (top + bottom) // 2
+    max_dx = max(1, min(jitter_px, (right - left) // 3))
+    max_dy = max(1, min(jitter_px, (bottom - top) // 3))
+    return (
+        cx + random.randint(-max_dx, max_dx),
+        cy + random.randint(-max_dy, max_dy),
+    )
+
+
 def _humanize_swipe_path(d, start_xy: tuple[int, int], end_xy: tuple[int, int]) -> None:
     """非线性滑动：把直线插成 6-10 个点，每点微抖动。
 
@@ -217,14 +238,48 @@ class PddAppClient:
                 "需要去【设置→系统和更新→开发人员选项→关闭防止误触】或换 swipe 实现。"
             )
 
+    async def _human_click(self, xpath: str, timeout: float = 2.5, jitter_px: int = 12) -> bool:
+        """带坐标抖动的点击：先 wait 元素 → 取 bounds → 随机偏中心点 d.click(x,y)。
+
+        返回 True 表示点到了，False 表示找不到/超时（caller 决定要不要往下走）。
+
+        为啥不直接用 ``self._d.xpath(x).click()``？因为 uiautomator2 默认点
+        bbox 几何中心，机器特征明显——真人手指几乎不可能每次都精确点中心。
+        这里抖动 ±12px（受控件 1/3 边长限制），分布偏低斯/真人级。
+        """
+        def _do_click() -> bool:
+            el = self._d.xpath(xpath).wait(timeout=timeout)
+            if not el:
+                return False
+            info = el.info or {}
+            bounds = info.get("bounds") or {}
+            if not bounds:
+                # 拿不到 bounds 就回退默认点击（极少见）
+                self._d.xpath(xpath).click()
+                return True
+            x, y = _jittered_point_in_bounds(bounds, jitter_px=jitter_px)
+            self._d.click(x, y)
+            return True
+
+        return await asyncio.to_thread(_do_click)
+
     async def _post_task_cleanup(self) -> None:
-        """任务结束清场：随机滚动一下首页或返回桌面，避免下次进来卡在结果页。"""
+        """任务结束清场：返回前一两层，避免下次进来卡在结果页。
+
+        随机化：
+        - back 次数 1-3 次（随机），每次间隔抖动
+        - 10% 概率直接按 home 键回桌面（最自然的"用完手机"模式）
+        """
         if not self._d:
             return
         try:
-            await asyncio.to_thread(self._d.press, "back")
-            await _sleep_jitter(0.6)
-            await asyncio.to_thread(self._d.press, "back")
+            if random.random() < 0.10:
+                await asyncio.to_thread(self._d.press, "home")
+                return
+            backs = random.randint(1, 3)
+            for _ in range(backs):
+                await asyncio.to_thread(self._d.press, "back")
+                await _sleep_jitter(random.uniform(0.4, 0.9), jitter=0.3)
         except Exception as e:
             logger.debug(f"[{self.serial}] cleanup ignored: {e}")
 
@@ -319,11 +374,7 @@ class PddAppClient:
         ]
         for xpath in candidates:
             try:
-                el = await asyncio.to_thread(
-                    lambda x=xpath: self._d.xpath(x).wait(timeout=0.8)
-                )
-                if el:
-                    await asyncio.to_thread(lambda x=xpath: self._d.xpath(x).click())
+                if await self._human_click(xpath, timeout=0.8, jitter_px=8):
                     logger.info(f"[{self.serial}] dismissed popup: {xpath}")
                     await _sleep_jitter(0.6)
             except Exception:
@@ -378,7 +429,13 @@ class PddAppClient:
                                 continue
                         if clickable_cards:
                             target = random.choice(clickable_cards[: min(8, len(clickable_cards))])
-                            target.click()
+                            tinfo = target.info or {}
+                            tbounds = tinfo.get("bounds") or {}
+                            if tbounds:
+                                tx, ty = _jittered_point_in_bounds(tbounds, jitter_px=15)
+                                self._d.click(tx, ty)
+                            else:
+                                target.click()
                             clicked_detail = True
                             time.sleep(random.uniform(4.0, 8.0))
                             self._d.press("back")
@@ -426,11 +483,7 @@ class PddAppClient:
         clicked = False
         for xpath in candidates:
             try:
-                el = await asyncio.to_thread(
-                    lambda x=xpath: self._d.xpath(x).wait(timeout=2.5)
-                )
-                if el:
-                    await asyncio.to_thread(lambda x=xpath: self._d.xpath(x).click())
+                if await self._human_click(xpath, timeout=2.5, jitter_px=10):
                     clicked = True
                     logger.info(f"[{self.serial}] tapped search entry via: {xpath}")
                     break
@@ -442,16 +495,51 @@ class PddAppClient:
         await _sleep_jitter(0.8)
 
     async def _type_keyword(self, keyword: str) -> None:
-        """在搜索输入框里敲关键词（不用 paste，用真键入更像人）。"""
-        # 进搜索页后输入框应该自动 focused，先 set_fastinput_ime 切到 ATX 输入法
-        # 再 send_keys 才能稳定中文输入
-        def _do():
-            self._d.set_fastinput_ime(True)
-            self._d.clear_text()  # 清掉默认 hint 残留
-            self._d.send_keys(keyword, clear=True)
+        """在搜索输入框里逐字敲关键词，模拟人类打字节奏。
 
-        await asyncio.to_thread(_do)
-        await _sleep_jitter(0.6)
+        反爬关键点：PDD 拿不到原始 IME 事件，但能监听 EditText.text 变化的速率。
+        如果一次 send_keys("机械键盘") → text 一帧内从空变成 4 个字，这是机器人
+        100% 的指纹。真用户每字间 200-500ms。
+
+        实现：
+        - set_fastinput_ime 一次性切到 ATX 输入法
+        - clear_text 清掉占位符
+        - 然后**每字** send_keys(clear=False) 追加 + 随机 sleep
+        - 偶尔 10% 概率多停顿 0.5-1.2s（模仿"想词"）
+        - 输入完后再 sleep 0.5-1.5s（模仿用户最后确认）
+
+        每字间隔分布：
+        - 中文字符：0.22-0.55s（中文输入法选词所需时间）
+        - 数字/ASCII：0.10-0.28s（按键直接出字符）
+        """
+        if not keyword:
+            return
+
+        def _setup_ime():
+            self._d.set_fastinput_ime(True)
+            self._d.clear_text()
+
+        await asyncio.to_thread(_setup_ime)
+        await _sleep_jitter(0.4, jitter=0.5)
+
+        for i, ch in enumerate(keyword):
+            await asyncio.to_thread(
+                lambda c=ch: self._d.send_keys(c, clear=False)
+            )
+            is_last = (i == len(keyword) - 1)
+            if is_last:
+                continue
+            # 选词时间分布：中文比 ASCII 慢
+            if "\u4e00" <= ch <= "\u9fff":
+                base_delay = random.uniform(0.22, 0.55)
+            else:
+                base_delay = random.uniform(0.10, 0.28)
+            # 10% 概率"想词"额外停顿
+            if random.random() < 0.10:
+                base_delay += random.uniform(0.5, 1.2)
+            await asyncio.sleep(base_delay)
+
+        await asyncio.sleep(random.uniform(0.5, 1.5))
 
     async def _submit_search(self) -> None:
         """提交搜索。优先点页面上的"搜索"按钮，回退到键盘 Enter。"""
@@ -461,15 +549,10 @@ class PddAppClient:
         ]
         for xpath in candidates:
             try:
-                el = await asyncio.to_thread(
-                    lambda x=xpath: self._d.xpath(x).wait(timeout=1.5)
-                )
-                if el:
-                    await asyncio.to_thread(lambda x=xpath: self._d.xpath(x).click())
+                if await self._human_click(xpath, timeout=1.5, jitter_px=10):
                     return
             except Exception:
                 continue
-        # fallback：键盘 Enter
         await asyncio.to_thread(self._d.press, "enter")
 
     async def _detect_risk_walls(self) -> str | None:
@@ -509,19 +592,23 @@ class PddAppClient:
 
         PDD 反爬手段之一是 **lazy-render 价格/销量**：标题渲染快，价格/销量延
         迟渲染或只渲染中心卡片。所以这里：
-        1. 多等一会（3s）让首屏稳定
-        2. 做一次"暖屏滚动"（下滑 300px + 上滑回来）强制 PDD 渲染所有可见卡片
+        1. 多等一会（2.5-3.5s）让首屏稳定
+        2. 做一次"暖屏滚动"（下滑 + 上滑回来）强制 PDD 渲染所有可见卡片
+
+        距离/时长/起点 X 都随机化，避免暖屏模式被 PDD 当成爬虫签名。
         """
         def _do_sync():
-            time.sleep(3.0)
+            time.sleep(random.uniform(2.5, 3.5))
             w, h = self._d.window_size()
-            mid_x = w // 2
-            # 暖屏：下滑 300px 触发懒加载
-            self._d.swipe(mid_x, int(h * 0.6), mid_x, int(h * 0.6) - 300, 0.4)
-            time.sleep(0.8)
-            # 滑回原位
-            self._d.swipe(mid_x, int(h * 0.6) - 300, mid_x, int(h * 0.6), 0.4)
-            time.sleep(1.0)
+            mid_x = w // 2 + random.randint(-25, 25)
+            start_y = int(h * random.uniform(0.55, 0.68))
+            shift = random.randint(250, 360)
+            dur_down = random.uniform(0.32, 0.55)
+            dur_up = random.uniform(0.32, 0.55)
+            self._d.swipe(mid_x, start_y, mid_x, start_y - shift, dur_down)
+            time.sleep(random.uniform(0.6, 1.1))
+            self._d.swipe(mid_x, start_y - shift, mid_x, start_y, dur_up)
+            time.sleep(random.uniform(0.8, 1.3))
 
         await asyncio.to_thread(_do_sync)
 
@@ -575,14 +662,18 @@ class PddAppClient:
             f"micro-scroll + redump"
         )
 
-        # 微滚动：上滑 100 → 下滑 100，让 RecyclerView 重 bind 所有 ViewHolder
+        # 微滚动：让 RecyclerView 重 bind 所有 ViewHolder。
+        # 起点 / 距离 / 时长全部随机，避免 PDD 把"暖屏后还小滑两下"
+        # 当成爬虫的固定 fingerprint。
         def _micro_scroll():
             w, h = self._d.window_size()
-            mx = w // 2
-            self._d.swipe(mx, int(h * 0.6), mx, int(h * 0.6) - 150, 0.3)
-            time.sleep(0.6)
-            self._d.swipe(mx, int(h * 0.6) - 150, mx, int(h * 0.6), 0.3)
-            time.sleep(1.0)
+            mx = w // 2 + random.randint(-20, 20)
+            start_y = int(h * random.uniform(0.55, 0.68))
+            shift = random.randint(120, 200)
+            self._d.swipe(mx, start_y, mx, start_y - shift, random.uniform(0.22, 0.42))
+            time.sleep(random.uniform(0.45, 0.85))
+            self._d.swipe(mx, start_y - shift, mx, start_y, random.uniform(0.22, 0.42))
+            time.sleep(random.uniform(0.8, 1.3))
 
         await asyncio.to_thread(_micro_scroll)
         second = await self._dump_visible_cards()
@@ -769,11 +860,16 @@ class PddAppClient:
         return deduped
 
     async def _human_scroll_down(self) -> None:
-        """人类化向下滑动一屏，触发 RecyclerView 懒加载。"""
+        """人类化向下滑动一屏，触发 RecyclerView 懒加载。
+
+        X / Y 起终点都加抖动，避免每次滑屏走同一条直线被 PDD 抓固定特征。
+        """
         size = await asyncio.to_thread(lambda: self._d.window_size())
         w, h = size
-        start = (w // 2 + random.randint(-30, 30), int(h * 0.75))
-        end = (w // 2 + random.randint(-30, 30), int(h * 0.30))
+        start_y_ratio = random.uniform(0.70, 0.82)
+        end_y_ratio = random.uniform(0.22, 0.36)
+        start = (w // 2 + random.randint(-30, 30), int(h * start_y_ratio))
+        end = (w // 2 + random.randint(-30, 30), int(h * end_y_ratio))
         await asyncio.to_thread(_humanize_swipe_path, self._d, start, end)
 
 
