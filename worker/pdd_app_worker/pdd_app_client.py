@@ -249,6 +249,7 @@ class PddAppClient:
         try:
             await self._ensure_app_foreground()
             await self._dismiss_popups()
+            await self._idle_browse_warmup()
             await self._tap_search_entry()
             await self._type_keyword(keyword)
             await self._submit_search()
@@ -327,6 +328,80 @@ class PddAppClient:
                     await _sleep_jitter(0.6)
             except Exception:
                 continue
+
+    async def _idle_browse_warmup(self) -> None:
+        """前置摸鱼：开 APP 后假装看下推荐流再去搜，骗过 PDD 风控的「目的性进入」检测。
+
+        PDD 风控对「开 APP 立刻搜」这个模板特别敏感（套利商 100% 命中）。
+        真用户进 APP 的典型路径是：首页推荐流 → 滑几下 → 看到感兴趣的点进去看
+        → 退出 → 想起来要找东西 → 才去搜。
+
+        本方法在首页：
+        1. 随机做 2-3 次"快慢滑"（不是匀速）
+        2. 有 60% 概率点 1 个推荐商品进详情页停 4-8s 再退出
+        3. 滑回首页顶部（让搜索栏可见）
+
+        全程不超过 12s（fast 模式总预算的 30%）。失败/异常都 swallow，
+        不影响主搜索流程——摸鱼是 best-effort，搜不到东西比"假装得不像"严重。
+        """
+        try:
+            def _do_sync():
+                w, h = self._d.window_size()
+                mid_x = w // 2
+
+                scroll_times = random.randint(2, 3)
+                for i in range(scroll_times):
+                    y_start = int(h * random.uniform(0.65, 0.78))
+                    y_end = int(h * random.uniform(0.22, 0.35))
+                    duration = random.uniform(0.35, 0.85)
+                    self._d.swipe(mid_x, y_start, mid_x, y_end, duration)
+                    time.sleep(random.uniform(0.8, 1.8))
+
+                clicked_detail = False
+                if random.random() < 0.6:
+                    try:
+                        cards = self._d.xpath(
+                            '//android.widget.ImageView['
+                            '@resource-id="com.xunmeng.pinduoduo:id/pdd"]'
+                        ).all()
+                        clickable_cards = []
+                        for c in cards:
+                            try:
+                                info = c.info
+                                b = info.get("bounds") or {}
+                                left = b.get("left", 0)
+                                right = b.get("right", 0)
+                                top = b.get("top", 0)
+                                if (right - left) > w * 0.25 and top > h * 0.18:
+                                    clickable_cards.append(c)
+                            except Exception:
+                                continue
+                        if clickable_cards:
+                            target = random.choice(clickable_cards[: min(8, len(clickable_cards))])
+                            target.click()
+                            clicked_detail = True
+                            time.sleep(random.uniform(4.0, 8.0))
+                            self._d.press("back")
+                            time.sleep(random.uniform(0.6, 1.2))
+                    except Exception:
+                        pass
+
+                up_steps = random.randint(2, 3)
+                for _ in range(up_steps):
+                    y_start = int(h * random.uniform(0.25, 0.35))
+                    y_end = int(h * random.uniform(0.70, 0.82))
+                    self._d.swipe(mid_x, y_start, mid_x, y_end, random.uniform(0.25, 0.45))
+                    time.sleep(random.uniform(0.3, 0.6))
+
+                return {"scrolls": scroll_times, "clicked_detail": clicked_detail}
+
+            stats = await asyncio.to_thread(_do_sync)
+            logger.info(
+                f"[{self.serial}] warmup done: "
+                f"scrolls={stats['scrolls']} detail_visited={stats['clicked_detail']}"
+            )
+        except Exception as exc:
+            logger.warning(f"[{self.serial}] warmup skipped: {type(exc).__name__}: {exc}")
 
     async def _tap_search_entry(self) -> None:
         """点首页顶部搜索栏。

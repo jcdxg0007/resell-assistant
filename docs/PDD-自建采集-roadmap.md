@@ -110,7 +110,8 @@
 | Day 0 | Windows host 准备：装 Python 3.11+ / Android Platform Tools / scrcpy；手机开开发者选项 + USB 调试；关闭 PDD 自动更新 | `adb devices` 能看到 1 台手机 | ✅ **2026-05-25**：Python 3.14、adb、scrcpy 全装好；OXF-AN10（荣耀 X20）serial=PKT0220416005274 已连通 |
 | Day 1 | HTTP bridge + worker 骨架；stub 任务端到端 | backend `enqueue → worker poll → result` 一次往返 | ✅ **2026-05-25**：stub 任务 1.4s 走通，3 ✅ 烟测通过 |
 | Day 2 | 写 `pdd_app_client.py`：登录态检测、PDD APP 启动、搜索框定位、结果列表解析 | 命令行能输入关键词，返回 JSON 列表 | ✅ **2026-05-25**：搜索栏 XPath（content-desc="搜索"）、IME 输入、提交全走通；50s 完整流程；商品卡解析待 Day 3 真机校准 |
-| Day 3 | 加健壮性层 + 填实结果页商品卡 XPath | 跑 50 次不挂、价格覆盖率 ≥ 80% | 🟡 **部分完成 2026-05-25**：标题 100%、销量 30-50%、价格 30-50%（被「百亿补贴 canvas 渲染」卡住，详见下方备注） |
+| Day 3 | 加健壮性层 + 填实结果页商品卡 XPath | 跑 50 次不挂、价格覆盖率 ≥ 80% | 🟡 **部分完成 2026-05-25**：标题 100%、销量 30-50%、价格 30-50%（被「百亿补贴 canvas 渲染」卡住）；4310 实名墙挂 → 已 quarantine + 换 7315 |
+| Day 3.5 | 7315 软养 + 加 `_idle_browse_warmup` 前置摸鱼 + 安全词白名单开测 | 24h 内 7315 不挂、安全词跑 ≥ 10 次成功 | 🟡 进行中 2026-05-26，详见 `PDD-Day3.5-7315上线观察.md` |
 | Day 4 | **OCR 兜底**：用 paddleocr / easyocr 把 canvas 渲染的价格截图识别出来，目标价格覆盖率 ≥ 90% | 同名关键词跑 10 次，每次都拿到 ≥ 80% 卡片有价格 | pending（**今日新增任务，原 Day 4 自启动顺延到 Day 5**） |
 | Day 5 | Windows 任务计划程序设开机自启；每日 self_check 任务 + 钉钉告警 | 重启 Windows 后 5 分钟内 worker 自动上线 | pending |
 | Day 6 | 改 `backend/app/tasks/selection.py`：取消 `_PDD_DISABLED` 短路 + 拔 `_PDD_USE_APP_WORKER` 开关；同步实现每日清库 beat | `instant_search('运动鞋')` 端到端能拿到 PDD 数据 | 脚手架已就位 |
