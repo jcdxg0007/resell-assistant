@@ -54,10 +54,31 @@ def _setup_signals() -> None:
 async def _heartbeat_loop(client: "BackendClient") -> None:
     from pdd_app_worker.device_manager import healthy_serials
 
+    last_devices: list[str] | None = None
     while not _shutdown.is_set():
         devices = healthy_serials()
         await client.send_heartbeat(devices)
-        logger.debug(f"heartbeat sent: devices={devices}")
+        # 设备列表变化时打 INFO（拔插数据线 / 手机重启时立刻看得到）；
+        # 没变化时打 DEBUG（默认 LOG_LEVEL=INFO 下不显示，避免刷屏）
+        if devices != last_devices:
+            if last_devices is None:
+                logger.info(f"heartbeat: initial devices={devices}")
+            elif not devices and last_devices:
+                logger.warning(
+                    f"heartbeat: device(s) DISCONNECTED "
+                    f"(was {last_devices}, now [])"
+                )
+            elif devices and not last_devices:
+                logger.info(
+                    f"heartbeat: device(s) RECONNECTED → {devices}"
+                )
+            else:
+                logger.info(
+                    f"heartbeat: devices CHANGED {last_devices} → {devices}"
+                )
+            last_devices = devices
+        else:
+            logger.debug(f"heartbeat: devices unchanged={devices}")
         try:
             await asyncio.wait_for(_shutdown.wait(), timeout=HEARTBEAT_INTERVAL)
         except asyncio.TimeoutError:
