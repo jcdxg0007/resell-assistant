@@ -112,7 +112,7 @@
 | Day 2 | 写 `pdd_app_client.py`：登录态检测、PDD APP 启动、搜索框定位、结果列表解析 | 命令行能输入关键词，返回 JSON 列表 | ✅ **2026-05-25**：搜索栏 XPath（content-desc="搜索"）、IME 输入、提交全走通；50s 完整流程；商品卡解析待 Day 3 真机校准 |
 | Day 3 | 加健壮性层 + 填实结果页商品卡 XPath | 跑 50 次不挂、价格覆盖率 ≥ 80% | 🟡 **部分完成 2026-05-25**：标题 100%、销量 30-50%、价格 30-50%（被「百亿补贴 canvas 渲染」卡住）；4310 实名墙挂 → 已 quarantine + 换 7315 |
 | Day 3.5 | 7315 软养 + 加 `_idle_browse_warmup` 前置摸鱼 + 安全词白名单开测 | 24h 内 7315 不挂、安全词跑 ≥ 10 次成功 | ✅ **2026-05-27 完成**：7315 上线后纸巾 / 袜子 / 保鲜膜 / 牙线 (deep) 共 4 次任务全 status=ok、risk_signals=空；详见本表下方 §"Day 3.5 收官记录" |
-| Day 4 | **OCR 兜底**：用 paddleocr / easyocr 把 canvas 渲染的价格截图识别出来，目标价格覆盖率 ≥ 90% | 10 个**不同**安全词跑一遍（分 2-3 天），每次都拿到 ≥ 80% 卡片有价格 | pending（验收方案已更新为多关键词，避免"同名连刷"= 4310 死因 §6 表 35% 权重） |
+| Day 4 | **OCR 兜底**：EasyOCR（ch_sim+en，CPU）+ 标题底边窄带截图识别 canvas 渲染价格，目标价格覆盖率 ≥ 90% | 10 个**不同**安全词跑一遍（分 2-3 天），每次都拿到 ≥ 80% 卡片有价格 | 🟡 **代码完成 2026-05-27 晚**：`worker/pdd_app_worker/ocr.py` + `_ocr_missing_prices`，item 加 `price_source` 字段；`pdd_fire_one_task.py` 加分布统计。**等家里电脑拉新代码 + 跑 10 词验收** |
 | Day 5 | Windows 任务计划程序设开机自启；每日 self_check 任务 + 钉钉告警 | 重启 Windows 后 5 分钟内 worker 自动上线 | pending |
 | Day 6 | 改 `backend/app/tasks/selection.py`：取消 `_PDD_DISABLED` 短路 + 拔 `_PDD_USE_APP_WORKER` 开关；同步实现每日清库 beat | `instant_search('运动鞋')` 端到端能拿到 PDD 数据 | 脚手架已就位 |
 | Day 7-8 | 跑 72h 稳定性测试，日志收集 | 成功率 ≥ 90%，平均耗时 ≤ 40s/任务 | pending |

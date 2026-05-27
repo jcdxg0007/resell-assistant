@@ -909,11 +909,18 @@ class PddAppClient:
 
         每屏内部如果发现 ≥ 50% 卡片缺价（lazy-render 未完成），延迟 1s 再 dump
         一次，按 title 合并、更晚 dump 的非零价格覆盖较早的零价格。
+
+        每屏 dump+lazy-recovery 完后再跑一次 OCR 兜底（``_ocr_missing_prices``），
+        把"百亿补贴 Canvas 卡片"那种 XML 里完全看不到价格的卡片救回来。OCR 一定
+        在跨屏合并之前做——不然滚走后截图已经对不上了。
         """
         seen_titles: dict[str, dict[str, Any]] = {}  # title → 最新数据
 
         for screen_idx in range(scroll_screens):
             cards = await self._dump_with_lazy_recovery()
+            # OCR 兜底必须用当前屏的实时截图，所以放在跨屏合并之前
+            cards = await self._ocr_missing_prices(cards)
+
             for card in cards:
                 title = card.get("title", "").strip()
                 if not title:
@@ -921,9 +928,17 @@ class PddAppClient:
                 if title in seen_titles:
                     # 已存在 → 非零字段补全（lazy-render 二次抓到的值优先）
                     existing = seen_titles[title]
-                    for k in ("price", "sales"):
-                        if not existing.get(k) and card.get(k):
-                            existing[k] = card[k]
+                    if not existing.get("price") and card.get("price"):
+                        existing["price"] = card["price"]
+                        # 同步带过来 OCR 相关元数据，方便后续 backend 评估
+                        for opt_k in (
+                            "price_source", "ocr_confidence",
+                            "ocr_raw_text", "ocr_reason",
+                        ):
+                            if opt_k in card:
+                                existing[opt_k] = card[opt_k]
+                    if not existing.get("sales") and card.get("sales"):
+                        existing["sales"] = card["sales"]
                     continue
                 seen_titles[title] = card
                 if len(seen_titles) >= target_count:
@@ -932,6 +947,120 @@ class PddAppClient:
                 await self._human_scroll_down()
                 await _sleep_jitter(1.0)
         return list(seen_titles.values())
+
+    async def _ocr_missing_prices(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """对没拿到价格的卡片用 OCR 兜底（百亿补贴 Canvas 价格走这条）。
+
+        步骤：
+        1. 给所有卡片打 ``price_source`` 标签（xml / missing）
+        2. 如果至少有一个 missing，截一次屏（``d.screenshot(format='opencv')``）
+        3. 每个 missing 卡片：以"标题底边 → 标题底边 + 220px"为 y 区间，
+           ``card_bounds`` 的 x 区间为水平范围，crop 截图丢给 ``ocr.extract_price_async``
+        4. 命中 → ``price_source='ocr'`` + 填 ``ocr_confidence``/``ocr_raw_text``
+        5. 不命中 → ``price_source='missing'`` 或 ``'ocr_error'``，记 ``ocr_reason``
+
+        OCR 模块 import 失败 / 截图失败 / Reader init 失败 → 全部 swallow，
+        worker 主流程继续。"我们能拿到的价格少一点"远比"OCR 把整个任务搞挂"
+        优先级低。
+        """
+        # 先打默认标签（保留对已有 xml 价格的标记）
+        for it in items:
+            if it.get("price"):
+                it.setdefault("price_source", "xml")
+            else:
+                it.setdefault("price_source", "missing")
+
+        missing = [it for it in items if it.get("price_source") == "missing"]
+        if not missing:
+            return items
+
+        # 截图 + 加载 OCR 模块（两者任意失败都 swallow）
+        try:
+            from pdd_app_worker import ocr as ocr_module
+        except ImportError as exc:
+            logger.warning(
+                f"[{self.serial}] OCR 模块不可用，跳过兜底（{len(missing)} 个 missing）: {exc}"
+            )
+            return items
+        try:
+            screenshot = await asyncio.to_thread(
+                lambda: self._d.screenshot(format="opencv")
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{self.serial}] OCR 截图失败，跳过兜底: {type(exc).__name__}: {exc}"
+            )
+            return items
+        if screenshot is None:
+            logger.warning(f"[{self.serial}] OCR 截图返回 None，跳过")
+            return items
+
+        try:
+            h, w = screenshot.shape[:2]
+        except Exception:
+            logger.warning(f"[{self.serial}] OCR 截图 shape 异常，跳过")
+            return items
+
+        n_ok = 0
+        n_fail = 0
+        confs: list[float] = []
+
+        for it in missing:
+            # 优先用 card_bounds 框出整个商品卡片的横向范围（左右列对齐 PDD 实测）；
+            # 老数据没 card_bounds 就回退到 title bounds + 50px padding。
+            cb = it.get("card_bounds")
+            tb = it.get("bounds") or [0, 0, 0, 0]
+            if cb and len(cb) == 4:
+                x1, _y_min_card, x2, _y_max_card = cb
+            else:
+                x1, x2 = tb[0] - 50, tb[2] + 50
+            # 价格扫描垂直范围：标题底边 → +220px。PDD 双列布局每张卡片高
+            # ~600-700px，标题正下方 50-200px 是价格区，220 包住有点冗余但
+            # OCR 抗干扰能力够。
+            y1 = tb[3]
+            y2 = tb[3] + 220
+            # 边界保护：到屏底就截到屏底
+            x1 = max(0, int(x1) - 5)
+            x2 = min(w, int(x2) + 5)
+            y1 = max(0, int(y1))
+            y2 = min(h, int(y2))
+            if x2 - x1 < 30 or y2 - y1 < 30:
+                # 卡片可能已经滚出屏外/标题在屏底 → 没法 OCR
+                it["price_source"] = "missing"
+                it["ocr_reason"] = "region_too_small"
+                n_fail += 1
+                continue
+
+            price, meta = await ocr_module.extract_price_async(
+                screenshot, (x1, y1, x2, y2)
+            )
+            reason = meta.get("reason", "unknown")
+            if price is not None:
+                it["price"] = price
+                it["price_source"] = "ocr"
+                if "confidence" in meta:
+                    it["ocr_confidence"] = meta["confidence"]
+                    confs.append(float(meta["confidence"]))
+                if "raw_text" in meta:
+                    it["ocr_raw_text"] = meta["raw_text"]
+                n_ok += 1
+            else:
+                if reason in ("ocr_error", "ocr_init_error", "bad_image"):
+                    it["price_source"] = "ocr_error"
+                else:
+                    it["price_source"] = "missing"
+                it["ocr_reason"] = reason
+                n_fail += 1
+
+        if missing:
+            avg_conf = sum(confs) / len(confs) if confs else 0.0
+            logger.info(
+                f"[{self.serial}] OCR fallback: filled {n_ok}/{len(missing)} "
+                f"(still missing {n_fail}, avg_conf={avg_conf:.2f})"
+            )
+        return items
 
     async def _dump_with_lazy_recovery(self) -> list[dict[str, Any]]:
         """dump 一次；如果 ≥ 50% 卡片缺价，做微滚动 + 再 dump，按 title 合并。
@@ -1135,7 +1264,8 @@ class PddAppClient:
                 "price": price or 0.0,
                 "sales": sales,
                 "is_ad": is_ad,
-                "bounds": list(t["bounds"]),  # JSON-friendly
+                "bounds": list(t["bounds"]),  # title bounds, JSON-friendly
+                "card_bounds": [card_x_min, card_y_min, card_x_max, card_y_max],
             })
 
         # 去重：title 相同的合并

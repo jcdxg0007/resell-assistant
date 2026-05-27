@@ -43,16 +43,60 @@ from app.services.pdd_app_queue import (  # noqa: E402
 
 
 def _fmt_items(items: list[dict]) -> str:
-    """打印每条商品的 title / price / sales 简表。"""
+    """打印每条商品的 title / price / sales 简表，带 price_source 标记。"""
+    src_tags = {
+        "xml": "📄",
+        "ocr": "🔍",
+        "ocr_error": "⚠️ ocr_err",
+        "missing": "❌",
+    }
     lines = []
     for i, it in enumerate(items[:8], 1):
         title = (it.get("title") or "")[:40]
         price = it.get("price") or "?"
         sales = it.get("sales") or "?"
-        lines.append(f"  {i}. ¥{price:<8} {sales:<10} {title}")
+        src = it.get("price_source", "?")
+        tag = src_tags.get(src, src)
+        extra = ""
+        if src == "ocr":
+            conf = it.get("ocr_confidence")
+            if conf is not None:
+                extra = f" (conf={conf:.2f})"
+        lines.append(
+            f"  {i}. {tag} ¥{price:<7} {sales:<10} {title}{extra}"
+        )
     if len(items) > 8:
         lines.append(f"  ... 还有 {len(items) - 8} 条")
     return "\n".join(lines) if lines else "  (空)"
+
+
+def _fmt_price_source_stats(items: list[dict]) -> str:
+    """统计 price_source 分布，对应 docs/PDD-Day4-OCR方案.md §Step 5 验收目标。"""
+    if not items:
+        return "  (无 items 可统计)"
+    counts: dict[str, int] = {}
+    for it in items:
+        src = it.get("price_source", "unknown")
+        counts[src] = counts.get(src, 0) + 1
+    total = len(items)
+    lines = []
+    for src in ("xml", "ocr", "ocr_error", "missing", "unknown"):
+        if src not in counts:
+            continue
+        n = counts[src]
+        pct = n * 100 / total
+        lines.append(f"  {src:12s}: {n:3d} ({pct:5.1f}%)")
+    other_keys = set(counts.keys()) - {
+        "xml", "ocr", "ocr_error", "missing", "unknown"
+    }
+    for src in sorted(other_keys):
+        n = counts[src]
+        pct = n * 100 / total
+        lines.append(f"  {src:12s}: {n:3d} ({pct:5.1f}%)")
+    coverage = (counts.get("xml", 0) + counts.get("ocr", 0)) * 100 / total
+    lines.append(f"  ───────────────────")
+    lines.append(f"  价格覆盖率   : {coverage:5.1f}%  (xml + ocr)")
+    return "\n".join(lines)
 
 
 async def main() -> int:
@@ -125,6 +169,8 @@ async def main() -> int:
     if result.items:
         print("\n--- 抓到的商品 ---")
         print(_fmt_items(result.items))
+        print("\n--- price_source 分布 ---")
+        print(_fmt_price_source_stats(result.items))
 
     print()
 

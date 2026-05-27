@@ -93,6 +93,21 @@ PaddleOCR（届时官方可能已经出 cp314 wheel，或者下决心装 3.12 ve
 
 ## 实施步骤（Day 4 工作清单）
 
+> ✅ **Step 1-4 编码全部完成（2026-05-27 晚）**。下一步只剩 Step 5 验收测试，
+> 按 §3 SOP 节奏分 2-3 天跑完 10 个安全词。
+>
+> 完成的代码：
+> - `worker/pdd_app_worker/ocr.py` — EasyOCR 懒加载 + `extract_price_async`
+> - `worker/pdd_app_worker/pdd_app_client.py::_ocr_missing_prices` — 自动给所有
+>   missing-price 卡片做 OCR 兜底，加 `price_source` / `ocr_confidence` /
+>   `ocr_raw_text` 字段
+> - `worker/pdd_app_worker/main.py` — 启动时预热 `ocr.preload_reader()` 把
+>   2-5s 冷启动从首条真实任务剥离
+> - `worker/pdd_app_worker/fetch_easyocr_models.py` — 通过 ghfast.top 镜像预下
+>   craft_mlt_25k / zh_sim_g2 / english_g2 等模型到 `~/.EasyOCR/model/`
+> - `backend/scripts/pdd_fire_one_task.py` — 加 price_source 分布统计输出，
+>   验收时一眼看到 OCR 命中率
+
 ### Step 1: 在现有 Python 3.14 venv 里加 EasyOCR
 
 ```cmd

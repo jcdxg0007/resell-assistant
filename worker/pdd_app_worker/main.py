@@ -530,6 +530,25 @@ async def main() -> int:
             "出问题难定位是哪个号干的。建议在 .env 里加一行 "
             "`BOUND_PDD_ACCOUNT=pdd_crawler_xxxx`"
         )
+
+    # 预热 OCR（百亿补贴价格兜底）。冷启动一次 ~2-5s，预热掉之后第一条
+    # 真实任务不用等。失败不抛——OCR 是 best-effort，没它 worker 也能跑。
+    # 模型必须事先用 `python -m pdd_app_worker.fetch_easyocr_models` 下到
+    # ~/.EasyOCR/model/，否则这里也会失败但只是 warning。
+    try:
+        from pdd_app_worker import ocr as ocr_module
+        t0 = time.monotonic()
+        await asyncio.to_thread(ocr_module.preload_reader)
+        logger.info(
+            f"OCR preload done in {time.monotonic() - t0:.1f}s "
+            f"(EasyOCR ch_sim+en, CPU)"
+        )
+    except Exception as exc:
+        logger.warning(
+            f"OCR preload skipped: {type(exc).__name__}: {exc}  "
+            f"（百亿补贴价格识别会失效；普通卡片不受影响）"
+        )
+
     _setup_signals()
 
     client = BackendClient()
