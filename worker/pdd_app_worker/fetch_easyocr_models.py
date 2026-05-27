@@ -20,11 +20,18 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
+
+
+# 全局 socket 超时：直连 github.com 在国内经常卡在 SSL 握手不动也不抛错，
+# 必须用 setdefaulttimeout 强行限制每个 socket 操作。30s 一刀，不通就切镜像。
+socket.setdefaulttimeout(30)
 
 
 GITHUB_MIRRORS = [
@@ -44,22 +51,83 @@ def _mirror_url(url: str, mirror_prefix: str) -> str:
     return mirror_prefix.rstrip("/") + "/" + url
 
 
-def _download_with_fallback(url: str, dst: Path, *, max_tries: int = 2) -> None:
-    """先直连，失败再依次走镜像。每次最多 ``max_tries`` 个连接。"""
+def _make_progress_reporter():
+    """返回一个 urlretrieve 用的 reporthook，会原地刷新进度条。"""
+    state = {"last_print": 0.0}
+
+    def _hook(blocks: int, block_size: int, total_size: int) -> None:
+        downloaded = blocks * block_size
+        now = time.monotonic()
+        # 限速打印：每 0.5 秒最多刷一次，避免 stdout 刷爆
+        if now - state["last_print"] < 0.5 and downloaded < total_size and total_size > 0:
+            return
+        state["last_print"] = now
+        if total_size > 0:
+            pct = min(100, downloaded * 100 // total_size)
+            mb = downloaded / 1024 / 1024
+            total_mb = total_size / 1024 / 1024
+            print(f"     ... {pct:3d}%  {mb:6.1f}/{total_mb:.1f} MB", end="\r", flush=True)
+        else:
+            mb = downloaded / 1024 / 1024
+            print(f"     ... {mb:6.1f} MB", end="\r", flush=True)
+
+    return _hook
+
+
+def _download_one(url: str, dst: Path, *, connect_timeout: float = 20.0) -> None:
+    """单次下载尝试。读响应阶段如果 60 秒内没有任何字节进来，主动抛 TimeoutError。
+
+    标准 urlretrieve 在握手卡死时不抛错，所以我们手写一遍，用更激进的超时。
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=connect_timeout) as resp:
+        total_size = int(resp.headers.get("Content-Length") or 0)
+        hook = _make_progress_reporter()
+        downloaded = 0
+        block_size = 64 * 1024
+        last_recv = time.monotonic()
+        blocks = 0
+        with open(dst, "wb") as fp:
+            while True:
+                chunk = resp.read(block_size)
+                if not chunk:
+                    break
+                fp.write(chunk)
+                downloaded += len(chunk)
+                blocks += 1
+                last_recv = time.monotonic()
+                hook(blocks, block_size, total_size)
+                # 没法直接控制 read() 的逐字节超时，但 socket.setdefaulttimeout
+                # 已经在底层保证 30s 没数据就 raise TimeoutError，这里不再额外
+                # 检查 last_recv，避免重复打断。
+        print()  # 收尾把进度条那一行结束掉
+        if total_size and downloaded != total_size:
+            raise RuntimeError(
+                f"下载字节数对不上：得到 {downloaded} / 期望 {total_size}"
+            )
+
+
+def _download_with_fallback(url: str, dst: Path) -> None:
+    """先直连，失败再依次走镜像。每个 URL 只试 1 次（超时短，多试浪费时间）。"""
     candidates = [url] + [_mirror_url(url, m) for m in GITHUB_MIRRORS]
     last_err: Exception | None = None
     for cand in candidates:
-        for attempt in range(max_tries):
-            try:
-                print(f"  → 尝试 {cand} (attempt {attempt + 1}/{max_tries})")
-                urllib.request.urlretrieve(cand, dst)
-                size_mb = dst.stat().st_size / 1024 / 1024
-                print(f"     ✅ {size_mb:.1f} MB 已下载到 {dst}")
-                return
-            except (urllib.error.URLError, TimeoutError, ConnectionResetError) as exc:
-                last_err = exc
-                print(f"     ❌ {type(exc).__name__}: {exc}")
-                continue
+        try:
+            print(f"  → 尝试 {cand}")
+            _download_one(cand, dst)
+            size_mb = dst.stat().st_size / 1024 / 1024
+            print(f"     ✅ 完成，{size_mb:.1f} MB")
+            return
+        except Exception as exc:  # 直连卡死会抛 socket.timeout/TimeoutError
+            last_err = exc
+            print(f"     ❌ {type(exc).__name__}: {exc}")
+            # 失败的半成品文件要清掉，否则下一次会拼到一起
+            if dst.exists():
+                try:
+                    dst.unlink()
+                except OSError:
+                    pass
+            continue
     raise RuntimeError(
         f"所有镜像都连不通  原 URL={url}  最后错误={last_err!r}"
     )
