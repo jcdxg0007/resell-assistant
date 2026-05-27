@@ -589,47 +589,94 @@ class PddAppClient:
         - 旁边 [941,176] 有"拍照搜索" desc='拍照搜索'，不要误点
         """
         await _sleep_jitter(0.8)
-        candidates = [
-            # 主选：精确匹配 content-desc="搜索"（排除"拍照搜索"等组合词）
-            '//android.widget.TextView[@content-desc="搜索"]',
-            # 次选：所有 desc="搜索" 元素（万一 PDD 把 TextView 换成别的 class）
-            '//*[@content-desc="搜索"]',
-            # 兜底（留着以防 PDD 又换回 EditText 形态）
-            '//android.widget.EditText[contains(@text, "搜索")]',
-        ]
-        clicked = False
-        for xpath in candidates:
+
+        # 2026-05-27 morning test 踩坑：PDD 首页搜索栏在 XML 里长这样：
+        #   <node class="android.widget.TextView" content-desc="搜索"
+        #         text="<上次搜过的词>" bounds="[477,181][669,238]"
+        #         clickable="false" focusable="false" .../>
+        # 元素真的存在、可见、有 bounds，但 d.xpath("//*[@content-desc=...]").exists
+        # 返回 False。**uiautomator2 的 xpath() 对 CJK content-desc 属性匹配
+        # 在某些 PDD/u2 版本组合上彻底不工作**（不是 PDD 改 UI！）。
+        #
+        # 双策略修复：
+        #   ① UiSelector(description=...) 走 Android 原生选择器（不经过 u2 的 xpath 引擎）
+        #   ② dump XML + 正则提 bounds + d.click(x,y)（绝对兜底，因为 re.search 已证明能匹配）
+        def _do_sync() -> tuple[bool, str]:
+            d = self._d
+
+            # 策略 1：UiSelector + className（不经过 xpath 引擎，更可靠）
             try:
-                if await self._human_click(xpath, timeout=2.5, jitter_px=10):
-                    clicked = True
-                    logger.info(f"[{self.serial}] tapped search entry via: {xpath}")
-                    break
+                sel = d(description="搜索", className="android.widget.TextView")
+                if sel.exists:
+                    try:
+                        info = sel.info or {}
+                    except Exception:
+                        info = {}
+                    b = info.get("bounds") or {}
+                    if b:
+                        x, y = _jittered_point_in_bounds(b, jitter_px=10)
+                        d.click(x, y)
+                        return True, f"ui_selector@({x},{y})"
+                    sel.click()
+                    return True, "ui_selector_default_click"
             except Exception as exc:
-                logger.debug(f"[{self.serial}] tap_search_entry candidate failed: {xpath} -> {exc}")
-                continue
-        if not clicked:
-            # 失败时把当前 hierarchy 写出来，便于复盘（worker CWD 下）
+                logger.debug(f"[{self.serial}] ui_selector failed: {exc}")
+
+            # 策略 2：dump XML + 正则匹配 bounds（绝对兜底）
             try:
-                from datetime import datetime
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                dump_path = f"tap_search_failed_{stamp}.xml"
-                xml = await asyncio.to_thread(lambda: self._d.dump_hierarchy())
-                with open(dump_path, "w", encoding="utf-8") as f:
-                    f.write(xml)
-                cur = await asyncio.to_thread(lambda: self._d.app_current())
-                logger.error(
-                    f"[{self.serial}] _tap_search_entry FAILED  "
-                    f"current_pkg={cur.get('package')} "
-                    f"activity={cur.get('activity')} "
-                    f"dump_saved={dump_path}"
-                )
-            except Exception as dump_exc:
-                logger.error(
-                    f"[{self.serial}] _tap_search_entry FAILED, "
-                    f"also failed to dump hierarchy: {dump_exc}"
-                )
-            raise RuntimeError("找不到首页搜索入口 —— 检查 PDD 是否在首页且 UI 没大改")
-        await _sleep_jitter(0.8)
+                xml = d.dump_hierarchy()
+                # 匹配 class=TextView 且 content-desc 精确为"搜索"（不含拍照搜索等）的 node。
+                # XML 里 content-desc 和 bounds 顺序可能反转，两种都试。
+                patterns = [
+                    re.compile(
+                        r'<node[^>]*?class="android\.widget\.TextView"[^>]*?'
+                        r'content-desc="搜索"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+                    ),
+                    re.compile(
+                        r'<node[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*?'
+                        r'class="android\.widget\.TextView"[^>]*?content-desc="搜索"'
+                    ),
+                ]
+                for pat in patterns:
+                    m = pat.search(xml)
+                    if m:
+                        l, t, r, b2 = (int(g) for g in m.groups())
+                        bounds = {"left": l, "top": t, "right": r, "bottom": b2}
+                        x, y = _jittered_point_in_bounds(bounds, jitter_px=10)
+                        d.click(x, y)
+                        return True, f"xml_parse@({x},{y})_bounds=[{l},{t}][{r},{b2}]"
+            except Exception as exc:
+                logger.debug(f"[{self.serial}] xml_parse failed: {exc}")
+
+            return False, "all_strategies_failed"
+
+        clicked, how = await asyncio.to_thread(_do_sync)
+        if clicked:
+            logger.info(f"[{self.serial}] tapped search entry via: {how}")
+            await _sleep_jitter(0.8)
+            return
+
+        # 全部失败时 dump 当前 hierarchy 用于复盘
+        try:
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dump_path = f"tap_search_failed_{stamp}.xml"
+            xml = await asyncio.to_thread(lambda: self._d.dump_hierarchy())
+            with open(dump_path, "w", encoding="utf-8") as f:
+                f.write(xml)
+            cur = await asyncio.to_thread(lambda: self._d.app_current())
+            logger.error(
+                f"[{self.serial}] _tap_search_entry FAILED  "
+                f"current_pkg={cur.get('package')} "
+                f"activity={cur.get('activity')} "
+                f"dump_saved={dump_path}"
+            )
+        except Exception as dump_exc:
+            logger.error(
+                f"[{self.serial}] _tap_search_entry FAILED, "
+                f"also failed to dump hierarchy: {dump_exc}"
+            )
+        raise RuntimeError("找不到首页搜索入口 —— 检查 PDD 是否在首页且 UI 没大改")
 
     async def _type_keyword(self, keyword: str) -> None:
         """在搜索输入框里逐字敲关键词，模拟人类打字节奏。
