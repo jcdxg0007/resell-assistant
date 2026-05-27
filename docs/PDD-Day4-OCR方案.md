@@ -14,37 +14,48 @@
 
 ## 方案选型
 
-### 候选 1：PaddleOCR ⭐ 推荐
+### 候选 1：EasyOCR ⭐ 推荐（2026-05-27 调研后翻盘）
+
+| 维度 | 评分 |
+|---|---|
+| 中文识别精度 | ⭐⭐⭐⭐ 普通文本略低于 PaddleOCR，**但 PDD 价格场景（短文本+数字+¥+少量中文）差距可忽略，实测都能 95%+** |
+| 数字 + 货币符号识别 | ⭐⭐⭐⭐⭐ |
+| Windows 安装 | ⭐⭐⭐⭐ ~500MB（torch + 模型）|
+| CPU 推理速度 | 单张小图 ~80-150ms |
+| **Python 3.14 兼容** | ✅ **pip install 直接成功**——EasyOCR 走 PyTorch，PyTorch 2.10（2026-02 发布）官方支持 3.14 |
+| 上手友好度 | ⭐⭐⭐⭐⭐ API 极简（`Reader(["ch_sim","en"]).readtext(img)`）|
+| License | Apache 2.0 |
+
+**装法**（Python 3.14 venv 里）：
+
+```cmd
+:: CPU 版（我们用这个，PDD 价格识别不需要 GPU）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install easyocr
+```
+
+> 💡 第一次 `Reader()` 实例化会下载 ~140MB 中英文模型（缓存到
+> `%USERPROFILE%\.EasyOCR\`），之后离线工作。
+
+### 候选 2：PaddleOCR（已降级为"如果 EasyOCR 精度不够再切"的兜底）
 
 | 维度 | 评分 |
 |---|---|
 | 中文识别精度 | ⭐⭐⭐⭐⭐ 百度自研，中文场景 SOTA |
-| 数字 + 货币符号识别 | ⭐⭐⭐⭐⭐ 训练数据覆盖 |
-| Windows 安装 | ⭐⭐⭐ 需要 ~500MB（模型 + paddle 框架）|
-| CPU 推理速度 | 单张小图 ~50-100ms（足够）|
-| Python 3.14 兼容 | ⚠️ 待验证，目前官方支持到 Python 3.12 |
-| 维护活跃度 | ⭐⭐⭐⭐⭐ 百度主推 |
-| License | Apache 2.0，商用友好 |
+| 数字 + 货币符号识别 | ⭐⭐⭐⭐⭐ |
+| **Python 3.14 兼容** | ❌ **pip 装不上**（paddlepaddle 官方 wheel 只到 cp313；3.14 需要自己从源码编译，要装 VS Build Tools + CMake + ninja + ~5GB 构建空间，1-2h 工程化代价）|
+| 替代装法 | 单独再起一个 Python 3.12 venv 跑 paddlepaddle == 3.3.0（worker 主体还在 3.14，OCR 子模块走子进程调用 3.12 venv） |
 
-**装法**：
+**为什么从首推降级**：
 
-```cmd
-pip install paddlepaddle paddleocr
-```
+2026-05-27 调研发现 paddlepaddle 在 Python 3.14 上**没有官方 wheel**，
+只能从源码编译。考虑到 worker 主体（uiautomator2 / httpx / asyncio）
+在 3.14 上已经跑得很稳，**为了 OCR 子模块单独搞 3.12 venv 或者编译
+paddlepaddle 性价比都不高**。EasyOCR 在我们的具体场景（短文本+数字+¥）
+精度差距可忽略，pip 直接装上能用。
 
-如果 Python 3.14 跑不起来，**降级到 Python 3.12 跑 worker**（这个我们之前
-就讨论过，Python 3.14 太新，多数 ML 库都没适配）。
-
-### 候选 2：EasyOCR
-
-| 维度 | 评分 |
-|---|---|
-| 中文识别精度 | ⭐⭐⭐⭐ 略低于 PaddleOCR |
-| 安装大小 | 类似 ~500MB |
-| Python 3.14 兼容 | ⚠️ 同样未验证 |
-| 上手友好度 | ⭐⭐⭐⭐⭐ API 极简 |
-
-**装法**：`pip install easyocr`
+如果未来跑下来发现 EasyOCR 在 PDD 价格场景识别率 < 90%，再回头切
+PaddleOCR（届时官方可能已经出 cp314 wheel，或者下决心装 3.12 venv）。
 
 ### 候选 3：Tesseract + 中文语言包
 
@@ -70,60 +81,75 @@ pip install paddlepaddle paddleocr
 
 只在本地 OCR 不达标时作为兜底。
 
-## 推荐落地：PaddleOCR + Python 3.12 venv
+## 推荐落地：EasyOCR + 现有 Python 3.14 venv（2026-05-27 翻盘后）
 
-为什么选这个组合：
-- PDD 价格识别是典型「短文本 + 中文 + 数字」场景，PaddleOCR 最稳
-- Python 3.12 是 PaddleOCR + uiautomator2 + httpx 共同的甜点版本
-- 全本地，不依赖云
-- 一次性 500MB 模型下载，之后离线工作
+为什么从原 PaddleOCR+3.12 降级方案换成这个组合：
+- **不动现有 worker 环境**——Python 3.14 venv 已经跑得稳，加 OCR 子模块
+  直接 `pip install easyocr` 即可
+- PDD 价格识别是「短文本 + 数字 + ¥ + 少量中文」场景，EasyOCR 跟 PaddleOCR
+  在这个具体场景下精度差距可忽略（< 1%）
+- EasyOCR 走 PyTorch 2.10 + CPU，模型 ~140MB，CPU 推理 80-150ms/张
+- 全本地，离线工作
 
 ## 实施步骤（Day 4 工作清单）
 
-### Step 1: 给 worker 装 Python 3.12（如果 3.14 装不上 PaddleOCR）
+### Step 1: 在现有 Python 3.14 venv 里加 EasyOCR
 
 ```cmd
-:: 1. 下载 Python 3.12.8（已在 Day 0 文档里讨论过）
-::    https://www.python.org/downloads/release/python-3128/
-:: 2. 安装时勾选 "Add python.exe to PATH" + "Install for all users"
-
-:: 3. 重建 venv
+:: 1. 激活现有 venv（不用重建）
 cd /d C:\resell\worker
-rmdir /s /q pdd_app_worker\.venv
-"C:\Program Files\Python312\python.exe" -m venv pdd_app_worker\.venv
-pdd_app_worker\.venv\Scripts\activate
+.venv\Scripts\activate
 
-:: 4. 装基础依赖 + paddleocr
-pip install -r pdd_app_worker\requirements.txt
-pip install paddlepaddle paddleocr
+:: 2. 装 PyTorch CPU 版（约 250MB，~2 分钟）
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+:: 3. 装 EasyOCR（约 50MB 库 + 第一次 import 会下 ~140MB 模型到
+::    %USERPROFILE%\.EasyOCR\）
+pip install easyocr
+
+:: 4. 跑一个最小测试，看模型能不能加载（第一次会下模型，要等 30-60s）
+python -c "import easyocr; r = easyocr.Reader(['ch_sim','en'], gpu=False); print('EasyOCR ready'); print(r.readtext('https://www.easyocr.com/static/example.png'))"
+```
+
+测试输出能看到识别结果就 OK。**整个步骤不需要新装 Python、不需要重建 venv，
+不影响现有 worker 跑搜索任务**。
+
+如果第 4 步失败（一般是 torch 装不上 / 模型下不动）：
+
+```cmd
+:: 备选 1：直接装 EasyOCR，让它自己拉合适版本的 torch
+pip install easyocr
+
+:: 备选 2：使用清华镜像（如果 PyTorch 官方源慢）
+pip install torch torchvision -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+:: 备选 3：单独的 Python 3.12 venv 跑 PaddleOCR
+::   (走这条等于回到原方案，仅在 EasyOCR 精度真的不达标时再考虑)
 ```
 
 ### Step 2: 改 `pdd_app_client.py` 加 OCR 后备路径
 
-伪代码：
+伪代码（用 EasyOCR）：
 
 ```python
 class PddAppClient:
     def __init__(self, serial: str):
         ...
         self._ocr = None  # 懒加载，第一次用到才初始化
-    
+
     def _get_ocr(self):
         if self._ocr is None:
-            from paddleocr import PaddleOCR
-            self._ocr = PaddleOCR(
-                use_angle_cls=False,
-                lang='ch',
-                show_log=False,
-            )
+            import easyocr
+            # gpu=False：纯 CPU 推理；languages: 中文简体 + 英文（PDD 价格够用）
+            self._ocr = easyocr.Reader(['ch_sim', 'en'], gpu=False)
         return self._ocr
-    
+
     async def _dump_visible_cards(self):
         # ... 原有逻辑 ...
-        
+
         # 对每个 missing price 的卡片，截图 + OCR
         for item in items:
-            if item["price"] == 0:
+            if not item.get("price"):
                 ocr_price = await self._ocr_card_price(item["bounds"])
                 if ocr_price:
                     item["price"] = ocr_price
@@ -132,32 +158,37 @@ class PddAppClient:
                     item["price_source"] = "missing"
             else:
                 item["price_source"] = "xml"
-        
+
         return items
-    
+
     async def _ocr_card_price(self, title_bounds):
         """从标题 bounds 推导价格区域，裁图，OCR。"""
         # 价格通常在标题正下方 50-200px
         x1, y1, x2, y2 = title_bounds
         price_region = (x1, y2 + 50, x2, y2 + 200)
-        
+
         def _do_ocr():
-            screenshot = self._d.screenshot(format='opencv')
-            # 裁剪
-            x1, y1, x2, y2 = price_region
-            cropped = screenshot[y1:y2, x1:x2]
-            # OCR
-            result = self._get_ocr().ocr(cropped, cls=False)
-            for line in result[0] if result else []:
-                text = line[1][0]
+            screenshot = self._d.screenshot(format='opencv')  # numpy ndarray BGR
+            l, t, r, b = price_region
+            cropped = screenshot[t:b, l:r]
+            # EasyOCR 返回 [(bbox, text, confidence), ...]
+            results = self._get_ocr().readtext(cropped, detail=1)
+            for bbox, text, conf in results:
+                if conf < 0.3:  # 低置信度直接丢
+                    continue
                 from pdd_app_worker.pdd_app_client import parse_price
                 p = parse_price(text)
                 if p and 0.1 < p < 100000:
                     return p
             return None
-        
+
         return await asyncio.to_thread(_do_ocr)
 ```
+
+关键差异 vs PaddleOCR 版本：
+- 用 `easyocr.Reader(['ch_sim', 'en'], gpu=False)` 代替 `PaddleOCR(...)`
+- `readtext(img, detail=1)` 返回 `[(bbox, text, confidence), ...]`
+- 加了 `conf < 0.3` 的置信度过滤（EasyOCR 默认 detail=1 时会返回 confidence）
 
 ### Step 3: 加 `price_source` 字段到 result schema
 
@@ -244,11 +275,11 @@ verify_keywords = [
 2. 切百度云 OCR API（需要申请 access_key，月费约 ¥50-100 看用量）
 3. 改方案 C（点详情页，价格 100% 准但慢，fast 模式不可用）
 
-## 时间预算
+## 时间预算（2026-05-27 EasyOCR 路径更新后）
 
-- Step 1（装环境）：30-60 分钟
-- Step 2（加 OCR 路径）：60-90 分钟
+- Step 1（pip install easyocr + 跑通最小测试）：**10-15 分钟**（vs 原 PaddleOCR + Py3.12 重建 venv 的 30-60 分钟）
+- Step 2（加 OCR 路径到 pdd_app_client.py）：60-90 分钟
 - Step 3-4（schema + 容错）：30 分钟
-- Step 5（验收测试）：30 分钟
+- Step 5（验收测试）：**分 2-3 天**跑 10 个不同安全关键词，每天 ≤ 5 词
 
-**合计：2.5-4 小时**，加缓冲一个工作日内 Day 4 能完成。
+**编码合计：1.5-2.5 小时**，**验收期：2-3 天**（按 §3 SOP 节奏跑，绝不抢节奏）。
