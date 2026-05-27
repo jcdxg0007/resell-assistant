@@ -358,6 +358,10 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
     """
     keyword = payload.get("keyword") or ""
     mode = payload.get("mode", "fast")
+    # 派单方可指定 target_count / scroll_screens 覆盖默认值（fast=1 屏 / deep=3 屏）。
+    # 任一为 None / 缺失就走 PddAppClient.search() 的默认行为。
+    override_target_count = payload.get("target_count")
+    override_scroll_screens = payload.get("scroll_screens")
     if not keyword:
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         return {
@@ -408,8 +412,14 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
         }
     serial = devices[0]  # Phase 1 单机；Phase 2 按 account.bound_device_serial 路由
 
+    search_kwargs: dict[str, Any] = {"mode": mode}
+    if isinstance(override_target_count, int) and override_target_count > 0:
+        search_kwargs["max_items"] = override_target_count
+    if isinstance(override_scroll_screens, int) and override_scroll_screens > 0:
+        # search() 内部会 clamp 到 [1, 5]
+        search_kwargs["scroll_screens"] = override_scroll_screens
     async with PddAppClient(serial) as cli:
-        search_result = await cli.search(keyword, mode=mode)
+        search_result = await cli.search(keyword, **search_kwargs)
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     if search_result.error:

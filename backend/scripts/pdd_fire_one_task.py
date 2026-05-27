@@ -108,7 +108,13 @@ async def main() -> int:
     )
     parser.add_argument(
         "--scroll-screens", type=int, default=2,
-        help="搜索结果页滚动多少屏（默认 2，更多会增加暴露时间）"
+        help="搜索结果页滚动多少屏（默认 2，worker 端 clamp 到 [1,5]，"
+             "屏数越多越可能触发百亿补贴卡 = OCR 验证机会多，但暴露面也大）"
+    )
+    parser.add_argument(
+        "--mode", default="fast", choices=("fast", "deep"),
+        help="fast=约 20 件商品，deep=约 60 件（target_count×3）。"
+             "scroll_screens 单独覆盖滚动屏数；mode 只影响 target_count 倍数"
     )
     parser.add_argument(
         "--timeout", type=int, default=180,
@@ -136,12 +142,14 @@ async def main() -> int:
             "keyword": args.keyword,
             "target_count": args.target_count,
             "scroll_screens": args.scroll_screens,
+            "mode": args.mode,
         },
         priority=args.priority,
         timeout_s=args.timeout,
     )
     print(f"→ enqueue task_id={task.task_id[:8]}  keyword='{args.keyword}'  "
-          f"target_count={args.target_count}  scroll_screens={args.scroll_screens}")
+          f"mode={args.mode}  target_count={args.target_count}  "
+          f"scroll_screens={args.scroll_screens}")
     await enqueue_task(task)
 
     print(f"  等 worker 处理...（最多 {args.timeout}s；worker 静默期会自动让任务排队）")

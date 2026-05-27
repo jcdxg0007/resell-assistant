@@ -322,14 +322,24 @@ class PddAppClient:
         keyword: str,
         max_items: int = DEFAULT_MAX_ITEMS,
         mode: str = "fast",
+        scroll_screens: int | None = None,
     ) -> PddSearchResult:
         """主入口：搜索关键词并返回前 N 个商品卡片。
 
         mode:
         - "fast"：单屏，约 20 个商品，~30s
         - "deep"：滚动 3 屏，约 60 个商品，~90s，更适合做长尾分析
+
+        :param scroll_screens: 显式指定滚动屏数（覆盖 mode 默认值）。None 走
+            mode 派生：fast=1 屏 / deep=3 屏。屏数越多 = 越可能触发百亿补贴卡
+            = OCR 能验证到，但**暴露面也越大**（PDD 风控按"单 session 滚动深度"
+            打分），建议 ≤ 5 屏。
         """
         target_count = max_items if mode == "fast" else max_items * 3
+        if scroll_screens is None:
+            scroll_screens_eff = 1 if mode == "fast" else 3
+        else:
+            scroll_screens_eff = max(1, min(int(scroll_screens), 5))
         result = PddSearchResult()
         t0 = time.monotonic()
 
@@ -352,7 +362,9 @@ class PddAppClient:
                 return result
 
             await self._wait_search_results()
-            items = await self._collect_items(target_count, scroll_screens=1 if mode == "fast" else 3)
+            items = await self._collect_items(
+                target_count, scroll_screens=scroll_screens_eff
+            )
             result.items = items
 
             if not items:
@@ -364,7 +376,8 @@ class PddAppClient:
         finally:
             elapsed = time.monotonic() - t0
             logger.info(
-                f"[{self.serial}] search('{keyword}', mode={mode}) → "
+                f"[{self.serial}] search('{keyword}', mode={mode}, "
+                f"scroll_screens={scroll_screens_eff}) → "
                 f"items={len(result.items)} risks={result.risk_signals} "
                 f"elapsed={elapsed:.1f}s"
             )
