@@ -322,8 +322,11 @@ class PddAppClient:
 
         try:
             await self._ensure_app_foreground()
+            await self._ensure_home_tab()
             await self._dismiss_popups()
             await self._idle_browse_warmup()
+            # warmup 后再 ensure 一次：warmup 内的 detail-page 点击 + back 不一定回到首页
+            await self._ensure_home_tab()
             await self._tap_search_entry()
             await self._type_keyword(keyword)
             await self._submit_search()
@@ -370,6 +373,61 @@ class PddAppClient:
         if status == "started":
             # 冷启动给开屏广告 / splash 留时间
             await _sleep_jitter(3.5, jitter=0.3)
+
+    async def _ensure_home_tab(self) -> None:
+        """点击底部 home tab，强制把 PDD 拉回首页。
+
+        2026-05-27 morning test 事故复盘：worker 启动 PDD 后，APP 可能恢复到
+        上次的搜索结果页 / 详情页 / 活动横幅页。warmup 在那种页面上跑会
+        scrolls=2 detail_visited=True 看似正常，但接下来 _tap_search_entry
+        找不到 content-desc 搜索栏（搜索结果页顶部是 EditText，不是 TextView）。
+
+        本方法在 _ensure_app_foreground 后立刻调用，无论当前在哪个二级页面，
+        点底部"首页"tab 都能拉回主页。已经在首页时点一下近似 no-op。
+
+        失败不抛——让后续 _dismiss_popups + _tap_search_entry 再尝试，至少
+        worker 不会因为这一步卡死整个任务。
+        """
+        def _do_sync() -> str:
+            d = self._d
+            home_xpaths = [
+                "//android.widget.TextView[@text=\"首页\" and @selected=\"true\"]",
+                "//android.widget.TextView[@text=\"首页\"]",
+                "//*[@text=\"首页\"][@clickable=\"true\"]",
+                "//*[@content-desc=\"首页\"]",
+            ]
+            for xp in home_xpaths:
+                try:
+                    el = d.xpath(xp).get(timeout=1.0)
+                except Exception:
+                    continue
+                if not el:
+                    continue
+                try:
+                    info = el.info or {}
+                except Exception:
+                    info = {}
+                if info.get("selected"):
+                    return "already_home:" + xp
+                try:
+                    el.click()
+                    return "clicked:" + xp
+                except Exception as exc:
+                    logger.debug(
+                        f"[{self.serial}] home-tab click failed via {xp}: {exc}"
+                    )
+                    continue
+            return "NO_HOME_TAB"
+
+        outcome = await asyncio.to_thread(_do_sync)
+        logger.info(f"[{self.serial}] ensure_home_tab: {outcome}")
+        if outcome == "NO_HOME_TAB":
+            logger.warning(
+                f"[{self.serial}] 底部 home tab 没找到 —— "
+                "可能 PDD 当前在全屏弹窗 / 二级页面 / 活动页"
+            )
+            return
+        await _sleep_jitter(1.2, jitter=0.4)
 
     async def _dismiss_popups(self) -> None:
         """关掉常见的开屏弹窗（金币、新人券、推送权限、订阅引导等）。
@@ -550,6 +608,26 @@ class PddAppClient:
                 logger.debug(f"[{self.serial}] tap_search_entry candidate failed: {xpath} -> {exc}")
                 continue
         if not clicked:
+            # 失败时把当前 hierarchy 写出来，便于复盘（worker CWD 下）
+            try:
+                from datetime import datetime
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dump_path = f"tap_search_failed_{stamp}.xml"
+                xml = await asyncio.to_thread(lambda: self._d.dump_hierarchy())
+                with open(dump_path, "w", encoding="utf-8") as f:
+                    f.write(xml)
+                cur = await asyncio.to_thread(lambda: self._d.app_current())
+                logger.error(
+                    f"[{self.serial}] _tap_search_entry FAILED  "
+                    f"current_pkg={cur.get('package')} "
+                    f"activity={cur.get('activity')} "
+                    f"dump_saved={dump_path}"
+                )
+            except Exception as dump_exc:
+                logger.error(
+                    f"[{self.serial}] _tap_search_entry FAILED, "
+                    f"also failed to dump hierarchy: {dump_exc}"
+                )
             raise RuntimeError("找不到首页搜索入口 —— 检查 PDD 是否在首页且 UI 没大改")
         await _sleep_jitter(0.8)
 
