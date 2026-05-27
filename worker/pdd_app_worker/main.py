@@ -178,6 +178,34 @@ class BurstScheduler:
             return False
         return True
 
+    def maybe_end_idle_burst(self, idle_timeout_s: float = 60.0) -> bool:
+        """如果当前 burst 开着但已经太久没新任务，强制结束 burst。
+
+        触发场景：scheduler 随机决定 burst_size=2，但 backend 只派了 1 个任务。
+        没有这个超时，burst_remaining 永远停在 1，PDD 永远不退后台 = 拟人化
+        破功。idle_timeout 默认 60s（远大于 intra-burst gap 上限 30s，
+        所以正常 burst 中不会误触发）。
+
+        :return: True = 强制结束了 burst（caller 应该把 PDD 退后台）；
+                 False = burst 还没开 / 还没到超时 / 时间够近。
+        """
+        if self._burst_remaining <= 0:
+            return False
+        if self._last_search_at <= 0.0:
+            return False
+        elapsed = time.monotonic() - self._last_search_at
+        if elapsed < idle_timeout_s:
+            return False
+        logger.info(
+            f"scheduler: burst idle for {elapsed:.1f}s "
+            f"(> {idle_timeout_s:.0f}s) — force-ending burst "
+            f"(was {self._burst_remaining} pending; daily total "
+            f"{self._searches_today}/{DAILY_SEARCH_QUOTA})"
+        )
+        self._burst_remaining = 0
+        self._last_burst_ended_at = time.monotonic()
+        return True
+
 
 _scheduler = BurstScheduler()
 
@@ -451,7 +479,16 @@ async def _poll_loop(client: "BackendClient") -> None:
             await asyncio.sleep(5)
             continue
         if task is None:
-            # 队列空，继续 poll（http_client 已带长轮询）
+            # 队列空，继续 poll（http_client 已带长轮询）。但先检查一下：
+            # 是不是上一波 burst 计划了 N 次搜索，实际只来了 K<N 次？这种情况下
+            # _last_search_at 之后一直没新任务，要强制结束 burst + 退 PDD 后台。
+            if _scheduler.maybe_end_idle_burst(idle_timeout_s=60.0):
+                try:
+                    from pdd_app_worker.device_manager import healthy_serials as _hs
+                    for s in _hs():
+                        await _press_home_on_device(s)
+                except Exception as exc:
+                    logger.warning(f"idle-burst home press failed: {exc}")
             continue
         try:
             result = await _process_task(task)
