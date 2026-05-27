@@ -283,11 +283,20 @@ class PddAppClient:
         return await asyncio.to_thread(_do_click)
 
     async def _post_task_cleanup(self) -> None:
-        """任务结束清场：返回前一两层，避免下次进来卡在结果页。
+        """任务结束清场：模拟真人"看完东西退几层 → 按 home 回桌面"的动作。
 
-        随机化：
-        - back 次数 1-3 次（随机），每次间隔抖动
-        - 10% 概率直接按 home 键回桌面（最自然的"用完手机"模式）
+        2026-05-27 morning test 踩坑：之前 90% 概率只做 1-3 次 back 就 return，
+        不按 home。但 BACK 键在 PDD 首页 tab 上只触发"再按一次返回退回桌面"
+        toast，**不会真退到桌面**。结果 cleanup 后 PDD 仍停在前台，配合
+        Honor X20 上 adb 的 KEYCODE_HOME / launcher-intent 都吃瘪（实测都
+        没把 PDD 真切到后台），PDD 永远留在屏幕上 = 拟人化破功。
+
+        修复：
+        - 仍做 0-3 次 back（保留"看完东西退一层"的拟人感）
+        - **结尾强制调 d.press("home")**，走 uiautomator2 atx-agent → InputManager
+          注入这条路径。跟 adb shell 是完全独立的代码路径，所以即便后者在
+          Honor 上失效，这条仍可能生效。
+        - 10% 概率跳过所有 back，直接 home（最自然的"用完了"模式）
         """
         if not self._d:
             return
@@ -299,6 +308,10 @@ class PddAppClient:
             for _ in range(backs):
                 await asyncio.to_thread(self._d.press, "back")
                 await _sleep_jitter(random.uniform(0.4, 0.9), jitter=0.3)
+            # 关键：无论 back 走到 PDD 哪一层（首页/分类/结果页），最后用
+            # d.press("home") 把 APP 切到后台。这条路径独立于 adb subprocess，
+            # 所以 Honor 上 adb 路径失败时这条仍是兜底。
+            await asyncio.to_thread(self._d.press, "home")
         except Exception as e:
             logger.debug(f"[{self.serial}] cleanup ignored: {e}")
 
