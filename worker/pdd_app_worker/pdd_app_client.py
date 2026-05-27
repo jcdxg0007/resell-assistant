@@ -739,17 +739,91 @@ class PddAppClient:
                 logger.debug(f"[{self.serial}] restore default IME failed: {exc}")
 
     async def _submit_search(self) -> None:
-        """提交搜索。优先点页面上的"搜索"按钮，回退到键盘 Enter。"""
-        candidates = [
-            '//android.widget.TextView[@text="搜索"]',
-            '//android.widget.Button[@text="搜索"]',
-        ]
-        for xpath in candidates:
+        """提交搜索。优先点页面上的"搜索"按钮，回退到键盘 Enter。
+
+        2026-05-27 同 _tap_search_entry 一样的踩坑：uiautomator2 的 xpath()
+        对 CJK text 匹配可能失败。改用 UiSelector + XML 兜底双策略。
+
+        如果两种策略都点不到"搜索"按钮，回退到 d.press("enter")。但要注意：
+        PDD 的搜索建议页可能把回车键当成"关键盘"而不是"提交搜索"，所以 enter
+        是最后兜底，不可靠。
+        """
+        def _do_sync() -> tuple[bool, str]:
+            d = self._d
+
+            # 策略 1：UiSelector（不经过 xpath 引擎）
+            for cls in ("android.widget.TextView", "android.widget.Button"):
+                try:
+                    sel = d(text="搜索", className=cls)
+                    if sel.exists:
+                        try:
+                            info = sel.info or {}
+                        except Exception:
+                            info = {}
+                        b = info.get("bounds") or {}
+                        if b:
+                            x, y = _jittered_point_in_bounds(b, jitter_px=10)
+                            d.click(x, y)
+                            return True, f"ui_selector[{cls}]@({x},{y})"
+                        sel.click()
+                        return True, f"ui_selector[{cls}]_default_click"
+                except Exception as exc:
+                    logger.debug(
+                        f"[{self.serial}] submit ui_selector[{cls}] failed: {exc}"
+                    )
+
+            # 策略 2：dump XML + 正则匹配 bounds
             try:
-                if await self._human_click(xpath, timeout=1.5, jitter_px=10):
-                    return
-            except Exception:
-                continue
+                xml = d.dump_hierarchy()
+                # 搜索建议页通常有一个 text="搜索" 且 clickable=true 的 button/textview。
+                # 因为 PDD 把"搜索"这个 text 复用在多个地方（包括搜索栏 placeholder），
+                # 这里**只匹配 clickable=true 的**，避免点回搜索栏本身。
+                pattern = re.compile(
+                    r'<node[^>]*?text="搜索"[^>]*?'
+                    r'clickable="true"[^>]*?'
+                    r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+                )
+                m = pattern.search(xml)
+                if not m:
+                    # 顺序可能反转
+                    pattern2 = re.compile(
+                        r'<node[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"[^>]*?'
+                        r'text="搜索"[^>]*?clickable="true"'
+                    )
+                    m = pattern2.search(xml)
+                if m:
+                    l, t, r, b2 = (int(g) for g in m.groups())
+                    bounds = {"left": l, "top": t, "right": r, "bottom": b2}
+                    x, y = _jittered_point_in_bounds(bounds, jitter_px=10)
+                    d.click(x, y)
+                    return True, f"xml_parse@({x},{y})_bounds=[{l},{t}][{r},{b2}]"
+            except Exception as exc:
+                logger.debug(f"[{self.serial}] submit xml_parse failed: {exc}")
+
+            return False, "all_strategies_failed"
+
+        clicked, how = await asyncio.to_thread(_do_sync)
+        if clicked:
+            logger.info(f"[{self.serial}] tapped submit via: {how}")
+            return
+
+        # 全部失败时 dump 当前 hierarchy 用于复盘
+        try:
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dump_path = f"submit_search_failed_{stamp}.xml"
+            xml = await asyncio.to_thread(lambda: self._d.dump_hierarchy())
+            with open(dump_path, "w", encoding="utf-8") as f:
+                f.write(xml)
+            logger.warning(
+                f"[{self.serial}] _submit_search FAILED — falling back to press(enter)  "
+                f"dump_saved={dump_path}"
+            )
+        except Exception as dump_exc:
+            logger.warning(
+                f"[{self.serial}] _submit_search FAILED + dump failed: {dump_exc}"
+            )
+        # 最后兜底：硬按 enter（可能被 PDD 当关键盘而非提交，不保证生效）
         await asyncio.to_thread(self._d.press, "enter")
 
     async def _detect_risk_walls(self) -> str | None:
