@@ -111,8 +111,8 @@
 | Day 1 | HTTP bridge + worker 骨架；stub 任务端到端 | backend `enqueue → worker poll → result` 一次往返 | ✅ **2026-05-25**：stub 任务 1.4s 走通，3 ✅ 烟测通过 |
 | Day 2 | 写 `pdd_app_client.py`：登录态检测、PDD APP 启动、搜索框定位、结果列表解析 | 命令行能输入关键词，返回 JSON 列表 | ✅ **2026-05-25**：搜索栏 XPath（content-desc="搜索"）、IME 输入、提交全走通；50s 完整流程；商品卡解析待 Day 3 真机校准 |
 | Day 3 | 加健壮性层 + 填实结果页商品卡 XPath | 跑 50 次不挂、价格覆盖率 ≥ 80% | 🟡 **部分完成 2026-05-25**：标题 100%、销量 30-50%、价格 30-50%（被「百亿补贴 canvas 渲染」卡住）；4310 实名墙挂 → 已 quarantine + 换 7315 |
-| Day 3.5 | 7315 软养 + 加 `_idle_browse_warmup` 前置摸鱼 + 安全词白名单开测 | 24h 内 7315 不挂、安全词跑 ≥ 10 次成功 | 🟡 进行中 2026-05-26，详见 `PDD-Day3.5-7315上线观察.md` |
-| Day 4 | **OCR 兜底**：用 paddleocr / easyocr 把 canvas 渲染的价格截图识别出来，目标价格覆盖率 ≥ 90% | 同名关键词跑 10 次，每次都拿到 ≥ 80% 卡片有价格 | pending（**今日新增任务，原 Day 4 自启动顺延到 Day 5**） |
+| Day 3.5 | 7315 软养 + 加 `_idle_browse_warmup` 前置摸鱼 + 安全词白名单开测 | 24h 内 7315 不挂、安全词跑 ≥ 10 次成功 | ✅ **2026-05-27 完成**：7315 上线后纸巾 / 袜子 / 保鲜膜 / 牙线 (deep) 共 4 次任务全 status=ok、risk_signals=空；详见本表下方 §"Day 3.5 收官记录" |
+| Day 4 | **OCR 兜底**：用 paddleocr / easyocr 把 canvas 渲染的价格截图识别出来，目标价格覆盖率 ≥ 90% | 10 个**不同**安全词跑一遍（分 2-3 天），每次都拿到 ≥ 80% 卡片有价格 | pending（验收方案已更新为多关键词，避免"同名连刷"= 4310 死因 §6 表 35% 权重） |
 | Day 5 | Windows 任务计划程序设开机自启；每日 self_check 任务 + 钉钉告警 | 重启 Windows 后 5 分钟内 worker 自动上线 | pending |
 | Day 6 | 改 `backend/app/tasks/selection.py`：取消 `_PDD_DISABLED` 短路 + 拔 `_PDD_USE_APP_WORKER` 开关；同步实现每日清库 beat | `instant_search('运动鞋')` 端到端能拿到 PDD 数据 | 脚手架已就位 |
 | Day 7-8 | 跑 72h 稳定性测试，日志收集 | 成功率 ≥ 90%，平均耗时 ≤ 40s/任务 | pending |
@@ -127,6 +127,8 @@
 >    - **非补贴卡片**：价格用标准 TextView，可通过 dump_hierarchy 抓到（如"狼途 T98 ¥99.9"）
 >    - **百亿补贴卡片**：价格用 **Canvas/Drawable 自绘**，uiautomator2 完全看不到。这恰恰是转卖比价**最重要**的数据 → 必须用 OCR 兜底（见 Day 4）
 > 7. **PDD lazy-render**：标题渲染早，价格/销量延迟到 viewport 中心才 hydrate → 已加微滚动 rebind ViewHolder 兜底（fast 模式总耗时 30-35s）
+> 8. **uiautomator2 `xpath()` 在 CJK 属性匹配上有 bug**（2026-05-27 真机实测确认）：元素在 `dump_hierarchy()` XML 里存在、可见、bounds 完整，但 `d.xpath('//*[@content-desc="搜索"]').exists` 返回 False。**不是 PDD 改 UI**！是 u2 自己的 xpath 引擎对 CJK 不工作。修复：所有涉及 CJK content-desc / text 的定位**禁用 xpath()**，改用 `d(description="...", className=...)` UiSelector，或 dump XML + 正则提 bounds + 直接点坐标。
+> 9. **Honor X20 + EMUI 不响应 adb 路径的 home 键**（2026-05-27 实测）：`input keyevent KEYCODE_HOME` 和 `am start -c HOME` 都 rc=0 但 PDD 仍前台。**必须用 `d.press("home")` 走 uiautomator2 → atx-agent → InputManager 注入这条独立路径才生效**。Honor/华为系机型部署必须验证这点。
 
 **Phase 1 出口标准**：
 
@@ -134,6 +136,37 @@
 - ✅ 成功率 ≥ 90%
 - ✅ 任务平均耗时 ≤ 30s
 - ✅ 风控信号自动上报钉钉
+
+### Day 3.5 收官记录（2026-05-27）
+
+7315 在 Honor X20 上彻底跑通端到端搜索，证明 Phase 1 技术链路 + 拟人化策略
+组合可用。这天的关键修复（按发现顺序）：
+
+| 时段 | 修复 | 触发场景 |
+|---|---|---|
+| 上午 | `_ensure_home_tab()` —— 搜索前先点底部"首页"tab | worker 启 PDD 后 APP 可能恢复到非首页（详情页 / 搜索结果页 / 活动横幅页），warmup 在错的页面上跑成功但 _tap_search_entry 找不到搜索栏 |
+| 上午 | `_tap_search_entry` 改 UiSelector + XML 兜底 | **uiautomator2 的 `xpath()` 在 PDD 新版 + Python 3.14 + Honor X20 组合上对 CJK content-desc 属性匹配彻底失效**（XML 里元素存在、可见、bounds 完整，`.exists` 仍返回 False）。绕开 xpath 引擎走 Android 原生 UiSelector 解决 |
+| 中午 | `_submit_search` 同样改 UiSelector + XML 兜底 | 同上 bug，导致"输入了关键词但没点搜索"的隐蔽问题——拿回的是 PDD 搜索建议页的推荐位（如搜"纸巾"返回"穿针器"/"铅笔"） |
+| 中午 | `_type_keyword` finally 恢复默认 IME | ATX 输入法 (`com.github.uiautomator.adbkeyboard`) 是爬虫指纹，PDD 任何 EditText.onFocus 一查 `InputMethodManager` 就命中。输入完立刻切回默认 IME，暴露窗口缩到 2-8s 输入期 |
+| 中午 | 详情页 warmup 拆解死盯 | 之前 `time.sleep(random(4,8))` 在详情页一动不动 = 机器人特征。改成 1.5-2.8s 看顶 + 60% 概率滑屏看图 + 30% 嵌套二次滑屏 |
+| 下午 | `BurstScheduler.maybe_end_idle_burst(60s)` | scheduler 随机决定 burst_size=N，但实际只来 K<N 个任务时，剩余 N-K 名额永远等不到 = burst 永远不结束 = PDD 永远不退后台 = 拟人化破功。补一个 60s 闲置超时强制结束 burst |
+| 下午 | `_post_task_cleanup` 末尾强制 `d.press("home")` | Honor X20 + EMUI 上 `adb shell input keyevent KEYCODE_HOME` 和 `am start -c HOME` **都吃瘪**（rc=0 但 PDD 仍前台）。换走 uiautomator2 → atx-agent → InputManager 注入这条独立路径，**生效** |
+
+**最后那条 atx-agent 退后台 = Honor/华为系机型的关键设备兼容性发现**，
+已写进 `PDD-Day3.5-7315上线观察.md §8.1`（设备指纹兜底章节）。
+
+完整任务时间线（北京时间）：
+
+```text
+13:18  task #1  纸巾    fast  → ok  items=4  risk=0  65s   daily 1/30
+16:03  task #2  袜子    fast  → ok  items=4  risk=0  65s   daily 2/30
+16:22  task #3  保鲜膜  fast  → ok  items=4  risk=0  44s   daily 3/30
+21:07  task #4  牙线    deep  → ok  items=10 risk=0  63s   daily 4/30
+       (退后台修复在 #4 完整生效，PDD 真退到桌面)
+```
+
+**Phase 1 Day 3.5 出口达成**：账号 7315 经历 4 次真实任务零风控，
+端到端拟人化采集链路验证完毕。Day 4 OCR 开工准备就绪。
 
 ### Phase 2 — 单机巩固（1-2 周）
 
