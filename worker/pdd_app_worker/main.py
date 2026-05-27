@@ -183,20 +183,44 @@ _scheduler = BurstScheduler()
 
 
 async def _press_home_on_device(serial: str) -> None:
-    """通过 adb 把当前 APP 切到后台（KEYCODE_HOME）。
+    """通过 adb 把当前 APP 切到后台。双策略：
 
-    Burst 结束时调用——真人搜完一波东西不会一直停在 PDD 首页，会回桌面/
-    切别的 APP。让 PDD 退后台几分钟，PDD 自己也会清掉一些短期会话状态，
-    对反爬刻画"高频前台用户"的画像有降权效果。
+    1. ``input keyevent KEYCODE_HOME``（最像真人按物理 home 键，但部分 Honor /
+       华为 EMUI 机型对 PDD 这种全屏沉浸式 APP 响应不稳定）
+    2. ``am start -a MAIN -c HOME``（显式启动 launcher 的 Intent，绝对兜底）
+
+    2026-05-27 morning test 实测：Honor X20 + PDD 跑完任务后只发 KEYCODE_HOME
+    日志显示成功，但 PDD 仍停在前台。补一次 am start launcher 才真正回到桌面。
+
+    Burst 结束时调用——真人搜完一波不会一直停在 PDD 首页，会回桌面/切别的 APP。
+    让 PDD 退后台几分钟，对反爬刻画"高频前台用户"的画像有降权效果。
     """
-    try:
+    async def _run_adb(*args: str, timeout: float = 5.0) -> tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
-            "adb", "-s", serial, "shell", "input", "keyevent", "KEYCODE_HOME",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            "adb", "-s", serial, "shell", *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
-        logger.info(f"[{serial}] PDD pushed to background (KEYCODE_HOME)")
+        _out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        rc = proc.returncode if proc.returncode is not None else -1
+        return rc, err.decode(errors="ignore")[:200]
+
+    try:
+        rc1, err1 = await _run_adb("input", "keyevent", "KEYCODE_HOME")
+        if rc1 != 0:
+            logger.warning(f"[{serial}] KEYCODE_HOME rc={rc1} err={err1!r}")
+        # 兜底：再发一次 launcher Intent，无论 keyevent 成功与否
+        rc2, err2 = await _run_adb(
+            "am", "start",
+            "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.HOME",
+        )
+        if rc2 != 0:
+            logger.warning(f"[{serial}] am start launcher rc={rc2} err={err2!r}")
+        logger.info(
+            f"[{serial}] PDD pushed to background "
+            f"(KEYCODE_HOME rc={rc1}, launcher_intent rc={rc2})"
+        )
     except Exception as exc:
         logger.warning(f"[{serial}] press_home failed: {exc}")
 
