@@ -205,6 +205,49 @@
 `intra_burst={yes,no}` 标记，方便复盘。Scheduler 默认配置同步从
 `burst=[1,4]` 改成 `[3,5]`，匹配"一阵搜 3-5 个词再歇 5-30 分钟"的设定。
 
+### Day 4 紧急任务旁路（2026-05-28 上午）
+
+工作流：日常按词库节奏跑 20-30 个关键词分散到多个 burst；偶尔需要**临
+时插一个紧急词**（客户问价、决策窗口紧）。直接派任务会落进 backend FIFO
+队列尾部 + worker 端 5-30 min 静默期，最坏要等 ~30 min 才轮到——不够用。
+
+**两层旁路设计**：
+
+| 层 | 普通任务（priority<8） | 紧急任务（priority≥8） |
+|---|---|---|
+| backend `enqueue_task` | RPUSH 进队尾 | LPUSH 进**队首**，让 worker 下次 poll 立刻拿到 |
+| worker `BurstScheduler` | 走 5-30 min inter-burst quiet | **跳 quiet**，立刻开新 burst |
+| daily quota（30 次/天） | 守 | 守（紧急也不能突破，账号底线） |
+| intra-burst gap（5-30s） | 守 | 守（连续 0 间隔太异常） |
+
+**触发方式**：
+
+```bash
+# 单个紧急词
+python -m scripts.pdd_fire_one_task "保温杯" --emergency
+# 等价于 --priority 9
+
+# 紧急批（建议 ≤ 3 个词）
+python -m scripts.pdd_fire_keyword_batch 保温杯 牙线 洗手液 --emergency
+```
+
+**worker 日志可识别旁路**：
+
+```text
+received task xxx ... priority=9 [EMERGENCY] payload={'keyword': '保温杯', ...}
+scheduler: EMERGENCY priority=9 ≥ 8 — BYPASS inter-burst quiet
+  (elapsed since last burst 4.2 min, opening new burst now)
+scheduler: new burst started — 3 searches planned (daily so far 5/30) [EMERGENCY]
+```
+
+**使用纪律**：
+
+- 阈值 = 8 → 普通 fire 默认 priority=1，不会误触
+- 单日紧急任务建议自控 ≤ 3 次，连续跳 quiet 会让"用户用 PDD 的间隔"统
+  计画像看起来比真人激进
+- 紧急 burst 结束后，下一个普通 burst 仍要等 5-30 min（_last_burst_ended_at
+  在紧急 burst 收尾时重设，时间从那时算起）
+
 ### Phase 2 — 单机巩固（1-2 周）
 
 **目标**：在 1 台手机上把所有边界情况吃透，把"试错成本"消化在加机器之前。

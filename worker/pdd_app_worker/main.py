@@ -55,6 +55,10 @@ INTRA_BURST_GAP_SECONDS_MAX = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MAX"
 INTER_BURST_GAP_MINUTES_MIN = float(os.environ.get("INTER_BURST_GAP_MINUTES_MIN", "5"))
 INTER_BURST_GAP_MINUTES_MAX = float(os.environ.get("INTER_BURST_GAP_MINUTES_MAX", "30"))
 DAILY_SEARCH_QUOTA = int(os.environ.get("DAILY_SEARCH_QUOTA", "30"))
+# priority >= 这个阈值的任务跳 inter-burst quiet（5-30 min 静默期）。
+# 与 backend pdd_app_queue.EMERGENCY_PRIORITY_THRESHOLD 保持一致（默认 8）。
+# 普通任务 fire 默认 priority=1，远低于阈值，不会误触旁路。
+EMERGENCY_PRIORITY_THRESHOLD = int(os.environ.get("EMERGENCY_PRIORITY_THRESHOLD", "8"))
 
 _shutdown = asyncio.Event()
 
@@ -118,12 +122,20 @@ class BurstScheduler:
             f"burst_remaining={self._burst_remaining}"
         )
 
-    async def enforce_pre_search(self) -> None:
+    async def enforce_pre_search(self, priority: int = 1) -> None:
         """阻塞调用：等到下一次搜索可以执行。
 
-        - 如果今天 quota 用完 → raise QuotaExhausted
-        - 如果当前 burst 还没用完 → sleep intra-burst gap (5-30s)
-        - 如果上一个 burst 已结束 → sleep inter-burst gap (5-30min) 后开新 burst
+        - 如果今天 quota 用完 → raise QuotaExhausted（紧急任务也不能突破，
+          quota 是硬保护账号的底线）
+        - 如果 priority >= EMERGENCY_PRIORITY_THRESHOLD（默认 8）且当前在
+          inter-burst quiet 状态 → **跳过 quiet sleep，立即开新 burst**
+          （日志会打 EMERGENCY-bypass 标记）
+        - 否则按拟人化节奏走：burst 内 sleep intra-burst gap (5-30s)；
+          burst 已结束 sleep inter-burst gap (5-30min) 后开新 burst
+
+        ``priority`` 来自 PddAppTask.priority。普通任务默认 1，紧急任务由
+        fire 脚本显式传 ≥ 8。backend enqueue 会把高优先级 LPUSH 到队首，
+        所以 worker 拿到时这个旁路才有意义（否则被前面 FIFO 任务卡住）。
         """
         self._maybe_reset_for_new_day()
 
@@ -133,9 +145,11 @@ class BurstScheduler:
                 f"(resets at UTC midnight)"
             )
 
+        is_emergency = priority >= EMERGENCY_PRIORITY_THRESHOLD
+
         if self._burst_remaining <= 0:
-            # 开新 burst 前要先等长 quiet 期
-            if self._last_burst_ended_at > 0:
+            # 开新 burst 前要先等长 quiet 期（紧急任务跳过）
+            if self._last_burst_ended_at > 0 and not is_emergency:
                 target_s = random.uniform(
                     INTER_BURST_GAP_MINUTES_MIN * 60.0,
                     INTER_BURST_GAP_MINUTES_MAX * 60.0,
@@ -150,6 +164,18 @@ class BurstScheduler:
                         f"elapsed since last burst {elapsed / 60:.1f} min)"
                     )
                     await asyncio.sleep(sleep_s)
+            elif self._last_burst_ended_at > 0 and is_emergency:
+                # 紧急旁路：把 quiet 跳掉。reset _last_burst_ended_at 让后续
+                # 普通任务的 quiet 计时从本紧急 burst 结束时算起，避免连续
+                # 旁路把 quiet 完全废掉。
+                elapsed = time.monotonic() - self._last_burst_ended_at
+                logger.warning(
+                    f"scheduler: EMERGENCY priority={priority} "
+                    f"≥ {EMERGENCY_PRIORITY_THRESHOLD} — BYPASS inter-burst quiet "
+                    f"(elapsed since last burst {elapsed / 60:.1f} min, "
+                    f"opening new burst now)"
+                )
+                self._last_burst_ended_at = 0.0  # 清掉旧标记，新 burst 结束时会重设
             # 启动新 burst（剩余配额够时才打满，否则取剩余）
             remaining_quota = DAILY_SEARCH_QUOTA - self._searches_today
             desired = random.randint(BURST_SIZE_MIN, BURST_SIZE_MAX)
@@ -159,9 +185,10 @@ class BurstScheduler:
                 f"scheduler: new burst started — "
                 f"{self._burst_remaining} searches planned "
                 f"(daily so far {self._searches_today}/{DAILY_SEARCH_QUOTA})"
+                f"{' [EMERGENCY]' if is_emergency else ''}"
             )
         else:
-            # burst 内：随机短间隔
+            # burst 内：随机短间隔（紧急任务也守这个 5-30s，避免连续 0 间隔异常）
             target_s = random.uniform(
                 INTRA_BURST_GAP_SECONDS_MIN, INTRA_BURST_GAP_SECONDS_MAX
             )
@@ -171,6 +198,7 @@ class BurstScheduler:
                 logger.info(
                     f"scheduler: intra-burst gap — sleeping {sleep_s:.1f}s "
                     f"({self._burst_remaining} left in this burst)"
+                    f"{' [emergency in-burst]' if is_emergency else ''}"
                 )
                 await asyncio.sleep(sleep_s)
 
@@ -329,11 +357,16 @@ async def _process_task(task: dict[str, Any]) -> dict[str, Any]:
     task_id = task["task_id"]
     kind = task["kind"]
     payload = task.get("payload") or {}
-    logger.info(f"received task {task_id} kind={kind} payload={payload}")
+    priority = int(task.get("priority", 1))
+    is_emergency = priority >= EMERGENCY_PRIORITY_THRESHOLD
+    logger.info(
+        f"received task {task_id} kind={kind} priority={priority}"
+        f"{' [EMERGENCY]' if is_emergency else ''} payload={payload}"
+    )
 
     try:
         if kind == "search":
-            return await _handle_search(task_id, payload, started)
+            return await _handle_search(task_id, payload, started, priority=priority)
         if kind == "self_check":
             return await _handle_self_check(task_id, payload, started)
         # detail / history_price 等 Day 3+ 才实现
@@ -365,7 +398,12 @@ async def _process_task(task: dict[str, Any]) -> dict[str, Any]:
         }
 
 
-async def _handle_search(task_id: str, payload: dict[str, Any], started_at: float) -> dict[str, Any]:
+async def _handle_search(
+    task_id: str,
+    payload: dict[str, Any],
+    started_at: float,
+    priority: int = 1,
+) -> dict[str, Any]:
     """kind=search：连第一台健康设备，跑 PddAppClient.search。
 
     阵发式调度：进入实际工作前调 _scheduler.enforce_pre_search()，可能
@@ -394,7 +432,7 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
         }
 
     try:
-        await _scheduler.enforce_pre_search()
+        await _scheduler.enforce_pre_search(priority=priority)
     except QuotaExhausted as exc:
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         logger.warning(f"task {task_id} denied: {exc}")

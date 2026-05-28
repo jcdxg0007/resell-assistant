@@ -60,13 +60,33 @@ class PddAppResult(BaseModel):
     raw_screenshot_path: str | None = None  # worker 端本地截图路径，用于人工核查
 
 
+# 紧急任务阈值：priority >= 这个值的任务会用 LPUSH 插到队首，并由 worker
+# 端 scheduler 跳过 inter-burst quiet（5-30 min 静默期）。普通任务默认
+# priority=1，紧急时显式传 ≥ 8。
+EMERGENCY_PRIORITY_THRESHOLD = 8
+
+
 async def enqueue_task(task: PddAppTask) -> None:
-    """把任务推进 Redis 队列。worker 会 BLPOP 拉走。"""
+    """把任务推进 Redis 队列。worker 会 BLPOP 拉走。
+
+    队列实现：
+    - 普通任务（priority < EMERGENCY_PRIORITY_THRESHOLD）→ RPUSH 进队尾，FIFO
+    - 紧急任务（priority ≥ EMERGENCY_PRIORITY_THRESHOLD）→ LPUSH 进队首，
+      让 worker 下次 BLPOP 立刻拿到，跳过前面排队的普通任务
+
+    注意：worker 端 scheduler 还会读 task.priority 决定是否跳 inter-burst
+    quiet（拟人化节流）。两层配合才能真正实现"插队 + 立即开干"。
+    """
     payload = task.model_dump_json()
-    await redis_client.rpush(TASK_QUEUE_KEY, payload)
+    is_emergency = task.priority >= EMERGENCY_PRIORITY_THRESHOLD
+    if is_emergency:
+        await redis_client.lpush(TASK_QUEUE_KEY, payload)
+    else:
+        await redis_client.rpush(TASK_QUEUE_KEY, payload)
     logger.info(
         f"pdd_app_queue: enqueued task_id={task.task_id} "
-        f"kind={task.kind} account={task.account_id}"
+        f"kind={task.kind} account={task.account_id} "
+        f"priority={task.priority}{' [EMERGENCY/jump-queue]' if is_emergency else ''}"
     )
 
 

@@ -122,9 +122,17 @@ async def main() -> int:
     )
     parser.add_argument(
         "--priority", type=int, default=1,
-        help="任务优先级（数字越大越优先，默认 1）"
+        help="任务优先级（数字越大越优先，默认 1）。≥ 8 = 紧急任务："
+             "LPUSH 插到队首 + worker 跳 inter-burst quiet（5-30 min 静默期），"
+             "立即开新 burst 处理。普通任务用默认 1 即可。"
+    )
+    parser.add_argument(
+        "--emergency", action="store_true",
+        help="等价于 --priority 9。紧急插队、跳 quiet。"
     )
     args = parser.parse_args()
+    if args.emergency and args.priority < 8:
+        args.priority = 9
 
     print("\n=== PDD APP worker 单任务派发 ===\n")
 
@@ -147,9 +155,11 @@ async def main() -> int:
         priority=args.priority,
         timeout_s=args.timeout,
     )
+    emergency_tag = " [EMERGENCY/jump-queue]" if args.priority >= 8 else ""
     print(f"→ enqueue task_id={task.task_id[:8]}  keyword='{args.keyword}'  "
           f"mode={args.mode}  target_count={args.target_count}  "
-          f"scroll_screens={args.scroll_screens}")
+          f"scroll_screens={args.scroll_screens}  "
+          f"priority={args.priority}{emergency_tag}")
     await enqueue_task(task)
 
     print(f"  等 worker 处理...（最多 {args.timeout}s；worker 静默期会自动让任务排队）")

@@ -85,16 +85,15 @@ def _fmt_price_source_stats(items: list[dict]) -> str:
     return "      " + " · ".join(parts)
 
 
-async def _fire_one_and_wait(
+async def _build_task(
     keyword: str,
     mode: str,
     scroll_screens: int,
     target_count: int,
     timeout_s: int,
     priority: int,
-) -> tuple[str, object]:
-    """enqueue + await 单个任务，返回 (keyword, PddAppResult | None)。"""
-    task = PddAppTask(
+) -> PddAppTask:
+    return PddAppTask(
         kind="search",
         payload={
             "keyword": keyword,
@@ -105,8 +104,10 @@ async def _fire_one_and_wait(
         priority=priority,
         timeout_s=timeout_s,
     )
-    await enqueue_task(task)
-    print(f"  → enqueued '{keyword}'  task_id={task.task_id[:8]}  priority={priority}")
+
+
+async def _await_task(task: PddAppTask, keyword: str, timeout_s: int) -> tuple[str, object]:
+    """await 已 enqueue 任务的结果。"""
     result = await await_result(task.task_id, timeout_s=timeout_s)
     return keyword, result
 
@@ -121,15 +122,25 @@ async def main() -> int:
         "--per-task-timeout", type=int, default=300,
         help="单个任务超时秒数（默认 300=5min；任务在 burst 内 intra-gap 5-30s + 实际 30-60s 完成）"
     )
+    parser.add_argument(
+        "--emergency", action="store_true",
+        help="紧急批次：所有任务用 priority=9 → LPUSH 插队首 + worker 跳 inter-burst quiet。"
+             "建议只在等不及 5-30 min 静默期时用，且单次紧急批不超过 3 个关键词（拟人化考虑）。"
+    )
     args = parser.parse_args()
 
     n = len(args.keywords)
+    is_emergency = args.emergency
+    priority = 9 if is_emergency else 1
+
     if n > 5:
         print(f"⚠ 一波派超过 5 个 = 超过 burst_size 上限，多出的会被甩到下一个 burst")
         print(f"  （worker BURST_SIZE_MAX 默认 5，跨 burst 之间会有 5-30 min 静默）")
         print()
+    if is_emergency and n > 3:
+        print(f"⚠ 紧急批 {n} 个关键词偏多，建议 ≤ 3。多了仍按 burst_size 上限切分。\n")
 
-    print(f"\n=== PDD APP 批量派任务 ===\n")
+    print(f"\n=== PDD APP 批量派任务{' [EMERGENCY]' if is_emergency else ''} ===\n")
 
     status = await get_worker_status()
     if not status.get("online"):
@@ -138,32 +149,39 @@ async def main() -> int:
     devs = status.get("devices", [])
     print(f"✅ worker 在线  devices={devs}  last_ts={status.get('ts')}\n")
     print(f"准备派 {n} 个任务（mode={args.mode}, scroll_screens={args.scroll_screens}, "
-          f"target_count={args.target_count}）：")
+          f"target_count={args.target_count}, priority={priority}"
+          f"{'[EMERGENCY/jump-queue + skip-quiet]' if is_emergency else ''}）：")
     for kw in args.keywords:
         print(f"  · {kw}")
     print()
 
-    # ─ 步骤 1: 一次性把所有任务 enqueue 进队列（不 await），让 worker 看到
-    #          队列里有多个任务，burst 起来后会连着做
+    # ─ 步骤 1: enqueue。普通：按命令行顺序 RPUSH（FIFO，第一个先做）。
+    #   紧急：反向 LPUSH，让命令行第一个词留在队首（因为后 LPUSH 的会
+    #   被压到更前面）。enqueue 顺序串行化（不要 asyncio.gather），防止
+    #   asyncio 调度乱序破坏队列里的关键词顺序。
     print("── enqueue all ──")
-    fire_tasks = [
-        asyncio.create_task(
-            _fire_one_and_wait(
-                kw,
-                args.mode,
-                args.scroll_screens,
-                args.target_count,
-                args.per_task_timeout,
-                # 后入队的 priority 略低，保证按命令行顺序执行
-                priority=10 - i,
-            )
+    built_tasks: list[tuple[str, PddAppTask]] = []
+    for kw in args.keywords:
+        t = await _build_task(
+            kw, args.mode, args.scroll_screens, args.target_count,
+            args.per_task_timeout, priority,
         )
-        for i, kw in enumerate(args.keywords)
-    ]
+        built_tasks.append((kw, t))
 
-    # ─ 步骤 2: 等所有结果回来
+    enqueue_order = list(reversed(built_tasks)) if is_emergency else built_tasks
+    for kw, task in enqueue_order:
+        await enqueue_task(task)
+        tag = " [EMERGENCY]" if is_emergency else ""
+        print(f"  → enqueued '{kw}'  task_id={task.task_id[:8]}  priority={priority}{tag}")
+
+    # ─ 步骤 2: 并发等所有结果回来
+    print()
     started = time.monotonic()
-    results = await asyncio.gather(*fire_tasks, return_exceptions=True)
+    await_tasks = [
+        asyncio.create_task(_await_task(task, kw, args.per_task_timeout))
+        for kw, task in built_tasks
+    ]
+    results = await asyncio.gather(*await_tasks, return_exceptions=True)
     total_elapsed = time.monotonic() - started
 
     print(f"\n── 全部完成（总耗时 {total_elapsed:.1f}s）──\n")
