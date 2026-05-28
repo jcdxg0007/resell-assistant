@@ -48,8 +48,8 @@ BOUND_PDD_ACCOUNT = os.environ.get("BOUND_PDD_ACCOUNT", "unknown")
 #
 # 调度模型：BURST_SIZE 次搜索（intra_burst gap 短）+ INTER_BURST 静默期长。
 # 每天总搜索数硬上限 DAILY_SEARCH_QUOTA。
-BURST_SIZE_MIN = int(os.environ.get("BURST_SIZE_MIN", "1"))
-BURST_SIZE_MAX = int(os.environ.get("BURST_SIZE_MAX", "4"))
+BURST_SIZE_MIN = int(os.environ.get("BURST_SIZE_MIN", "3"))
+BURST_SIZE_MAX = int(os.environ.get("BURST_SIZE_MAX", "5"))
 INTRA_BURST_GAP_SECONDS_MIN = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MIN", "5"))
 INTRA_BURST_GAP_SECONDS_MAX = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MAX", "30"))
 INTER_BURST_GAP_MINUTES_MIN = float(os.environ.get("INTER_BURST_GAP_MINUTES_MIN", "5"))

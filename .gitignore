@@ -41,3 +41,8 @@ backend/logs/
 # Token / 临时凭据文件（防误提交）
 _new_token.txt
 temp_git_edit*
+
+# 本地备份（scripts/backup_now.sh 输出，绝不进 git）
+backups/
+*.tar.gz
+*.sql.gz
