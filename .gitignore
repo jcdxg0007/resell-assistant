@@ -44,5 +44,6 @@ temp_git_edit*
 
 # 本地备份（scripts/backup_now.sh 输出，绝不进 git）
 backups/
+data_samples/
 *.tar.gz
 *.sql.gz
