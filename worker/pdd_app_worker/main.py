@@ -59,6 +59,11 @@ DAILY_SEARCH_QUOTA = int(os.environ.get("DAILY_SEARCH_QUOTA", "30"))
 # 与 backend pdd_app_queue.EMERGENCY_PRIORITY_THRESHOLD 保持一致（默认 8）。
 # 普通任务 fire 默认 priority=1，远低于阈值，不会误触旁路。
 EMERGENCY_PRIORITY_THRESHOLD = int(os.environ.get("EMERGENCY_PRIORITY_THRESHOLD", "8"))
+# burst 内最后一次搜索后，等多久没新任务就强制关 burst（按 home 退后台）。
+# 每个 burst 开启时随机抽一个值（不是固定 60s），避免"搜完正好 60s 退桌面"
+# 的统计指纹。真人"看完结果到放下手机"的时间从 30s 到几分钟不等。
+BURST_IDLE_TIMEOUT_SECONDS_MIN = float(os.environ.get("BURST_IDLE_TIMEOUT_SECONDS_MIN", "45"))
+BURST_IDLE_TIMEOUT_SECONDS_MAX = float(os.environ.get("BURST_IDLE_TIMEOUT_SECONDS_MAX", "180"))
 
 _shutdown = asyncio.Event()
 
@@ -91,6 +96,9 @@ class BurstScheduler:
         # 0 = 这是 burst 的第 1 个任务（需要"开 APP → 浏览 → 搜"全流程）
         # >0 = burst 内后续任务（PDD 仍前台，跳冷启动 + 跳 warmup）
         self._tasks_done_in_current_burst = 0
+        # 本 burst 的 idle 关闭阈值（每次开 burst 随机抽 45-180s，避免固定 60s
+        # 的统计指纹）。0 = 还没开 burst / 已经关闭。
+        self._current_burst_idle_timeout: float = 0.0
 
     @staticmethod
     def _today_key() -> str:
@@ -107,6 +115,7 @@ class BurstScheduler:
             self._searches_today = 0
             self._burst_remaining = 0
             self._tasks_done_in_current_burst = 0
+            self._current_burst_idle_timeout = 0.0
             self._last_burst_ended_at = 0.0
 
     @property
@@ -181,9 +190,15 @@ class BurstScheduler:
             desired = random.randint(BURST_SIZE_MIN, BURST_SIZE_MAX)
             self._burst_remaining = min(desired, remaining_quota)
             self._tasks_done_in_current_burst = 0
+            # 抽本 burst 的 idle 关闭阈值（45-180s 随机）。每个 burst 不同，
+            # 避免"最后一搜后 60s 退桌面"的固定指纹。
+            self._current_burst_idle_timeout = random.uniform(
+                BURST_IDLE_TIMEOUT_SECONDS_MIN, BURST_IDLE_TIMEOUT_SECONDS_MAX
+            )
             logger.info(
                 f"scheduler: new burst started — "
-                f"{self._burst_remaining} searches planned "
+                f"{self._burst_remaining} searches planned, "
+                f"idle_timeout={self._current_burst_idle_timeout:.0f}s "
                 f"(daily so far {self._searches_today}/{DAILY_SEARCH_QUOTA})"
                 f"{' [EMERGENCY]' if is_emergency else ''}"
             )
@@ -215,6 +230,7 @@ class BurstScheduler:
         if self._burst_remaining <= 0:
             self._last_burst_ended_at = time.monotonic()
             self._tasks_done_in_current_burst = 0
+            self._current_burst_idle_timeout = 0.0
             logger.info(
                 f"scheduler: burst ended — daily total "
                 f"{self._searches_today}/{DAILY_SEARCH_QUOTA}"
@@ -222,13 +238,18 @@ class BurstScheduler:
             return False
         return True
 
-    def maybe_end_idle_burst(self, idle_timeout_s: float = 60.0) -> bool:
+    def maybe_end_idle_burst(self, idle_timeout_s: float | None = None) -> bool:
         """如果当前 burst 开着但已经太久没新任务，强制结束 burst。
 
         触发场景：scheduler 随机决定 burst_size=4，但 backend 只派了 2 个任务。
         没有这个超时，burst_remaining 永远停在 2，PDD 永远不退后台 = 拟人化
-        破功。idle_timeout 默认 60s（远大于 intra-burst gap 上限 30s，
-        所以正常 burst 中不会误触发）。
+        破功。
+
+        idle_timeout_s 的取值：
+        - 默认 None：使用本 burst 开启时抽签的 self._current_burst_idle_timeout
+          （45-180s 随机，每个 burst 不同）。**这是拟人化用法**，避免
+          "搜完正好 60s 退桌面"成为统计指纹。
+        - 传入数字：用 caller 给的值覆盖（兼容旧调用 / 测试场景）。
 
         :return: True = 强制结束了 burst（caller 应该把 PDD 退后台）；
                  False = burst 还没开 / 还没到超时 / 时间够近。
@@ -237,17 +258,22 @@ class BurstScheduler:
             return False
         if self._last_search_at <= 0.0:
             return False
+        threshold = idle_timeout_s if idle_timeout_s is not None else self._current_burst_idle_timeout
+        if threshold <= 0:
+            # 防御：burst 已经被 mark_search_done 关掉，timeout 被清成 0
+            return False
         elapsed = time.monotonic() - self._last_search_at
-        if elapsed < idle_timeout_s:
+        if elapsed < threshold:
             return False
         logger.info(
             f"scheduler: burst idle for {elapsed:.1f}s "
-            f"(> {idle_timeout_s:.0f}s) — force-ending burst "
+            f"(> {threshold:.0f}s sampled this burst) — force-ending burst "
             f"(was {self._burst_remaining} pending; daily total "
             f"{self._searches_today}/{DAILY_SEARCH_QUOTA})"
         )
         self._burst_remaining = 0
         self._tasks_done_in_current_burst = 0
+        self._current_burst_idle_timeout = 0.0
         self._last_burst_ended_at = time.monotonic()
         return True
 
@@ -559,7 +585,7 @@ async def _poll_loop(client: "BackendClient") -> None:
             # 队列空，继续 poll（http_client 已带长轮询）。但先检查一下：
             # 是不是上一波 burst 计划了 N 次搜索，实际只来了 K<N 次？这种情况下
             # _last_search_at 之后一直没新任务，要强制结束 burst + 退 PDD 后台。
-            if _scheduler.maybe_end_idle_burst(idle_timeout_s=60.0):
+            if _scheduler.maybe_end_idle_burst():
                 try:
                     from pdd_app_worker.device_manager import healthy_serials as _hs
                     for s in _hs():
@@ -599,7 +625,9 @@ async def main() -> int:
         f"burst_size=[{BURST_SIZE_MIN},{BURST_SIZE_MAX}] "
         f"intra_gap=[{INTRA_BURST_GAP_SECONDS_MIN:.0f},{INTRA_BURST_GAP_SECONDS_MAX:.0f}]s "
         f"inter_gap=[{INTER_BURST_GAP_MINUTES_MIN:.0f},{INTER_BURST_GAP_MINUTES_MAX:.0f}]min "
-        f"daily_quota={DAILY_SEARCH_QUOTA}"
+        f"burst_idle_timeout=[{BURST_IDLE_TIMEOUT_SECONDS_MIN:.0f},{BURST_IDLE_TIMEOUT_SECONDS_MAX:.0f}]s "
+        f"daily_quota={DAILY_SEARCH_QUOTA} "
+        f"emergency_priority≥{EMERGENCY_PRIORITY_THRESHOLD}"
     )
     if BOUND_PDD_ACCOUNT == "unknown":
         logger.warning(
