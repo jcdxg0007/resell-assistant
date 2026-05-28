@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import time
@@ -447,6 +448,10 @@ class PddAppClient:
             scroll_screens_eff = max(1, min(int(scroll_screens), 5))
         result = PddSearchResult()
         t0 = time.monotonic()
+
+        # debug dump 序号 + 关键词重置（每个 search() 一组屏序号）
+        self._debug_dump_seq = 0
+        self._debug_dump_keyword = keyword
 
         # 抽 session profile（Fix A）
         # 但如果是 burst 内的"接续任务"（上一个搜索刚结束，PDD 还在前台），
@@ -1334,6 +1339,10 @@ class PddAppClient:
                         by_title[t][k] = c[k]
         return list(by_title.values())
 
+    # debug：每个 search() 进度递增，区分同关键词下的多屏 dump
+    _debug_dump_seq: int = 0
+    _debug_dump_keyword: str = ""
+
     async def _dump_visible_cards(self) -> list[dict[str, Any]]:
         """解析当前屏可见的商品卡片列表（Day 3 真机校准版）。
 
@@ -1360,6 +1369,22 @@ class PddAppClient:
             return self._d.dump_hierarchy()
 
         xml_str = await asyncio.to_thread(_do_dump)
+
+        # 调试落盘：DEBUG_DUMP_LAST_SEARCH_XML=1 时把每屏 XML 保存到工作目录，
+        # 名字带关键词 + 屏序号，便于事后采样分析（店铺名、SKU 痕迹等）。
+        # 不开关时纯 no-op，无性能开销。
+        if os.environ.get("DEBUG_DUMP_LAST_SEARCH_XML"):
+            try:
+                self._debug_dump_seq += 1
+                kw = self._debug_dump_keyword or "unknown"
+                safe_kw = re.sub(r"[^\w\u4e00-\u9fff]+", "_", kw)[:20]
+                fname = f"dump_search_{safe_kw}_seq{self._debug_dump_seq}.xml"
+                with open(fname, "w", encoding="utf-8") as f:
+                    f.write(xml_str)
+                logger.info(f"[{self.serial}] debug dump saved: {fname}")
+            except Exception as exc:
+                logger.warning(f"[{self.serial}] debug dump save failed: {exc}")
+
         try:
             root = ET.fromstring(xml_str)
         except ET.ParseError as e:
