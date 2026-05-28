@@ -58,15 +58,17 @@ _PRICE_SRC_TAG = {
 def _fmt_items(items: list[dict], max_show: int = 5) -> str:
     lines = []
     for i, it in enumerate(items[:max_show], 1):
-        title = (it.get("title") or "")[:35]
+        title = (it.get("title") or "")[:30]
         price = it.get("price") or "?"
         src = it.get("price_source", "?")
         tag = _PRICE_SRC_TAG.get(src, src)
         sales = it.get("sales", 0)
         ad = " [AD]" if it.get("is_ad") else ""
         sales_str = f"{sales}" if sales else "?"
+        badges = it.get("badges") or []
+        badge_str = f" [{','.join(badges)}]" if badges else ""
         lines.append(
-            f"      {i}. {tag} ¥{price:<6} 销{sales_str:<5}{ad} {title}"
+            f"      {i}. {tag} ¥{price:<6} 销{sales_str:<6}{ad}{badge_str} {title}"
         )
     if len(items) > max_show:
         lines.append(f"      ... 还有 {len(items) - max_show} 条")
@@ -74,16 +76,18 @@ def _fmt_items(items: list[dict], max_show: int = 5) -> str:
 
 
 def _fmt_aux_stats(items: list[dict]) -> str:
-    """额外统计：广告占比、销量分布、bounds 覆盖率。"""
+    """额外统计：广告占比、销量分布、bounds 覆盖率、badges 覆盖率。"""
     if not items:
         return ""
     total = len(items)
     ad_n = sum(1 for it in items if it.get("is_ad"))
     sales_have = sum(1 for it in items if it.get("sales", 0) > 0)
     bounds_have = sum(1 for it in items if it.get("bounds"))
+    badges_have = sum(1 for it in items if it.get("badges"))
     return (
         f"      广告={ad_n}/{total}({ad_n * 100 / total:.0f}%) · "
-        f"销量字段={sales_have}/{total}({sales_have * 100 / total:.0f}%) · "
+        f"销量={sales_have}/{total}({sales_have * 100 / total:.0f}%) · "
+        f"badges={badges_have}/{total}({badges_have * 100 / total:.0f}%) · "
         f"坐标={bounds_have}/{total}"
     )
 

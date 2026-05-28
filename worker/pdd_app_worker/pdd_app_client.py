@@ -1427,6 +1427,10 @@ class PddAppClient:
 
         # 价格小 TextView 候选：要么含 ¥/￥，要么是 1-5 位纯数字（可能带小数点）
         _price_token_re = re.compile(r"^(\d+(?:\.\d+)?|¥|￥)$")
+        # badge 黑名单：包含这些 token 的 TextView 不算 badge（用于排除价格/销量/广告/价签）
+        _badge_blacklist_re = re.compile(
+            r"[¥￥]|^\d+(\.\d+)?$|已拼|已售|总售|^广告$|^券后$|^限\d+件$|^立省"
+        )
 
         items: list[dict[str, Any]] = []
         for t in title_anchors:
@@ -1485,11 +1489,44 @@ class PddAppClient:
                 for e in all_nodes
             )
 
+            # 抓 badges：标题正下方一行的"无 rid 短 TextView"，PDD 用来塞
+            # 店铺信任标(五星好店/未发货秒退/先用后付)、人气标(X人收藏/X人拼
+            # 单)、营销标(立减5元/即将恢复原价)等。对选品判断有用，原本被
+            # 丢掉非常浪费。
+            #
+            # 识别规则：在 [title_bottom+5, title_bottom+95] y 范围内，
+            # 是 TextView、text 长度 2-20、不是价格/销量/广告标志/title 本身。
+            badge_y_min = ty2 + 5
+            badge_y_max = ty2 + 95  # 限在 title 下方约 90px 内，避开价格行
+            badges = []
+            for e in all_nodes:
+                if not _in_card(e):
+                    continue
+                if "TextView" not in e["class"]:
+                    continue
+                btext = e["text"].strip()
+                if not btext or len(btext) > 20:
+                    continue
+                # 过滤价格 token、销量、广告标识
+                if _badge_blacklist_re.search(btext):
+                    continue
+                # Y 范围
+                ey_center = (e["bounds"][1] + e["bounds"][3]) // 2
+                if not (badge_y_min <= ey_center <= badge_y_max):
+                    continue
+                # 过滤 title 本身（PDD 的 tv_title.text 是截断版，可能匹到 badge 行的东西，保险起见排除）
+                if btext == title or (len(btext) >= 5 and btext in title):
+                    continue
+                if btext in badges:  # 同一 badge 不要重复
+                    continue
+                badges.append(btext)
+
             items.append({
                 "title": title,
                 "price": price or 0.0,
                 "sales": sales,
                 "is_ad": is_ad,
+                "badges": badges,
                 "bounds": list(t["bounds"]),  # title bounds, JSON-friendly
                 "card_bounds": [card_x_min, card_y_min, card_x_max, card_y_max],
             })
