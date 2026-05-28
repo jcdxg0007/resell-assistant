@@ -192,6 +192,19 @@
 ≥ 10 小时间隔，跑 10 个不同安全词分 2-3 天），看 OCR 在百亿补贴卡比例
 更高的关键词上是否稳定 ≥ 50% 命中率（覆盖率应继续保持 ≥ 90%）。
 
+### Day 4 拟人化 v2 补丁（2026-05-28 上午）
+
+发现 2 个反真人信号源，连夜修复后再上批量任务：
+
+| # | 信号 | 修复 |
+|---|---|---|
+| 1 | burst 内每个任务结束都按 home 退后台 → "用户每分钟在 PDD 间切 3 次" 的统计画像 | `BurstScheduler.is_first_in_burst` + `PddAppClient.set_cleanup_mode(soft\|exit)`；burst 内中间任务走 soft（back×1-2 退到首页，PDD 不退后台），burst 末任务才走 exit（按 home） |
+| 2 | burst 内每个任务都跑 cold-start 3.5s + warmup 5-10s "回首页浏览" → 真人连搜 3 个词不会每次回首页逛 | `search(is_first_in_burst=False)` 强制 `profile="direct"`，跳 warmup；`_ensure_app_foreground` 见 PDD 前台直接返回 "already"（跳 3.5s 冷启动 sleep）  |
+
+每次 burst 内"接续任务"省 ~12-18s，且 PDD 不再频繁切后台。日志新增
+`intra_burst={yes,no}` 标记，方便复盘。Scheduler 默认配置同步从
+`burst=[1,4]` 改成 `[3,5]`，匹配"一阵搜 3-5 个词再歇 5-30 分钟"的设定。
+
 ### Phase 2 — 单机巩固（1-2 周）
 
 **目标**：在 1 台手机上把所有边界情况吃透，把"试错成本"消化在加机器之前。

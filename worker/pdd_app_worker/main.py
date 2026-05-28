@@ -68,10 +68,11 @@ class BurstScheduler:
 
     用法（_handle_search 调用）::
         await scheduler.enforce_pre_search()   # 可能 sleep 数秒到数十分钟
+        is_first = scheduler.is_first_in_burst  # burst 内第一个任务？
         # ...do the actual work...
         burst_continues = scheduler.mark_search_done()
         if not burst_continues:
-            await press_home_on_device(serial)  # PDD 退后台
+            await press_home_on_device(serial)  # 仅 burst 结束才退 PDD
 
     跨天处理：用 UTC date 做 day key；新一天首次调用自动重置计数器。
     """
@@ -82,6 +83,10 @@ class BurstScheduler:
         self._burst_remaining = 0
         self._last_search_at: float = 0.0
         self._last_burst_ended_at: float = 0.0
+        # burst 内已完成的任务数。is_first_in_burst 用它判断 burst 内位置：
+        # 0 = 这是 burst 的第 1 个任务（需要"开 APP → 浏览 → 搜"全流程）
+        # >0 = burst 内后续任务（PDD 仍前台，跳冷启动 + 跳 warmup）
+        self._tasks_done_in_current_burst = 0
 
     @staticmethod
     def _today_key() -> str:
@@ -97,7 +102,15 @@ class BurstScheduler:
             self._day_key = today
             self._searches_today = 0
             self._burst_remaining = 0
+            self._tasks_done_in_current_burst = 0
             self._last_burst_ended_at = 0.0
+
+    @property
+    def is_first_in_burst(self) -> bool:
+        """True = burst 内的第 1 个任务（PDD 应做完整 cold-start + warmup 流程）。
+        False = burst 内后续任务（PDD 仍前台，跳冷启动 + warmup，直接搜下一个词）。
+        """
+        return self._tasks_done_in_current_burst == 0
 
     def status(self) -> str:
         return (
@@ -141,6 +154,7 @@ class BurstScheduler:
             remaining_quota = DAILY_SEARCH_QUOTA - self._searches_today
             desired = random.randint(BURST_SIZE_MIN, BURST_SIZE_MAX)
             self._burst_remaining = min(desired, remaining_quota)
+            self._tasks_done_in_current_burst = 0
             logger.info(
                 f"scheduler: new burst started — "
                 f"{self._burst_remaining} searches planned "
@@ -169,8 +183,10 @@ class BurstScheduler:
         self._searches_today += 1
         self._last_search_at = time.monotonic()
         self._burst_remaining -= 1
+        self._tasks_done_in_current_burst += 1
         if self._burst_remaining <= 0:
             self._last_burst_ended_at = time.monotonic()
+            self._tasks_done_in_current_burst = 0
             logger.info(
                 f"scheduler: burst ended — daily total "
                 f"{self._searches_today}/{DAILY_SEARCH_QUOTA}"
@@ -181,8 +197,8 @@ class BurstScheduler:
     def maybe_end_idle_burst(self, idle_timeout_s: float = 60.0) -> bool:
         """如果当前 burst 开着但已经太久没新任务，强制结束 burst。
 
-        触发场景：scheduler 随机决定 burst_size=2，但 backend 只派了 1 个任务。
-        没有这个超时，burst_remaining 永远停在 1，PDD 永远不退后台 = 拟人化
+        触发场景：scheduler 随机决定 burst_size=4，但 backend 只派了 2 个任务。
+        没有这个超时，burst_remaining 永远停在 2，PDD 永远不退后台 = 拟人化
         破功。idle_timeout 默认 60s（远大于 intra-burst gap 上限 30s，
         所以正常 burst 中不会误触发）。
 
@@ -203,6 +219,7 @@ class BurstScheduler:
             f"{self._searches_today}/{DAILY_SEARCH_QUOTA})"
         )
         self._burst_remaining = 0
+        self._tasks_done_in_current_burst = 0
         self._last_burst_ended_at = time.monotonic()
         return True
 
@@ -418,8 +435,26 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
     if isinstance(override_scroll_screens, int) and override_scroll_screens > 0:
         # search() 内部会 clamp 到 [1, 5]
         search_kwargs["scroll_screens"] = override_scroll_screens
+    # burst 位置：first 走完整 cold-start + warmup；intra 跳过冷启动 + 强制 direct profile
+    is_first = _scheduler.is_first_in_burst
+    search_kwargs["is_first_in_burst"] = is_first
+
+    # mark_search_done + cleanup_mode 决策必须在 __aexit__ 触发前完成：
+    # - 如果 burst 还会继续 → cleanup 用 "soft"（不退 PDD，让下个任务接着搜）
+    # - 如果 burst 结束 → cleanup 用 "exit"（按 home，PDD 退后台 5-30 min）
+    burst_continues = False
     async with PddAppClient(serial) as cli:
+        cli.set_cleanup_mode("soft")  # 临时；search 跑完后用真实结果覆盖
         search_result = await cli.search(keyword, **search_kwargs)
+        burst_continues = _scheduler.mark_search_done()
+        cli.set_cleanup_mode("soft" if burst_continues else "exit")
+    # __aexit__ 已用最新的 cleanup_mode 跑完 _post_task_cleanup
+
+    # Belt + suspenders：如果 burst 结束，再走一次 _press_home_on_device。
+    # 这条路径独立于 atx-agent（用 adb subprocess + am start launcher），是
+    # Day 3.5 实测在 Honor X20 上唯一能真退 PDD 后台的兜底（见 §"踩坑"）。
+    if not burst_continues:
+        await _press_home_on_device(serial)
 
     elapsed_ms = int((time.monotonic() - started_at) * 1000)
     if search_result.error:
@@ -428,9 +463,6 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
                   "rate_limited", "real_name_wall")
             for s in search_result.risk_signals
         ) else "failed"
-        burst_continues = _scheduler.mark_search_done()
-        if not burst_continues:
-            await _press_home_on_device(serial)
         return {
             "task_id": task_id,
             "status": status,
@@ -442,9 +474,6 @@ async def _handle_search(task_id: str, payload: dict[str, Any], started_at: floa
             "error": search_result.error,
             "raw_screenshot_path": search_result.raw_screenshot_path,
         }
-    burst_continues = _scheduler.mark_search_done()
-    if not burst_continues:
-        await _press_home_on_device(serial)
     return {
         "task_id": task_id,
         "status": "ok",

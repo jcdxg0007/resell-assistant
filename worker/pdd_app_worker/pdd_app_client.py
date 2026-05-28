@@ -188,6 +188,19 @@ class PddAppClient:
     def __init__(self, serial: str) -> None:
         self.serial = serial
         self._d: Any = None  # uiautomator2.Device, 延迟 init
+        # cleanup 行为模式（caller 在 search 跑完后用 set_cleanup_mode 更新）：
+        # - "exit"：默认。按 home 把 PDD 真退到后台（burst 结束时用，让 PDD 静
+        #   置 5-30 min，画像更像"间歇用户"）
+        # - "soft"：仅做 0-1 次 back（最多回到结果页上一层），不退 PDD。让 burst
+        #   内下一个任务在同一个 PDD session 里接着搜，行为更像真人"连搜几个词"
+        self._cleanup_mode: str = "exit"
+
+    def set_cleanup_mode(self, mode: str) -> None:
+        """供 caller 在 __aexit__ 之前更新 cleanup 行为（exit / soft）。"""
+        if mode not in ("exit", "soft"):
+            logger.warning(f"[{self.serial}] unknown cleanup_mode={mode!r}, ignored")
+            return
+        self._cleanup_mode = mode
 
     async def __aenter__(self) -> "PddAppClient":
         await self._connect()
@@ -332,23 +345,51 @@ class PddAppClient:
         return await asyncio.to_thread(_do_click)
 
     async def _post_task_cleanup(self) -> None:
-        """任务结束清场：模拟真人"看完东西退几层 → 按 home 回桌面"的动作。
+        """任务结束清场。两档行为：
 
-        2026-05-27 morning test 踩坑：之前 90% 概率只做 1-3 次 back 就 return，
-        不按 home。但 BACK 键在 PDD 首页 tab 上只触发"再按一次返回退回桌面"
-        toast，**不会真退到桌面**。结果 cleanup 后 PDD 仍停在前台，配合
-        Honor X20 上 adb 的 KEYCODE_HOME / launcher-intent 都吃瘪（实测都
-        没把 PDD 真切到后台），PDD 永远留在屏幕上 = 拟人化破功。
+        ── exit 模式（burst 结束，PDD 退后台）────────────────────────
+        模拟真人"看完东西退几层 → 按 home 回桌面"。
+        - 0-3 次 back（拟人地"退一层"）
+        - 末尾强制 d.press("home") 把 PDD 真切到后台
+        - 10% 概率跳过 back，直接 home
 
-        修复：
-        - 仍做 0-3 次 back（保留"看完东西退一层"的拟人感）
-        - **结尾强制调 d.press("home")**，走 uiautomator2 atx-agent → InputManager
-          注入这条路径。跟 adb shell 是完全独立的代码路径，所以即便后者在
-          Honor 上失效，这条仍可能生效。
-        - 10% 概率跳过所有 back，直接 home（最自然的"用完了"模式）
+        2026-05-27 morning test 踩坑：BACK 键在 PDD 首页 tab 上只触发"再按
+        一次返回退回桌面" toast，**不会真退到桌面**。配合 Honor X20 上 adb
+        的 KEYCODE_HOME / launcher-intent 都吃瘪，所以末尾的 d.press("home")
+        是必需的（走 atx-agent → InputManager，独立于 adb 子进程，是唯一在
+        Honor EMUI 上能真退后台的路径）。
+
+        ── soft 模式（burst 内中间任务，留在 PDD）────────────────────
+        不退 PDD，仅做 0-1 次 back（最多从详情/结果页退到搜索建议页）。
+        让下一个任务在同一个 PDD session 里接着搜，省去"退后台 + 重开 +
+        冷启动 + warmup"那一整套 8-15s 浪费 + 反真人的频繁后台切换信号。
+
+        失败/异常都 swallow——cleanup 是 best-effort，不能因为 cleanup 异常
+        把整个任务结果给搞没了。
         """
         if not self._d:
             return
+        if self._cleanup_mode == "soft":
+            # Burst 内中间任务：PDD 留前台，但要把页面位置退到"首页"——
+            #   搜索结果页（无底部 tab）→ back → 搜索输入页（无底部 tab）→ back → 首页（有底部 tab）
+            # 这样下一个任务的 _ensure_home_tab 才能找到 "首页" 元素。
+            # 75% 走 back×2（最干净，落到首页）；25% back×1（停在搜索输入页，
+            # 拟人地"还想再搜一个，没立刻退到首页"——但这会让下个任务的
+            # _ensure_home_tab 多 ~1-4s xpath 重试，是有意的拟人随机性）。
+            try:
+                backs = 1 if random.random() < 0.25 else 2
+                for _ in range(backs):
+                    await asyncio.to_thread(self._d.press, "back")
+                    await _sleep_jitter(random.uniform(0.4, 0.8), jitter=0.3)
+                logger.info(
+                    f"[{self.serial}] cleanup mode=soft "
+                    f"(stay in PDD, back x{backs})"
+                )
+            except Exception as e:
+                logger.debug(f"[{self.serial}] soft cleanup ignored: {e}")
+            return
+
+        # exit 模式（默认）
         try:
             if random.random() < 0.10:
                 await asyncio.to_thread(self._d.press, "home")
@@ -372,6 +413,7 @@ class PddAppClient:
         max_items: int = DEFAULT_MAX_ITEMS,
         mode: str = "fast",
         scroll_screens: int | None = None,
+        is_first_in_burst: bool = True,
     ) -> PddSearchResult:
         """主入口：搜索关键词并返回前 N 个商品卡片。
 
@@ -407,7 +449,13 @@ class PddAppClient:
         t0 = time.monotonic()
 
         # 抽 session profile（Fix A）
-        profile = _pick_session_profile()
+        # 但如果是 burst 内的"接续任务"（上一个搜索刚结束，PDD 还在前台），
+        # 强制走 direct 路径——真人连搜不会"回首页浏览推荐再搜下一个词"，
+        # 都是在搜索结果页直接点搜索栏改关键词。
+        if not is_first_in_burst:
+            profile = "direct"
+        else:
+            profile = _pick_session_profile()
 
         try:
             await self._ensure_app_foreground()
@@ -456,8 +504,9 @@ class PddAppClient:
             elapsed = time.monotonic() - t0
             logger.info(
                 f"[{self.serial}] search('{keyword}', mode={mode}, "
-                f"scroll_screens={scroll_screens_eff}, profile={profile}) → "
-                f"items={len(result.items)} risks={result.risk_signals} "
+                f"scroll_screens={scroll_screens_eff}, "
+                f"profile={profile}, intra_burst={'no' if is_first_in_burst else 'yes'}) "
+                f"→ items={len(result.items)} risks={result.risk_signals} "
                 f"elapsed={elapsed:.1f}s"
             )
         return result
