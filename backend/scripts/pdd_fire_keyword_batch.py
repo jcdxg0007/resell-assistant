@@ -62,10 +62,30 @@ def _fmt_items(items: list[dict], max_show: int = 5) -> str:
         price = it.get("price") or "?"
         src = it.get("price_source", "?")
         tag = _PRICE_SRC_TAG.get(src, src)
-        lines.append(f"      {i}. {tag} ¥{price:<7} {title}")
+        sales = it.get("sales", 0)
+        ad = " [AD]" if it.get("is_ad") else ""
+        sales_str = f"{sales}" if sales else "?"
+        lines.append(
+            f"      {i}. {tag} ¥{price:<6} 销{sales_str:<5}{ad} {title}"
+        )
     if len(items) > max_show:
         lines.append(f"      ... 还有 {len(items) - max_show} 条")
     return "\n".join(lines) if lines else "      (空)"
+
+
+def _fmt_aux_stats(items: list[dict]) -> str:
+    """额外统计：广告占比、销量分布、bounds 覆盖率。"""
+    if not items:
+        return ""
+    total = len(items)
+    ad_n = sum(1 for it in items if it.get("is_ad"))
+    sales_have = sum(1 for it in items if it.get("sales", 0) > 0)
+    bounds_have = sum(1 for it in items if it.get("bounds"))
+    return (
+        f"      广告={ad_n}/{total}({ad_n * 100 / total:.0f}%) · "
+        f"销量字段={sales_have}/{total}({sales_have * 100 / total:.0f}%) · "
+        f"坐标={bounds_have}/{total}"
+    )
 
 
 def _fmt_price_source_stats(items: list[dict]) -> str:
@@ -126,6 +146,12 @@ async def main() -> int:
         "--emergency", action="store_true",
         help="紧急批次：所有任务用 priority=9 → LPUSH 插队首 + worker 跳 inter-burst quiet。"
              "建议只在等不及 5-30 min 静默期时用，且单次紧急批不超过 3 个关键词（拟人化考虑）。"
+    )
+    parser.add_argument(
+        "--save-json", metavar="PATH", default=None,
+        help="把完整结果（所有 keyword 的所有 items 含 raw 字段）落到 JSON 文件。"
+             "建议每次跑批都开，方便积累数据质量样本与跨周对比。"
+             "示例：--save-json /tmp/pdd_batch_$(date +%%Y%%m%%d_%%H%%M).json"
     )
     args = parser.parse_args()
 
@@ -208,6 +234,7 @@ async def main() -> int:
         if result.items:
             print(_fmt_items(result.items))
             print(_fmt_price_source_stats(result.items))
+            print(_fmt_aux_stats(result.items))
             # 累计统计
             for it in result.items:
                 overall_total += 1
@@ -238,6 +265,47 @@ async def main() -> int:
               f"(total items: {overall_total})")
     else:
         print("  (无 items)")
+
+    # ─ 步骤 4: 落 JSON（如指定）
+    if args.save_json:
+        import json
+        from datetime import datetime, timezone
+        # 解析 PddAppResult 对象到 dict，并把 keyword 关联进去
+        dump_records = []
+        for r in results:
+            if isinstance(r, Exception):
+                dump_records.append({"keyword": None, "exception": f"{type(r).__name__}: {r}"})
+                continue
+            kw, result = r
+            if result is None:
+                dump_records.append({"keyword": kw, "timeout": True})
+                continue
+            dump_records.append({
+                "keyword": kw,
+                "status": result.status,
+                "items": result.items,
+                "risk_signals": result.risk_signals,
+                "elapsed_ms": result.elapsed_ms,
+                "error": result.error,
+                "device_serial": result.device_serial,
+                "account_name": result.account_name,
+            })
+        payload = {
+            "fired_at": datetime.now(timezone.utc).isoformat(),
+            "mode": args.mode,
+            "scroll_screens": args.scroll_screens,
+            "target_count": args.target_count,
+            "priority": priority,
+            "emergency": is_emergency,
+            "total_elapsed_s": round(total_elapsed, 1),
+            "results": dump_records,
+        }
+        try:
+            with open(args.save_json, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"\n✓ 完整结果已落盘：{args.save_json}")
+        except OSError as exc:
+            print(f"\n⚠ JSON 落盘失败：{exc}（结果仍会按返回码退出，但样本丢了）")
 
     print()
     if worst_status == "risk_blocked":
