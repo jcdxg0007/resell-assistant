@@ -102,10 +102,41 @@ class PddSearchResult:
 
 # ─── 人类化操作辅助 ────────────────────────────────────────
 
-async def _sleep_jitter(base: float, jitter: float = 0.4) -> None:
-    """带抖动的 sleep —— base ± jitter*base 范围内随机。"""
-    delta = random.uniform(-jitter * base, jitter * base)
-    await asyncio.sleep(max(0.05, base + delta))
+# 全局浏览节奏因子。1.0 = 原始节奏；0.7 = 整体快 30%。
+# 只作用于"浏览 / 停留 / 翻页观察"类等待（_sleep_jitter 默认、warmup 滚动
+# 停留、lazy-render 微滚停留、善后 back 等），**不影响**反爬关键节奏：
+#   - IME 每字输入节奏（太快是机器指纹）—— 走 asyncio.sleep，不经本因子
+#   - 冷启动等 APP/splash（_ensure_app_foreground 显式传 pace=False）
+#   - burst 间静默 5-30 min / daily quota（在 main.py，不引用本因子）
+# clamp 到 [0.3, 1.0]：下限防手滑设 0 导致"零等待裸奔"；不允许 > 1（变慢
+# 没意义，要变慢直接调原始区间）。
+_HUMANIZE_PACE = max(0.3, min(1.0, float(os.environ.get("HUMANIZE_PACE", "1.0"))))
+
+
+def _pace_uniform(lo: float, hi: float) -> float:
+    """浏览类停留时长：random.uniform(lo, hi) 再乘全局节奏因子。"""
+    return random.uniform(lo, hi) * _HUMANIZE_PACE
+
+
+def set_humanize_pace(value: float) -> None:
+    """热更新全局浏览节奏因子（被 main.apply_remote_config 调用）。
+
+    clamp 到 [0.3, 1.0]。_sleep_jitter / _pace_uniform 都按模块全局动态查找
+    本值，所以更新后下一次等待立即生效，无需重启 worker。
+    """
+    global _HUMANIZE_PACE
+    _HUMANIZE_PACE = max(0.3, min(1.0, float(value)))
+
+
+async def _sleep_jitter(base: float, jitter: float = 0.4, pace: bool = True) -> None:
+    """带抖动的 sleep —— base ± jitter*base 范围内随机。
+
+    :param pace: True（默认）按 _HUMANIZE_PACE 缩放，用于浏览类等待；
+                 False 用于"等 APP 起来"这类不能压缩的真实等待。
+    """
+    effective = base * _HUMANIZE_PACE if pace else base
+    delta = random.uniform(-jitter * effective, jitter * effective)
+    await asyncio.sleep(max(0.05, effective + delta))
 
 
 def _jittered_point_in_bounds(
@@ -537,7 +568,7 @@ class PddAppClient:
         def _back_some(times: int) -> None:
             for _ in range(times):
                 self._d.press("back")
-                time.sleep(random.uniform(0.5, 1.0))
+                time.sleep(_pace_uniform(0.5, 1.0))
 
         backs = random.randint(1, 2)
         await asyncio.to_thread(_back_some, backs)
@@ -565,8 +596,9 @@ class PddAppClient:
         status = await asyncio.to_thread(_do)
         logger.info(f"[{self.serial}] app state: {status}")
         if status == "started":
-            # 冷启动给开屏广告 / splash 留时间
-            await _sleep_jitter(3.5, jitter=0.3)
+            # 冷启动给开屏广告 / splash 留时间（等 APP 起来，不算"浏览"，
+            # 不受 HUMANIZE_PACE 压缩）
+            await _sleep_jitter(3.5, jitter=0.3, pace=False)
 
     async def _ensure_home_tab(self) -> None:
         """点击底部 home tab，强制把 PDD 拉回首页。
@@ -718,7 +750,7 @@ class PddAppClient:
                         (x_end, y_end),
                         duration_s=random.uniform(0.30, 0.70),
                     )
-                    time.sleep(random.uniform(*params["inter_scroll_sleep"]))
+                    time.sleep(_pace_uniform(*params["inter_scroll_sleep"]))
 
                 # ── 是否进详情页（standard 25% / deep 100% / short 0%）
                 clicked_detail = False
@@ -751,7 +783,7 @@ class PddAppClient:
                                 target.click()
                             clicked_detail = True
 
-                            time.sleep(random.uniform(*params["detail_stay_sec"]))
+                            time.sleep(_pace_uniform(*params["detail_stay_sec"]))
                             if random.random() < params["detail_in_scroll_prob"]:
                                 detail_x = w // 2 + random.randint(-25, 25)
                                 _humanize_swipe_path(
@@ -760,12 +792,12 @@ class PddAppClient:
                                     (detail_x + random.randint(-20, 20), int(h * random.uniform(0.20, 0.35))),
                                     duration_s=random.uniform(0.45, 0.85),
                                 )
-                                time.sleep(random.uniform(*params["detail_in_extra_sleep"]))
+                                time.sleep(_pace_uniform(*params["detail_in_extra_sleep"]))
                             else:
                                 # 不滑也要多看一会才走（避免"点开秒回"）
-                                time.sleep(random.uniform(0.8, 1.8))
+                                time.sleep(_pace_uniform(0.8, 1.8))
                             self._d.press("back")
-                            time.sleep(random.uniform(0.5, 1.0))
+                            time.sleep(_pace_uniform(0.5, 1.0))
                     except Exception:
                         pass
 
@@ -781,7 +813,7 @@ class PddAppClient:
                         (x_end, y_end),
                         duration_s=random.uniform(0.22, 0.40),
                     )
-                    time.sleep(random.uniform(0.25, 0.50))
+                    time.sleep(_pace_uniform(0.25, 0.50))
 
                 return {"scrolls": scroll_times, "clicked_detail": clicked_detail}
 
@@ -1300,12 +1332,12 @@ class PddAppClient:
                 self._d, (x_down, start_y), (x_down, start_y - shift),
                 duration_s=random.uniform(0.22, 0.42),
             )
-            time.sleep(random.uniform(0.45, 0.85))
+            time.sleep(_pace_uniform(0.45, 0.85))
             _humanize_swipe_path(
                 self._d, (x_up, start_y - shift), (x_up, start_y),
                 duration_s=random.uniform(0.22, 0.42),
             )
-            time.sleep(random.uniform(0.8, 1.3))
+            time.sleep(_pace_uniform(0.8, 1.3))
 
         await asyncio.to_thread(_micro_scroll)
         second = await self._dump_visible_cards()

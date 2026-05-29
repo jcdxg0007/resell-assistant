@@ -105,3 +105,14 @@ class BackendClient:
         r = await self._client.get(f"{API_PREFIX}/status")
         r.raise_for_status()
         return r.json()
+
+    async def fetch_runtime_config(self) -> dict[str, Any] | None:
+        """拉取 backend 上的运行时调度配置。失败不抛（返回 None），
+        让 worker 沿用当前内存里的配置，不影响采集主循环。"""
+        try:
+            r = await self._client.get(f"{API_PREFIX}/runtime-config")
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            logger.warning(f"fetch_runtime_config failed: {exc}")
+            return None

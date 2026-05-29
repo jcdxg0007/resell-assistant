@@ -52,6 +52,10 @@ BURST_SIZE_MIN = int(os.environ.get("BURST_SIZE_MIN", "3"))
 BURST_SIZE_MAX = int(os.environ.get("BURST_SIZE_MAX", "5"))
 INTRA_BURST_GAP_SECONDS_MIN = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MIN", "5"))
 INTRA_BURST_GAP_SECONDS_MAX = float(os.environ.get("INTRA_BURST_GAP_SECONDS_MAX", "30"))
+# 全局浏览节奏因子（与 pdd_app_client._HUMANIZE_PACE 同名同义）。
+# 1.0 = 原节奏；0.7 = 快 30%。这里只缩放 burst 内"想下个词"的 intra-gap；
+# 不缩放 inter-burst 静默（账号画像关键）和 daily quota。clamp [0.3, 1.0]。
+HUMANIZE_PACE = max(0.3, min(1.0, float(os.environ.get("HUMANIZE_PACE", "1.0"))))
 INTER_BURST_GAP_MINUTES_MIN = float(os.environ.get("INTER_BURST_GAP_MINUTES_MIN", "5"))
 INTER_BURST_GAP_MINUTES_MAX = float(os.environ.get("INTER_BURST_GAP_MINUTES_MAX", "30"))
 DAILY_SEARCH_QUOTA = int(os.environ.get("DAILY_SEARCH_QUOTA", "30"))
@@ -204,9 +208,10 @@ class BurstScheduler:
             )
         else:
             # burst 内：随机短间隔（紧急任务也守这个 5-30s，避免连续 0 间隔异常）
+            # 按 HUMANIZE_PACE 缩放（0.7 → 实际 3.5-21s），让整体节奏快 30%
             target_s = random.uniform(
                 INTRA_BURST_GAP_SECONDS_MIN, INTRA_BURST_GAP_SECONDS_MAX
-            )
+            ) * HUMANIZE_PACE
             elapsed = time.monotonic() - self._last_search_at
             if elapsed < target_s:
                 sleep_s = target_s - elapsed
@@ -335,6 +340,49 @@ def _setup_signals() -> None:
         signal.signal(signal.SIGTERM, _on_signal)
 
 
+# backend 配置的 JSON key 大写后正好等于本模块的全局常量名
+# （burst_size_min → BURST_SIZE_MIN ...），所以热更新可以用 globals() 直接赋值。
+_REMOTE_INT_KEYS = {
+    "burst_size_min", "burst_size_max",
+    "daily_search_quota", "emergency_priority_threshold",
+}
+_REMOTE_FLOAT_KEYS = {
+    "intra_burst_gap_seconds_min", "intra_burst_gap_seconds_max",
+    "inter_burst_gap_minutes_min", "inter_burst_gap_minutes_max",
+    "burst_idle_timeout_seconds_min", "burst_idle_timeout_seconds_max",
+    "humanize_pace",
+}
+
+
+def apply_remote_config(cfg: dict[str, Any]) -> list[str]:
+    """把 backend 拉到的配置热更新到本模块全局常量（用 global 赋值）。
+
+    BurstScheduler 各方法运行时按模块全局名动态查找这些常量，所以更新后
+    下一个 burst / 下一次 intra-gap 立即按新值走，无需重启 worker。
+    humanize_pace 额外同步到 pdd_app_client（它各自维护一份）。
+
+    :return: 真正变了的项的描述列表，供日志打印。
+    """
+    g = globals()
+    changes: list[str] = []
+    for key in _REMOTE_INT_KEYS | _REMOTE_FLOAT_KEYS:
+        if key not in cfg:
+            continue
+        var = key.upper()
+        try:
+            val = int(cfg[key]) if key in _REMOTE_INT_KEYS else float(cfg[key])
+        except (TypeError, ValueError):
+            logger.warning(f"apply_remote_config: 跳过非法值 {key}={cfg[key]!r}")
+            continue
+        if g.get(var) != val:
+            changes.append(f"{var} {g.get(var)}→{val}")
+            g[var] = val
+        if key == "humanize_pace":
+            from pdd_app_worker import pdd_app_client
+            pdd_app_client.set_humanize_pace(val)
+    return changes
+
+
 async def _heartbeat_loop(client: "BackendClient") -> None:
     from pdd_app_worker.device_manager import healthy_serials
 
@@ -342,6 +390,13 @@ async def _heartbeat_loop(client: "BackendClient") -> None:
     while not _shutdown.is_set():
         devices = healthy_serials()
         await client.send_heartbeat(devices)
+
+        # 顺便拉运行时配置热更新调度参数（前端改过的会在这里生效，≤45s 延迟）
+        cfg = await client.fetch_runtime_config()
+        if cfg:
+            changes = apply_remote_config(cfg)
+            if changes:
+                logger.info(f"runtime-config 热更新: {'; '.join(changes)}")
 
         # 每次心跳都打印设备列表，方便运维肉眼盯线。状态变化时加 tag：
         #   [initial]      = worker 启动后首条
@@ -627,7 +682,9 @@ async def main() -> int:
         f"inter_gap=[{INTER_BURST_GAP_MINUTES_MIN:.0f},{INTER_BURST_GAP_MINUTES_MAX:.0f}]min "
         f"burst_idle_timeout=[{BURST_IDLE_TIMEOUT_SECONDS_MIN:.0f},{BURST_IDLE_TIMEOUT_SECONDS_MAX:.0f}]s "
         f"daily_quota={DAILY_SEARCH_QUOTA} "
-        f"emergency_priority≥{EMERGENCY_PRIORITY_THRESHOLD}"
+        f"emergency_priority≥{EMERGENCY_PRIORITY_THRESHOLD} "
+        f"humanize_pace={HUMANIZE_PACE:.2f}"
+        f"{' (FASTER)' if HUMANIZE_PACE < 1.0 else ''}"
     )
     if BOUND_PDD_ACCOUNT == "unknown":
         logger.warning(

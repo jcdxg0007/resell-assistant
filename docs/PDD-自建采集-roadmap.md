@@ -248,6 +248,225 @@ scheduler: new burst started — 3 searches planned (daily so far 5/30) [EMERGEN
 - 紧急 burst 结束后，下一个普通 burst 仍要等 5-30 min（_last_burst_ended_at
   在紧急 burst 收尾时重设，时间从那时算起）
 
+### Day 4 词库上线（2026-05-28 下午）
+
+从手动列关键词跑批升级到**词库自动轮播**。基础设施：
+
+| 件 | 说明 |
+|---|---|
+| `selection_keywords` 加 5 列 | `pdd_last_searched_at` / `pdd_last_status` / `pdd_mode` / `pdd_safe` / `pdd_searches_total`。migration `b8c9d0e1f2g3` |
+| `scripts/pdd_seed_keywords.py` | 批量入种 + 列词库 + 永久禁用敏感词 |
+| `scripts/pdd_fire_from_lib.py` | 选 N 个最久没跑过的词自动派；跑完写回 `pdd_last_*` 状态 |
+
+**为什么复用现有 `selection_keywords` 而不新建 `pdd_keyword_seeds`**：
+该表已经是全平台共享的关键词主体（含 target_platforms JSON），加 PDD
+专属字段是最小改动；未来淘宝/小红书要做同样轮播，按同样模式加 `tb_*`
+/ `xhs_*` 列即可。`last_crawled_at`（跨平台共享心跳）保留不动。
+
+**选词策略（2026-05-29 改成品类聚集 + 品类轮换）**：
+
+核心原则：**一个 burst 内的 N 个词必须来自同一品类**。真人一次 session
+的搜索主题是聚集的（要买婴儿用品就连搜婴儿床 / 围挡 / 地垫），不会
+「婴儿床 → 猫包 → 相机壳」大杂烩 —— 后者是比价采集器的典型指纹，会让
+PDD 的账号兴趣画像判定为"非自然搜索序列"。
+
+两步选词：
+
+1. **锁定品类**：在所有「有可调度 PDD 词」的品类里，挑整体最久没被碰过
+   的那个。全新品类（一个词没跑过 → `MAX(pdd_last_searched_at)=NULL`）
+   最优先，`random()` 给同级品类打散。
+
+   ```sql
+   SELECT c.id
+   FROM selection_categories c
+   JOIN selection_keywords k ON k.category_id = c.id
+   WHERE k.pdd_safe AND k.is_active AND k.schedule_enabled
+     AND k.target_platforms::jsonb @> '["pdd"]'::jsonb
+   GROUP BY c.id
+   ORDER BY MAX(k.pdd_last_searched_at) ASC NULLS FIRST, random()
+   LIMIT 1
+   ```
+
+2. **品类内选 N 个词**：
+
+   ```sql
+   WHERE category_id = :chosen AND pdd_safe AND is_active AND schedule_enabled
+     AND target_platforms::jsonb @> '["pdd"]'::jsonb
+   ORDER BY pdd_last_searched_at ASC NULLS FIRST,
+            pdd_searches_total ASC,
+            random()          -- 完全同级的词打散，避免每次顺序一样
+   LIMIT N
+   ```
+
+**长期行为**：每跑完一个品类，它的 `MAX(last)` 变成非 NULL → 排到队尾
+→ 下个 burst 自动轮到没跑过的品类。N 个 burst 后 7 个品类均匀轮一圈再
+回头。`--category` 指定时跳过步骤 1 直接锁定该品类。
+
+**边界**：锁定品类里可跑词不足 N 个就只返回那几个（不跨品类硬凑，保持
+session 主题纯净）。例：相机配件只剩 2 个可调度词时，那个 burst 就只跑
+2 个词。
+
+**pdd_mode 与 worker mode 映射**：
+
+| `pdd_mode`（DB） | worker `mode` | target_count | scroll_screens | 说明 |
+|---|---|---|---|---|
+| `fast` | fast | 8 | 2 | 默认；30-40s 完成 |
+| `list_deep` | deep | 30 | 5 | 多滚屏深扫 |
+| `detail_smart` | (fast) | 8 | 2 | Phase 2 才真正生效；占位 |
+| `detail_deep` | (fast) | 8 | 2 | Phase 2；占位 |
+
+**入种 / 跑批样例**：
+
+```bash
+# 入一批种子词
+python -m scripts.pdd_seed_keywords \
+    --category "日用快消" --slug daily --hint "纸巾/牙膏/洗手液一类高频日消" \
+    --mode fast \
+    纸巾 牙膏 洗手液 沐浴露 保鲜膜 垃圾袋
+
+# 看词库现状
+python -m scripts.pdd_seed_keywords --list
+
+# 永久禁用某类敏感词（pdd_safe=False）
+python -m scripts.pdd_seed_keywords --disable 美瞳
+python -m scripts.pdd_seed_keywords --disable 减肥药
+
+# dry-run：看会挑哪 3 个词
+python -m scripts.pdd_fire_from_lib --count 3 --dry-run
+
+# 真派（默认 priority=1，走正常 burst 节奏）
+python -m scripts.pdd_fire_from_lib --count 3
+
+# 只在某分类里挑
+python -m scripts.pdd_fire_from_lib --count 5 --category daily
+
+# 紧急词库轮播（少用）
+python -m scripts.pdd_fire_from_lib --count 3 --emergency
+```
+
+**字段语义**：
+
+- `pdd_last_status`：worker 跑完写回的最近一次结果
+  `ok` / `empty`（status=ok 但 items=0）/ `partial` / `risk_blocked`
+  / `failed` / `timeout`。冷门词长期 `empty` → 手动 `--disable`
+- `pdd_searches_total`：累计跑批次数，监控用；选词时作为次级排序键
+  （同样从未跑过的两个词里，先跑次数少的）
+- `pdd_safe = False`：永久旁路，即使 `schedule_enabled=True` 也不会
+  被 `fire_from_lib` 选中。`disable` 一次性操作，回滚要直接改 DB
+- `pdd_mode`：每词独立配置。日后给"竞品监控核心词"开 `detail_smart`、
+  对外围词保持 `fast`，靠这一列分流
+
+**与 Phase 1 既有 fire 脚本的分工**：
+
+| 场景 | 用什么 |
+|---|---|
+| 日常自动跑批（每天 5-10 个 burst） | `pdd_fire_from_lib.py`（词库轮播） |
+| 客户/决策临时插入紧急词 | `pdd_fire_one_task.py --emergency` |
+| 新词验证、debug 一组特定词 | `pdd_fire_keyword_batch.py` |
+| 第一次给词库填料 | `pdd_seed_keywords.py` |
+
+**待办**：
+
+- 入 30-50 个安全种子词（用户提供清单）
+- 把 `pdd_fire_from_lib.py` 接到 celery beat（每 30-60 min 自动跑 1 次）
+  →留到 Day 5 一起做调度上云
+- Phase 2 详情页模式真接通后，把占位的 `detail_smart` / `detail_deep`
+  填充进 `_MODE_MAP`
+
+### Day 4 浏览节奏提速（2026-05-29）
+
+用户反馈整体浏览节奏偏慢，引入**单一全局旋钮 `HUMANIZE_PACE`**（默认
+1.0；设 0.7 = 整体快 30%）。worker (`main.py`) 和 client
+(`pdd_app_client.py`) 共用同一个环境变量，改一处即全局生效。
+
+**只压"浏览类"等待**（动了不增加反爬风险）：
+
+| 等待 | 位置 | 0.7 后 |
+|---|---|---|
+| burst 内 intra-gap | main.py scheduler | 5-30s → 3.5-21s |
+| 结果页屏间停留 | `_collect_items` `_sleep_jitter(1.0)` | ×0.7 |
+| 首屏等待 | `_wait_search_results` `_sleep_jitter(2.0)` | ×0.7（有 lazy-recovery 兜底） |
+| lazy-render 微滚观察停留 | `_dump_with_lazy_recovery` | ×0.7 |
+| warmup 滚动间隔 / 详情停留 | `_idle_browse_warmup` | ×0.7 |
+| 善后 back 间隔 | `_post_search_browse` | ×0.7 |
+
+**明确不动**（反爬关键节奏，写死不随因子变）：
+
+- IME 每字输入节奏 + 输入后停顿（太快输入 = 机器指纹）
+- 冷启动等 PDD/splash（`_ensure_app_foreground` 显式 `pace=False`）
+- 设备解锁流程固定等待（263-324 行）
+- **burst 间静默 5-30 min**（账号"偶尔打开 APP"画像的关键）、daily quota
+- 滑动动画 duration（太快的滑动本身不自然）
+
+**实现**：`_sleep_jitter(base, jitter, pace=True)` 默认按因子缩放，关键
+等待传 `pace=False`；浏览停留用新 helper `_pace_uniform(lo, hi)`。因子
+clamp `[0.3, 1.0]`，防手滑设 0 导致零等待裸奔。启动 banner 打印
+`humanize_pace=0.70 (FASTER)`。
+
+**启用方式**：家里 worker 的 `.env` 加 `HUMANIZE_PACE=0.7` 后重启 worker，
+看启动日志 banner 确认生效。想再快可降到 0.6；不建议 < 0.5。
+
+### Day 4 调度参数远程配置（2026-05-29）
+
+把 worker 的拟人化/调度参数从"home Windows 的 `.env` 文件"搬到 backend，
+**前端可改 → DB → worker 心跳拉取热更新**，不用再远程桌面进去改文件+重启。
+
+**数据流**：
+
+```
+前端 Ops 面板
+  │ PUT /api/v1/pdd-worker-config/  {patch:{humanize_pace:0.7}}
+  ▼
+backend 校验(范围+min≤max) → 写 system_configs 一行 JSON
+  │ key=pdd_worker_runtime_config  value_type=json
+  ▼
+home worker 每个心跳周期(≤45s)
+  GET /api/v1/pdd-worker/runtime-config (worker token)
+  → apply_remote_config() 用 global 热更新模块常量
+  → 下一个 burst / 下一次 intra-gap / 下一次浏览停留立即按新值走
+```
+
+**可远程调的参数**（11 个，全部带范围校验，见
+`app/services/pdd_worker_config.py` 的 `PARAM_SPECS`）：
+
+| 参数 | 范围 | 默认 | 分组 |
+|---|---|---|---|
+| `humanize_pace` | 0.3–1.0 | 1.0 | 节奏 |
+| `burst_size_min/max` | 1–10 / 1–15 | 3 / 5 | 阵发 |
+| `intra_burst_gap_seconds_min/max` | 0–120 / 0–300 | 5 / 30 | 阵发 |
+| `inter_burst_gap_minutes_min/max` | 0–120 / 0–240 | 5 / 30 | 阵发 |
+| `burst_idle_timeout_seconds_min/max` | 10–600 / 10–1200 | 45 / 180 | 阵发 |
+| `daily_search_quota` | 1–500 | 30 | 配额 |
+| `emergency_priority_threshold` | 1–100 | 8 | 配额 |
+
+**后端 API**：
+
+| endpoint | 鉴权 | 用途 |
+|---|---|---|
+| `GET /api/v1/pdd-worker/runtime-config` | worker token | worker 拉取 |
+| `GET /api/v1/pdd-worker-config/` | 登录用户 | 前端读当前值 |
+| `GET /api/v1/pdd-worker-config/specs` | 登录用户 | 前端渲染表单（范围/标签/默认/分组） |
+| `PUT /api/v1/pdd-worker-config/` | 登录用户 | 前端改（提交 patch，可只含部分字段） |
+
+**关键设计**：
+
+- **复用 `system_configs` KV 表**，单行 JSON，无新表无 migration
+- **DB 只存被显式改过的覆盖项**；没有这行（从没在前端改过）时 worker 用
+  本地 `.env` 默认 → 完全向后兼容，行为与改造前一致
+- worker 端**用 `globals()` 热更新模块常量**：BurstScheduler 各方法运行时
+  按模块全局名动态查找，所以赋值即生效，几乎不动现有逻辑（零重构风险）
+- 拉取失败不抛、不阻塞采集主循环，沿用内存当前值
+- `humanize_pace` 同时同步到 `pdd_app_client`（它各自维护一份）
+
+**上线步骤**（代码已写好+验证，剩部署）：
+
+1. backend：重新构建/部署镜像（新增 `pdd_worker_config.py` service + router）
+2. worker：同步 `main.py` / `http_client.py` / `pdd_app_client.py` 重启一次
+3. 之后所有调参都在前端点，worker ≤45s 自动生效
+
+**前端待做**：Ops 面板加"采集节奏"配置卡，调 `/specs` 渲染表单 +
+`PUT` 提交。每个参数带 slider/输入框 + 范围提示 + help 文案（specs 里都有）。
+
 ### Phase 2 — 单机巩固（1-2 周）
 
 **目标**：在 1 台手机上把所有边界情况吃透，把"试错成本"消化在加机器之前。

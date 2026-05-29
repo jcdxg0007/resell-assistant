@@ -17,6 +17,8 @@ import logging
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
 from app.core.config import get_settings
+from app.core.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.pdd_app_queue import (
     PddAppResult,
     get_worker_status,
@@ -24,6 +26,7 @@ from app.services.pdd_app_queue import (
     push_result,
     record_worker_heartbeat,
 )
+from app.services.pdd_worker_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,3 +103,19 @@ async def post_heartbeat(
 async def get_status(_: None = Depends(verify_worker_token)):
     """供管理面或自检脚本调用：返回 worker 当前是否在线 + 连接的设备列表。"""
     return await get_worker_status()
+
+
+@router.get(
+    "/runtime-config",
+    summary="worker 拉运行时调度配置",
+    response_model=None,
+)
+async def get_runtime_config_for_worker(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_worker_token),
+):
+    """worker 每个心跳周期拉一次：返回完整调度配置（DB 覆盖项盖在默认值上）。
+
+    DB 里从没改过 → 返回纯默认值，worker 行为与改造前一致。
+    """
+    return await get_runtime_config(db)
