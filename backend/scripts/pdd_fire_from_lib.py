@@ -52,6 +52,15 @@ from app.services.pdd_app_queue import (  # noqa: E402
     enqueue_task,
     get_worker_status,
 )
+from app.services.pdd_search_run import persist_search_run  # noqa: E402
+
+
+def _price_stats(items: list[dict]) -> tuple[float | None, float | None]:
+    """从 items 里抽 price_min / price_median，用于历史落库的趋势分析。"""
+    prices = sorted(float(it["price"]) for it in items if it.get("price"))
+    if not prices:
+        return None, None
+    return prices[0], prices[len(prices) // 2]
 
 
 # pdd_mode → worker 端 mode 映射
@@ -277,7 +286,8 @@ async def main() -> int:
 
     print(f"── 全部完成（{total_elapsed:.1f}s）──\n")
 
-    # ─ 写回每条 keyword 的状态 + 打印 ─────────────────────────
+    # ─ 写回每条 keyword 的状态 + 落库历史 + 打印 ───────────────
+    run_source = "emergency" if args.emergency else "lib"
     worst = "ok"
     for r in results:
         if isinstance(r, Exception):
@@ -286,9 +296,16 @@ async def main() -> int:
             continue
         k, result = r
         now = datetime.now(timezone.utc)
+        cat_name = k.category.name if k.category else None
+        worker_mode = _MODE_MAP.get(k.pdd_mode, _MODE_MAP["fast"])[0]
         if result is None:
             print(f"  ⏱ '{k.text}'  ❌ 超时（{args.per_task_timeout}s）")
             await _write_back_result(k.id, "timeout", now)
+            await persist_search_run(
+                status="timeout", keyword_text=k.text, keyword_id=str(k.id),
+                source=run_source, category_name=cat_name, mode=worker_mode,
+                priority=priority,
+            )
             if worst == "ok":
                 worst = "timeout"
             continue
@@ -298,6 +315,16 @@ async def main() -> int:
         if bucket == "ok" and n_items == 0:
             bucket = "empty"
         await _write_back_result(k.id, bucket, now)
+        p_min, p_median = _price_stats(result.items)
+        await persist_search_run(
+            status=bucket, keyword_text=k.text, keyword_id=str(k.id),
+            task_id=result.task_id, source=run_source, category_name=cat_name,
+            mode=worker_mode, items_count=n_items,
+            price_min=p_min, price_median=p_median,
+            risk_signals=result.risk_signals, device_serial=result.device_serial,
+            account_name=result.account_name, elapsed_ms=result.elapsed_ms,
+            priority=priority, error=result.error,
+        )
         print(f"  · '{k.text}'  status={result.status}  items={n_items}  "
               f"elapsed_ms={result.elapsed_ms}  risks={result.risk_signals}")
         if result.items:

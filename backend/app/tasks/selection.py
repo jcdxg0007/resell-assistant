@@ -249,6 +249,7 @@ async def _pdd_search_via_app_worker(keyword: str, mode: str = "fast") -> dict:
     from app.services.pdd_app_queue import (
         PddAppTask, enqueue_task, await_result, get_worker_status,
     )
+    from app.services.pdd_search_run import persist_search_run
 
     status = await get_worker_status()
     if not status.get("online"):
@@ -278,6 +279,10 @@ async def _pdd_search_via_app_worker(keyword: str, mode: str = "fast") -> dict:
 
     if result is None:
         logger.warning(f"PDD APP worker: task_id={task.task_id} timed out")
+        await persist_search_run(
+            status="timeout", keyword_text=keyword, task_id=task.task_id,
+            source="selection", mode=mode,
+        )
         return {
             "platform": "pdd",
             "__unavailable__": True,
@@ -303,6 +308,12 @@ async def _pdd_search_via_app_worker(keyword: str, mode: str = "fast") -> dict:
             )
             for sig in (result.risk_signals or [])
         ]
+        await persist_search_run(
+            status=result.status, keyword_text=keyword, task_id=task.task_id,
+            source="selection", mode=mode, risk_signals=result.risk_signals,
+            device_serial=result.device_serial, account_name=result.account_name,
+            elapsed_ms=result.elapsed_ms, error=result.error,
+        )
         return {
             "platform": "pdd",
             "__unavailable__": True,
@@ -343,6 +354,13 @@ async def _pdd_search_via_app_worker(keyword: str, mode: str = "fast") -> dict:
         f"PDD APP worker: task_id={task.task_id} OK — "
         f"items={len(items)} price_min={payload['price_min']} "
         f"robust_min={payload['robust_price_min']} device={result.device_serial}"
+    )
+    await persist_search_run(
+        status="ok" if items else "empty",
+        keyword_text=keyword, task_id=task.task_id, source="selection", mode=mode,
+        items_count=len(items), price_min=payload["price_min"],
+        price_median=payload["price_median"], device_serial=result.device_serial,
+        account_name=result.account_name, elapsed_ms=result.elapsed_ms,
     )
     return payload
 
