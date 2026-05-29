@@ -359,7 +359,8 @@ async def _pdd_search_via_app_worker(keyword: str, mode: str = "fast") -> dict:
         status="ok" if items else "empty",
         keyword_text=keyword, task_id=task.task_id, source="selection", mode=mode,
         items_count=len(items), price_min=payload["price_min"],
-        price_median=payload["price_median"], device_serial=result.device_serial,
+        price_median=payload["price_median"], items=items,
+        device_serial=result.device_serial,
         account_name=result.account_name, elapsed_ms=result.elapsed_ms,
     )
     return payload

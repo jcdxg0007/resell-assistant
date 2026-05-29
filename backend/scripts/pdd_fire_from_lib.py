@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -53,6 +54,16 @@ from app.services.pdd_app_queue import (  # noqa: E402
     get_worker_status,
 )
 from app.services.pdd_search_run import persist_search_run  # noqa: E402
+from app.services.pdd_worker_config import get_runtime_config  # noqa: E402
+
+
+async def _target_count_range() -> tuple[int, int]:
+    """从运行时配置读单词商品量范围 [min,max]，前端「今日搜索任务」里可调。"""
+    async with AsyncSessionLocal() as db:
+        cfg = await get_runtime_config(db)
+    lo = int(cfg.get("target_count_min") or 8)
+    hi = int(cfg.get("target_count_max") or 20)
+    return (lo, hi) if lo <= hi else (hi, lo)
 
 
 def _price_stats(items: list[dict]) -> tuple[float | None, float | None]:
@@ -247,11 +258,15 @@ async def main() -> int:
     priority = 9 if args.emergency else 1
 
     # ─ 构造 + enqueue ───────────────────────────────────────────
+    # 单词商品量范围来自运行时配置（前端「今日搜索任务」可调），每词随机取
+    tc_lo, tc_hi = await _target_count_range()
+    print(f"单词商品量范围：[{tc_lo}, {tc_hi}]（每词随机取）\n")
     built: list[tuple[Keyword, PddAppTask]] = []
     for k in keywords:
-        worker_mode, target_count, scroll_screens = _MODE_MAP.get(
+        worker_mode, _default_tc, scroll_screens = _MODE_MAP.get(
             k.pdd_mode, _MODE_MAP["fast"]
         )
+        target_count = random.randint(tc_lo, tc_hi)
         task = PddAppTask(
             kind="search",
             payload={
@@ -321,7 +336,8 @@ async def main() -> int:
             task_id=result.task_id, source=run_source, category_name=cat_name,
             mode=worker_mode, items_count=n_items,
             price_min=p_min, price_median=p_median,
-            risk_signals=result.risk_signals, device_serial=result.device_serial,
+            risk_signals=result.risk_signals, items=result.items,
+            device_serial=result.device_serial,
             account_name=result.account_name, elapsed_ms=result.elapsed_ms,
             priority=priority, error=result.error,
         )

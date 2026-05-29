@@ -62,6 +62,9 @@ class PddSearchRun(Base, UUIDMixin, TimestampMixin):
     price_median: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     risk_signals: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # worker 返回的逐条商品（title/price/sales/badges 等），供前端按词查看采集到的商品。
+    # 体量小（单次几十条），直接 JSON 存行上，不另开表。migration: d0e1f2a3b4c5
+    items: Mapped[list | None] = mapped_column(JSON, nullable=True)
     device_serial: Mapped[str | None] = mapped_column(String(64), nullable=True)
     account_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

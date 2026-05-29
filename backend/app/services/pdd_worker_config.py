@@ -39,6 +39,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "daily_search_quota": 30,
     "emergency_priority_threshold": 8,
     "humanize_pace": 1.0,
+    "target_count_min": 8,
+    "target_count_max": 20,
 }
 
 # 每个参数的类型 / 范围 / 中文标签 / 分组 / 说明。
@@ -112,6 +114,19 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "label": "紧急任务优先级阈值", "group": "配额",
         "help": "priority ≥ 此值的任务跳过波间静默、插队首。普通任务 priority=1。"
                 "⚠ 必须与 backend pdd_app_queue 的同名配置一致，一般别改。",
+    },
+    "target_count_min": {
+        "type": "int", "min": 1, "max": 100,
+        "label": "单词商品量下限", "group": "采集量",
+        "pair": "target_count_max",
+        "help": "每次采集一个关键词，目标商品数在[下限,上限]之间随机取。"
+                "数越大滚屏越多、暴露面越大，新号建议保守。",
+    },
+    "target_count_max": {
+        "type": "int", "min": 1, "max": 100,
+        "label": "单词商品量上限", "group": "采集量",
+        "pair_min": "target_count_min",
+        "help": "每次采集一个关键词的目标商品数上限。",
     },
 }
 
@@ -207,5 +222,5 @@ def specs_for_frontend() -> dict[str, Any]:
     return {
         "params": PARAM_SPECS,
         "defaults": DEFAULT_RUNTIME_CONFIG,
-        "groups": ["节奏", "阵发", "配额"],
+        "groups": ["节奏", "阵发", "配额", "采集量"],
     }

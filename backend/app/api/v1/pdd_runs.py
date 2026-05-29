@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
@@ -23,7 +24,10 @@ from app.models.system import User
 from app.services.pdd_app_queue import (
     PddAppTask, await_result, enqueue_task, get_worker_status,
 )
-from app.services.pdd_search_run import list_runs, persist_search_run, summary
+from app.services.pdd_search_run import (
+    clear_today, console_data, keyword_items, list_runs, persist_search_run, summary,
+)
+from app.services.pdd_worker_config import get_runtime_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,7 +79,7 @@ async def _await_and_persist(task_id: str, keyword: str, mode: str, timeout_s: i
         await persist_search_run(
             status=bucket, keyword_text=keyword, task_id=task_id, source="manual",
             mode=mode, items_count=len(items), price_min=p_min, price_median=p_median,
-            risk_signals=result.risk_signals, device_serial=result.device_serial,
+            risk_signals=result.risk_signals, items=items, device_serial=result.device_serial,
             account_name=result.account_name, elapsed_ms=result.elapsed_ms,
             priority=_DISPATCH_PRIORITY, error=result.error,
         )
@@ -86,12 +90,16 @@ async def _await_and_persist(task_id: str, keyword: str, mode: str, timeout_s: i
 @router.post("/dispatch", summary="手动派发一个 PDD 搜索任务（紧急插队）")
 async def dispatch_search(
     body: DispatchBody,
+    db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """前端「PDD搜索 / 同时搜」用：紧急派一个 PDD search 任务（插队 + 跳静默）。
 
     立即返回 task_id（不阻塞），后台协程负责 await 结果并落库。前端稍后刷新
     «拼多多采集结果» 即可看到。worker 离线直接 503，让前端给出明确提示。
+
+    目标商品数在运行时配置的 [target_count_min, target_count_max] 之间随机取，
+    动态调整采集量。
     """
     wstatus = await get_worker_status()
     if not wstatus.get("online"):
@@ -101,9 +109,15 @@ async def dispatch_search(
         )
     mode = "deep" if body.mode == "deep" else "fast"
     task_timeout = 180 if mode == "deep" else 90
+    cfg = await get_runtime_config(db)
+    lo = int(cfg.get("target_count_min") or 8)
+    hi = int(cfg.get("target_count_max") or 20)
+    if lo > hi:
+        lo, hi = hi, lo
+    target_count = random.randint(lo, hi)
     task = PddAppTask(
         kind="search",
-        payload={"keyword": body.keyword.strip(), "mode": mode},
+        payload={"keyword": body.keyword.strip(), "mode": mode, "target_count": target_count},
         priority=_DISPATCH_PRIORITY,
         timeout_s=task_timeout,
     )
@@ -115,6 +129,35 @@ async def dispatch_search(
     bg.add_done_callback(_bg_tasks.discard)
     logger.info(f"pdd dispatch: task_id={task.task_id} keyword='{body.keyword}' mode={mode}")
     return {"ok": True, "task_id": task.task_id, "keyword": body.keyword.strip(), "mode": mode}
+
+
+@router.get("/console", summary="今日搜索任务控制台（统计+待采集/已采集池+商品量范围+worker）")
+async def read_console(
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    data = await console_data(db)
+    data["worker"] = await get_worker_status()
+    return data
+
+
+@router.get("/items", summary="某关键词今日采集到的逐条商品")
+async def read_items(
+    keyword: str = Query(..., min_length=1, description="关键词文本"),
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return await keyword_items(db, keyword)
+
+
+@router.delete("/today", summary="清空今日采集记录（给 keyword 则只清该词，否则清全部）")
+async def clear_today_runs(
+    keyword: str | None = Query(None, description="只清这个关键词；留空清今日全部"),
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    deleted = await clear_today(db, keyword)
+    return {"ok": True, "deleted": deleted}
 
 
 @router.get("/", summary="任务历史流水（分页）")

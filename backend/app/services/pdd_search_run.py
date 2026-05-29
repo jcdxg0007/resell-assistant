@@ -12,13 +12,25 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
 from app.models.pdd_run import PddSearchRun
+from app.models.selection import Keyword
 
 logger = logging.getLogger(__name__)
+
+# 用户在中国，「今日」按东八区日界算（数据库 created_at 是带时区的 UTC，
+# 与带时区的 day_start 直接比较即可）。
+_CN_TZ = timezone(timedelta(hours=8))
+_PDD_KW_FILTER = text("selection_keywords.target_platforms::jsonb @> '[\"pdd\"]'::jsonb")
+
+
+def _cn_day_start() -> datetime:
+    now_cn = datetime.now(_CN_TZ)
+    return now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 async def persist_search_run(
@@ -34,6 +46,7 @@ async def persist_search_run(
     price_min: float | None = None,
     price_median: float | None = None,
     risk_signals: list | None = None,
+    items: list | None = None,
     device_serial: str | None = None,
     account_name: str | None = None,
     elapsed_ms: int | None = None,
@@ -55,6 +68,7 @@ async def persist_search_run(
                 price_min=price_min,
                 price_median=price_median,
                 risk_signals=risk_signals or None,
+                items=items or None,
                 device_serial=device_serial,
                 account_name=account_name,
                 elapsed_ms=elapsed_ms,
@@ -125,6 +139,152 @@ async def list_runs(
         "total": total,
         "items": [_row_to_dict(r) for r in rows],
     }
+
+
+async def console_data(db: AsyncSession) -> dict[str, Any]:
+    """「今日搜索任务」控制台：今日统计 + 待采集池 + 已采集池 + 商品量范围。
+
+    - 今日：按东八区日界
+    - 待采集池：词库里 pdd_safe+is_active+schedule_enabled 且 'pdd'∈平台、
+      但今天还没跑过（按 keyword_id 判定）的词，按最久没跑优先
+    - 已采集池：今天跑过的词（按 keyword_text 去重，取每词今天最新一条）
+    """
+    day_start = _cn_day_start()
+
+    # ── 今日统计 ──
+    stat_stmt = (
+        select(PddSearchRun.status, func.count(),
+               func.coalesce(func.sum(PddSearchRun.items_count), 0))
+        .where(PddSearchRun.created_at >= day_start)
+        .group_by(PddSearchRun.status)
+    )
+    by_status: dict[str, int] = {}
+    items_total = 0
+    for st, cnt, items in (await db.execute(stat_stmt)).all():
+        by_status[st] = cnt
+        items_total += int(items or 0)
+    today_total = sum(by_status.values())
+    ok_like = by_status.get("ok", 0) + by_status.get("partial", 0)
+    success_rate = round(ok_like / today_total * 100, 1) if today_total else None
+
+    # ── 已采集池（今天跑过的词，按 text 去重取最新）──
+    runs_today_stmt = (
+        select(PddSearchRun)
+        .where(PddSearchRun.created_at >= day_start)
+        .order_by(PddSearchRun.created_at.desc())
+    )
+    collected: list[dict[str, Any]] = []
+    seen_text: set[str] = set()
+    done_keyword_ids: set[str] = set()
+    for r in (await db.execute(runs_today_stmt)).scalars().all():
+        if r.keyword_id:
+            done_keyword_ids.add(str(r.keyword_id))
+        if r.keyword_text in seen_text:
+            continue
+        seen_text.add(r.keyword_text)
+        collected.append({
+            "keyword_text": r.keyword_text,
+            "category_name": r.category_name,
+            "status": r.status,
+            "items_count": r.items_count,
+            "run_id": str(r.id),
+            "last_run_at": r.created_at.isoformat() if r.created_at else None,
+        })
+
+    # ── 待采集池（词库里今天还没跑的词）──
+    pending_stmt = (
+        select(Keyword)
+        .options(selectinload(Keyword.category))
+        .where(Keyword.pdd_safe.is_(True))
+        .where(Keyword.is_active.is_(True))
+        .where(Keyword.schedule_enabled.is_(True))
+        .where(_PDD_KW_FILTER)
+        .order_by(Keyword.pdd_last_searched_at.asc().nullsfirst(), Keyword.text)
+        .limit(300)
+    )
+    pending: list[dict[str, Any]] = []
+    for k in (await db.execute(pending_stmt)).scalars().all():
+        if str(k.id) in done_keyword_ids:
+            continue
+        pending.append({
+            "keyword_id": str(k.id),
+            "text": k.text,
+            "category_name": k.category.name if k.category else None,
+            "pdd_mode": k.pdd_mode,
+        })
+
+    # ── 今日风控命中（重点关注）──
+    risk_stmt = (
+        select(PddSearchRun)
+        .where(PddSearchRun.created_at >= day_start)
+        .where(PddSearchRun.status == "risk_blocked")
+        .order_by(PddSearchRun.created_at.desc())
+        .limit(10)
+    )
+    recent_risk = [
+        {
+            "id": str(r.id),
+            "keyword_text": r.keyword_text,
+            "risk_signals": r.risk_signals or [],
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in (await db.execute(risk_stmt)).scalars().all()
+    ]
+
+    # ── 商品量范围（来自 worker 运行时配置）──
+    from app.services.pdd_worker_config import get_runtime_config
+    cfg = await get_runtime_config(db)
+
+    return {
+        "stats": {
+            "total": today_total,
+            "items_total": items_total,
+            "success_rate": success_rate,
+            "risk_blocked": by_status.get("risk_blocked", 0),
+        },
+        "target_count_min": cfg.get("target_count_min"),
+        "target_count_max": cfg.get("target_count_max"),
+        "pending": pending,
+        "collected": collected,
+        "recent_risk": recent_risk,
+    }
+
+
+async def keyword_items(db: AsyncSession, keyword_text: str) -> dict[str, Any]:
+    """取某关键词今天最新一条采集记录的逐条商品，给前端结果区展示。"""
+    day_start = _cn_day_start()
+    stmt = (
+        select(PddSearchRun)
+        .where(PddSearchRun.created_at >= day_start)
+        .where(PddSearchRun.keyword_text == keyword_text)
+        .order_by(PddSearchRun.created_at.desc())
+        .limit(1)
+    )
+    r = (await db.execute(stmt)).scalar_one_or_none()
+    if r is None:
+        return {"keyword_text": keyword_text, "items": [], "found": False}
+    return {
+        "keyword_text": keyword_text,
+        "found": True,
+        "run_id": str(r.id),
+        "status": r.status,
+        "items_count": r.items_count,
+        "price_min": r.price_min,
+        "price_median": r.price_median,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "items": r.items or [],
+    }
+
+
+async def clear_today(db: AsyncSession, keyword_text: str | None = None) -> int:
+    """清空今日采集记录。keyword_text 给定则只清该词；否则清今日全部。返回删除条数。"""
+    day_start = _cn_day_start()
+    stmt = delete(PddSearchRun).where(PddSearchRun.created_at >= day_start)
+    if keyword_text:
+        stmt = stmt.where(PddSearchRun.keyword_text == keyword_text)
+    res = await db.execute(stmt)
+    await db.commit()
+    return res.rowcount or 0
 
 
 async def summary(db: AsyncSession, *, recent_limit: int = 15) -> dict[str, Any]:
