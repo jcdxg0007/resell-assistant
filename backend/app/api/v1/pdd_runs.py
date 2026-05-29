@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
@@ -22,8 +23,9 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.system import User
 from app.services.pdd_app_queue import (
-    PddAppTask, await_result, enqueue_task, get_worker_status,
-    is_collection_paused, purge_queue, queue_depth, set_collection_paused,
+    PddAppTask, await_result, clear_batch_plan, enqueue_task, get_worker_status,
+    is_collection_paused, purge_queue, queue_depth, set_batch_plan,
+    set_collection_paused,
 )
 from app.services.pdd_search_run import (
     clear_today, console_data, keyword_items, list_runs, persist_search_run, summary,
@@ -184,12 +186,27 @@ async def batch_start(
     remaining = max(0, quota - int(data["stats"]["total"]))
     batch = pending[:remaining]
 
+    # ── PDD 预估开始节奏（粗略）：按 worker BurstScheduler 平均节奏估算 ──
+    # worker 看不到，只能按配置平均值估：一波 bs 个，波内每个间隔 intra+搜索耗时，
+    # 波之间静默 inter。标"预估"，会有几分钟误差。
+    def _avg(a: float, b: float) -> float:
+        return (float(a) + float(b)) / 2
+    bs = max(1, round(_avg(cfg.get("burst_size_min", 3), cfg.get("burst_size_max", 5))))
+    intra = _avg(cfg.get("intra_burst_gap_seconds_min", 5), cfg.get("intra_burst_gap_seconds_max", 30))
+    inter = _avg(cfg.get("inter_burst_gap_minutes_min", 5), cfg.get("inter_burst_gap_minutes_max", 30)) * 60
+    per_task = 45.0  # fast 模式单次搜索 worker 端约耗时
+    cycle_task = intra + per_task
+    burst_block = bs * cycle_task + inter
+
+    now = time.time()
+    plan: dict[str, dict] = {}
+
     # 闲鱼侧错峰：闲鱼有自己的合规闸（≥60s 最小间隔 + 40/h 上限），
     # 一次性全派会被白白 rate-limit 跳过。用 countdown 拉开 ~90s 一个，
     # 顺着平台允许节奏涓流进去（PDD 侧无需错峰，worker BurstScheduler 自己排）。
     xy_offset = 0
     xy_scheduled = 0
-    for kw in batch:
+    for idx, kw in enumerate(batch):
         task = PddAppTask(
             kind="search",
             payload={"keyword": kw["text"], "mode": "fast", "target_count": random.randint(lo, hi)},
@@ -205,15 +222,23 @@ async def batch_start(
         ))
         _batch_tasks.add(bg)
         bg.add_done_callback(_batch_tasks.discard)
+
+        pdd_sec = (idx // bs) * burst_block + (idx % bs) * cycle_task
+        entry: dict[str, float] = {"pdd": now + pdd_sec}
+
         if body.both_platforms:
             try:
                 from app.tasks.selection import instant_search
                 instant_search.apply_async(args=(kw["text"], "xianyu"), countdown=xy_offset)
+                entry["xianyu"] = now + xy_offset
                 xy_offset += random.randint(70, 110)
                 xy_scheduled += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"batch xianyu dispatch failed (kw='{kw['text']}'): {exc}")
 
+        plan[kw["text"]] = entry
+
+    await set_batch_plan(plan)
     logger.info(
         f"pdd batch start: enqueued={len(batch)} xianyu_scheduled={xy_scheduled} "
         f"both={body.both_platforms} (pending={len(pending)}, quota_left={remaining})"
@@ -234,6 +259,7 @@ async def batch_pause(
     """
     await set_collection_paused(True)
     purged = await purge_queue()
+    await clear_batch_plan()
     for t in list(_batch_tasks):
         t.cancel()
     _batch_tasks.clear()

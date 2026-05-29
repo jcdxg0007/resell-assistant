@@ -31,8 +31,8 @@ const decisionColors: Record<string, string> = {
 };
 
 // ── PDD 侧 ────────────────────────────────────────────────────
-interface PendingKw { keyword_id: string; text: string; category_name: string | null; pdd_mode: string; }
-interface CollectedKw { keyword_text: string; category_name: string | null; status: string; items_count: number; run_id: string; last_run_at: string | null; }
+interface PendingKw { keyword_id: string; text: string; category_name: string | null; pdd_mode: string; pdd_eta_sec?: number | null; xianyu_eta_sec?: number | null; }
+interface CollectedKw { keyword_text: string; category_name: string | null; status: string; items_count: number; run_id: string; last_run_at: string | null; pdd_last_at?: string | null; xianyu_last_at?: string | null; }
 interface RiskItem { id: string; keyword_text: string; risk_signals: string[]; created_at: string | null; }
 interface PddProduct { title?: string; price?: number | string; sales?: number; badges?: string[]; }
 
@@ -64,6 +64,18 @@ const pddStatusTag = (s: string) => {
 const fmtTime = (iso: string | null) => {
   if (!iso) return '—';
   return new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+};
+
+const fmtHM = (iso: string | null | undefined) => {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+};
+
+const fmtEta = (sec: number | null | undefined) => {
+  if (sec == null) return '—';
+  if (sec < 60) return '即将';
+  if (sec < 3600) return `~${Math.round(sec / 60)}分`;
+  return `~${(sec / 3600).toFixed(1)}时`;
 };
 
 const MultiPlatformCompare: React.FC = () => {
@@ -387,7 +399,22 @@ const MultiPlatformCompare: React.FC = () => {
         title="今日搜索任务"
         size="small"
         loading={consLoading}
-        extra={
+      >
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space size="large" wrap>
+            <Text>今日任务 <Text strong>{stats?.total ?? 0}</Text></Text>
+            <Text type="secondary">待采集 <Text strong>{cons?.pending.length ?? 0}</Text></Text>
+            <Space size={8}>
+              <Text type="secondary">单词商品量</Text>
+              <InputNumber size="small" min={1} max={100} value={tcMin} onChange={(v) => setTcMin(v)} style={{ width: 72 }} placeholder="下限" />
+              <Text type="secondary">~</Text>
+              <InputNumber size="small" min={1} max={100} value={tcMax} onChange={(v) => setTcMax(v)} style={{ width: 72 }} placeholder="上限" />
+              <Button size="small" type="primary" loading={savingRange} onClick={saveRange}>保存</Button>
+              <Tooltip title="每次采集一个关键词，目标商品数在此区间内随机取。worker 下个心跳生效。">
+                <Text type="secondary" style={{ fontSize: 12 }}>采集量按此范围动态调整</Text>
+              </Tooltip>
+            </Space>
+          </Space>
           <Space size={12} wrap>
             <Tooltip title="开启后：批量任务和待采集池的「采集」按钮，每个词都同时跑闲鱼+PDD">
               <Space size={4}>
@@ -395,28 +422,13 @@ const MultiPlatformCompare: React.FC = () => {
                 <Switch size="small" checked={bothPlatforms} onChange={setBothPlatforms} />
               </Space>
             </Tooltip>
-            {(cons?.queued ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 12 }}>队列 {cons?.queued}</Text>}
-            {cons?.paused && <Tag color="orange">已暂停</Tag>}
             {batchRunning ? (
               <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading} onClick={pauseBatch}>暂停任务</Button>
             ) : (
               <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={batchLoading} onClick={startBatch}>开始任务</Button>
             )}
-          </Space>
-        }
-      >
-        <Space size="large" wrap>
-          <Text>今日任务 <Text strong>{stats?.total ?? 0}</Text></Text>
-          <Text type="secondary">待采集 <Text strong>{cons?.pending.length ?? 0}</Text></Text>
-          <Space size={8}>
-            <Text type="secondary">单词商品量</Text>
-            <InputNumber size="small" min={1} max={100} value={tcMin} onChange={(v) => setTcMin(v)} style={{ width: 72 }} placeholder="下限" />
-            <Text type="secondary">~</Text>
-            <InputNumber size="small" min={1} max={100} value={tcMax} onChange={(v) => setTcMax(v)} style={{ width: 72 }} placeholder="上限" />
-            <Button size="small" type="primary" loading={savingRange} onClick={saveRange}>保存</Button>
-            <Tooltip title="每次采集一个关键词，目标商品数在此区间内随机取。worker 下个心跳生效。">
-              <Text type="secondary" style={{ fontSize: 12 }}>采集量按此范围动态调整</Text>
-            </Tooltip>
+            {(cons?.queued ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 12 }}>队列 {cons?.queued}</Text>}
+            {cons?.paused && <Tag color="orange">已暂停</Tag>}
           </Space>
         </Space>
       </Card>
@@ -450,9 +462,16 @@ const MultiPlatformCompare: React.FC = () => {
                       <Button key="go" size="small" type="link" icon={<ThunderboltOutlined />} onClick={() => dispatchPending(p.text)}>采集</Button>,
                     ]}
                   >
-                    <Space size={6}>
-                      <Text>{p.text}</Text>
-                      {p.category_name && <Tag>{p.category_name}</Tag>}
+                    <Space direction="vertical" size={0}>
+                      <Space size={6}>
+                        <Text>{p.text}</Text>
+                        {p.category_name && <Tag>{p.category_name}</Tag>}
+                      </Space>
+                      {(p.pdd_eta_sec != null || p.xianyu_eta_sec != null) && (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          预估开始 PDD：{fmtEta(p.pdd_eta_sec)}　闲鱼：{fmtEta(p.xianyu_eta_sec)}
+                        </Text>
+                      )}
                     </Space>
                   </List.Item>
                 )}
@@ -472,10 +491,15 @@ const MultiPlatformCompare: React.FC = () => {
                     onClick={() => loadItems(c.keyword_text)}
                     style={{ cursor: 'pointer', background: selectedKw === c.keyword_text ? '#e6f4ff' : undefined, paddingInline: 8, borderRadius: 4 }}
                   >
-                    <Space size={6}>
-                      <Text strong={selectedKw === c.keyword_text}>{c.keyword_text}</Text>
-                      {pddStatusTag(c.status)}
-                      <Text type="secondary" style={{ fontSize: 12 }}>{c.items_count} 件</Text>
+                    <Space direction="vertical" size={0}>
+                      <Space size={6}>
+                        <Text strong={selectedKw === c.keyword_text}>{c.keyword_text}</Text>
+                        {pddStatusTag(c.status)}
+                        <Text type="secondary" style={{ fontSize: 12 }}>{c.items_count} 件</Text>
+                      </Space>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        完成 PDD：{fmtHM(c.pdd_last_at ?? c.last_run_at)}　闲鱼：{fmtHM(c.xianyu_last_at)}
+                      </Text>
                     </Space>
                   </List.Item>
                 )}

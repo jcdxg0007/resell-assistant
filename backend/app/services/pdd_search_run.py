@@ -188,8 +188,25 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
             "status": r.status,
             "items_count": r.items_count,
             "run_id": str(r.id),
+            "pdd_last_at": r.created_at.isoformat() if r.created_at else None,
             "last_run_at": r.created_at.isoformat() if r.created_at else None,
+            "xianyu_last_at": None,  # 下面补
         })
+
+    # 已采集词的闲鱼完成时间：该词闲鱼商品最近一次入库时间（category=词）
+    if seen_text:
+        from app.models.product import Product
+        xy_rows = (await db.execute(
+            select(Product.category, func.max(Product.created_at))
+            .where(Product.source_platform == "xianyu")
+            .where(Product.category.in_(seen_text))
+            .group_by(Product.category)
+        )).all()
+        xy_last = {cat: ts for cat, ts in xy_rows}
+        for c in collected:
+            ts = xy_last.get(c["keyword_text"])
+            if ts:
+                c["xianyu_last_at"] = ts.isoformat()
 
     # ── 待采集池（词库里今天还没跑的词）──
     pending_stmt = (
@@ -202,15 +219,29 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
         .order_by(Keyword.pdd_last_searched_at.asc().nullsfirst(), Keyword.text)
         .limit(300)
     )
+    # 批量任务的预计开始时刻（开始任务时写入 Redis），算每个待采集词的预估倒计时
+    from app.services.pdd_app_queue import get_batch_plan
+    plan = await get_batch_plan()
+    import time as _time
+    now_ts = _time.time()
+
+    def _eta_sec(ts: float | None) -> int | None:
+        if not ts:
+            return None
+        return max(0, int(ts - now_ts))
+
     pending: list[dict[str, Any]] = []
     for k in (await db.execute(pending_stmt)).scalars().all():
         if str(k.id) in done_keyword_ids:
             continue
+        p = plan.get(k.text) or {}
         pending.append({
             "keyword_id": str(k.id),
             "text": k.text,
             "category_name": k.category.name if k.category else None,
             "pdd_mode": k.pdd_mode,
+            "pdd_eta_sec": _eta_sec(p.get("pdd")),
+            "xianyu_eta_sec": _eta_sec(p.get("xianyu")),
         })
 
     # ── 今日风控命中（重点关注）──

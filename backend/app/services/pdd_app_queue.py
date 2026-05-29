@@ -183,6 +183,33 @@ async def is_collection_paused() -> bool:
     return bool(await redis_client.get(COLLECTION_PAUSED_KEY))
 
 
+# 批量任务的「预计开始时刻」计划：{keyword_text: {"pdd": epoch_ts, "xianyu": epoch_ts|None}}
+# 开始任务时写入，console 据此算每个待采集词的预估开始倒计时。6h 自动过期。
+BATCH_PLAN_KEY = "pdd_app:batch_plan"
+_BATCH_PLAN_TTL = 6 * 3600
+
+
+async def set_batch_plan(plan: dict[str, dict]) -> None:
+    if plan:
+        await redis_client.set(BATCH_PLAN_KEY, json.dumps(plan), ex=_BATCH_PLAN_TTL)
+    else:
+        await redis_client.delete(BATCH_PLAN_KEY)
+
+
+async def get_batch_plan() -> dict[str, dict]:
+    raw = await redis_client.get(BATCH_PLAN_KEY)
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+async def clear_batch_plan() -> None:
+    await redis_client.delete(BATCH_PLAN_KEY)
+
+
 async def get_worker_status() -> dict[str, Any]:
     """供管理面 / 自检脚本查 worker 在不在。"""
     raw = await redis_client.get(WORKER_HEARTBEAT_KEY)
