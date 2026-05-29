@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -65,6 +65,29 @@ async def xianyu_recommendations(
         })
 
     return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
+@router.delete("/xianyu/products", summary="清空闲鱼采集结果（给 category 则只清该词，否则清全部）")
+async def clear_xianyu_products(
+    category: str | None = Query(None, description="只清这个关键词；留空清全部闲鱼采集结果"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """软删除（is_active=False）闲鱼采集到的商品，从推荐/采集结果里移除。
+
+    与 PDD 的 DELETE /pdd-runs/today 对齐：清当前词 = category 给定；清全部 = 留空。
+    软删除可恢复，且推荐接口按 is_active 过滤，清掉后立即从结果消失。
+    """
+    stmt = (
+        update(Product)
+        .where(Product.source_platform == "xianyu")
+        .where(Product.is_active == True)  # noqa: E712
+    )
+    if category:
+        stmt = stmt.where(Product.category == category)
+    res = await db.execute(stmt.values(is_active=False))
+    await db.commit()
+    return {"ok": True, "deactivated": res.rowcount or 0}
 
 
 @router.post("/score/{product_id}", summary="触发商品评分")

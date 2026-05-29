@@ -289,6 +289,24 @@ const MultiPlatformCompare: React.FC = () => {
     } catch { message.error('清空失败'); }
   };
 
+  // 闲鱼采集结果清空（软删除 is_active=False）
+  const clearXianyuCurrent = async () => {
+    if (!selectedKw) return;
+    try {
+      const res = await api.delete('/selection/xianyu/products', { params: { category: selectedKw } });
+      message.success(`已清空闲鱼「${selectedKw}」结果（${res.data.deactivated} 条）`);
+      fetchXianyu(1, selectedKw);
+    } catch { message.error('清空失败'); }
+  };
+
+  const clearXianyuAll = async () => {
+    try {
+      const res = await api.delete('/selection/xianyu/products');
+      message.success(`已清空闲鱼全部采集结果（${res.data.deactivated} 条）`);
+      fetchXianyu(1, selectedKw);
+    } catch { message.error('清空失败'); }
+  };
+
   const showDetail = (item: ProductItem) => { setDetailItem(item); setDetailVisible(true); };
 
   // ── 表格列 ──────────────────────────────────────────────
@@ -467,55 +485,70 @@ const MultiPlatformCompare: React.FC = () => {
         </Col>
       </Row>
 
-      {/* 采集结果 */}
-      <Card
-        title={<Space>采集结果{selectedKw && <Tag color="red">{selectedKw}</Tag>}</Space>}
-        styles={{ body: { padding: 12 } }}
-        extra={
-          <Space size="large" wrap>
-            <Text type="secondary">成功率 <Text strong style={{ color: (stats?.success_rate ?? 0) >= 80 ? '#52c41a' : '#faad14' }}>{stats?.success_rate ?? 0}%</Text></Text>
-            <Text type="secondary">抓到商品 <Text strong>{stats?.items_total ?? 0}</Text></Text>
-            <Text type="secondary">风控命中 <Text strong style={{ color: (stats?.risk_blocked ?? 0) > 0 ? '#cf1322' : undefined }}>{stats?.risk_blocked ?? 0}</Text></Text>
-            <Popconfirm title={selectedKw ? `清空「${selectedKw}」今日结果？` : '请先选择一个已采集关键词'} onConfirm={clearCurrent} okText="清空" cancelText="取消" disabled={!selectedKw}>
-              <Button size="small" icon={<DeleteOutlined />} disabled={!selectedKw}>清空当前结果</Button>
-            </Popconfirm>
-            <Popconfirm title="清空今日全部采集结果？此操作不可恢复" onConfirm={clearAll} okText="清空全部" okButtonProps={{ danger: true }} cancelText="取消">
-              <Button size="small" danger icon={<DeleteOutlined />}>清空全部结果</Button>
-            </Popconfirm>
-          </Space>
-        }
-      >
-        {selectedKw ? (
-          <Table<PddProduct>
-            size="small"
-            rowKey={(_, i) => String(i)}
-            loading={itemsLoading}
-            columns={itemColumns}
-            dataSource={items}
-            pagination={{ pageSize: 20, size: 'small', showSizeChanger: false }}
-            locale={{ emptyText: '该关键词本次未采到商品' }}
-          />
-        ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点上方「今日已采集关键词」查看采到的商品" />
-        )}
-      </Card>
+      {/* PDD采集结果 + 闲鱼采集结果 并排 */}
+      <Row gutter={16}>
+        <Col xs={24} xl={12}>
+          <Card
+            title={<Space><Tag color="red">PDD</Tag>采集结果{selectedKw && <Tag>{selectedKw}</Tag>}</Space>}
+            styles={{ body: { padding: 12 } }}
+            extra={
+              <Space size={8} wrap>
+                <Text type="secondary">成功率 <Text strong style={{ color: (stats?.success_rate ?? 0) >= 80 ? '#52c41a' : '#faad14' }}>{stats?.success_rate ?? 0}%</Text></Text>
+                <Text type="secondary">商品 <Text strong>{stats?.items_total ?? 0}</Text></Text>
+                <Text type="secondary">风控 <Text strong style={{ color: (stats?.risk_blocked ?? 0) > 0 ? '#cf1322' : undefined }}>{stats?.risk_blocked ?? 0}</Text></Text>
+                <Popconfirm title={selectedKw ? `清空 PDD「${selectedKw}」今日结果？` : '请先选择一个已采集关键词'} onConfirm={clearCurrent} okText="清空" cancelText="取消" disabled={!selectedKw}>
+                  <Button size="small" icon={<DeleteOutlined />} disabled={!selectedKw}>清空当前结果</Button>
+                </Popconfirm>
+                <Popconfirm title="清空 PDD 今日全部采集结果？" onConfirm={clearAll} okText="清空全部" okButtonProps={{ danger: true }} cancelText="取消">
+                  <Button size="small" danger icon={<DeleteOutlined />}>清空全部结果</Button>
+                </Popconfirm>
+              </Space>
+            }
+          >
+            {selectedKw ? (
+              <Table<PddProduct>
+                size="small"
+                rowKey={(_, i) => String(i)}
+                loading={itemsLoading}
+                columns={itemColumns}
+                dataSource={items}
+                pagination={{ pageSize: 20, size: 'small', showSizeChanger: false }}
+                locale={{ emptyText: '该关键词本次未采到商品' }}
+              />
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点上方「今日已采集关键词」查看采到的商品" />
+            )}
+          </Card>
+        </Col>
 
-      {/* 闲鱼选品结果（按选中词同词比价；未选词时显示全局推荐）*/}
-      <Card
-        title={<Space><Tag color="gold">闲鱼</Tag>选品结果{selectedKw ? <Tag>{selectedKw}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>（全局推荐）</Text>}</Space>}
-        extra={<Text type="secondary">共 {xyTotal}</Text>}
-        styles={{ body: { padding: 12 } }}
-      >
-        <Table<ProductItem>
-          size="small"
-          columns={xianyuColumns}
-          dataSource={xyData}
-          rowKey={(r) => r.product.id}
-          loading={xyLoading}
-          pagination={{ current: xyPage, total: xyTotal, pageSize: 10, size: 'small', onChange: (p) => fetchXianyu(p, selectedKw), showSizeChanger: false }}
-          locale={{ emptyText: selectedKw ? `闲鱼暂无「${selectedKw}」的选品数据（需先对该词跑过闲鱼搜索）` : '暂无闲鱼选品数据' }}
-        />
-      </Card>
+        <Col xs={24} xl={12}>
+          <Card
+            title={<Space><Tag color="gold">闲鱼</Tag>采集结果{selectedKw ? <Tag>{selectedKw}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>（全局推荐）</Text>}</Space>}
+            styles={{ body: { padding: 12 } }}
+            extra={
+              <Space size={8} wrap>
+                <Text type="secondary">共 {xyTotal}</Text>
+                <Popconfirm title={selectedKw ? `清空闲鱼「${selectedKw}」结果？` : '请先选择一个已采集关键词'} onConfirm={clearXianyuCurrent} okText="清空" cancelText="取消" disabled={!selectedKw}>
+                  <Button size="small" icon={<DeleteOutlined />} disabled={!selectedKw}>清空当前结果</Button>
+                </Popconfirm>
+                <Popconfirm title="清空闲鱼全部采集结果？（软删除，可恢复）" onConfirm={clearXianyuAll} okText="清空全部" okButtonProps={{ danger: true }} cancelText="取消">
+                  <Button size="small" danger icon={<DeleteOutlined />}>清空全部结果</Button>
+                </Popconfirm>
+              </Space>
+            }
+          >
+            <Table<ProductItem>
+              size="small"
+              columns={xianyuColumns}
+              dataSource={xyData}
+              rowKey={(r) => r.product.id}
+              loading={xyLoading}
+              pagination={{ current: xyPage, total: xyTotal, pageSize: 10, size: 'small', onChange: (p) => fetchXianyu(p, selectedKw), showSizeChanger: false }}
+              locale={{ emptyText: selectedKw ? `闲鱼暂无「${selectedKw}」的采集数据（需先对该词跑过闲鱼搜索）` : '暂无闲鱼采集数据' }}
+            />
+          </Card>
+        </Col>
+      </Row>
 
       {/* 采集节奏控制窗口 */}
       <Drawer title="PDD 采集节奏控制" width={560} open={rhythmOpen} onClose={() => setRhythmOpen(false)} destroyOnHidden>
