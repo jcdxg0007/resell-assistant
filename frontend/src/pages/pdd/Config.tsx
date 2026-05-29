@@ -25,12 +25,19 @@ interface Specs {
   groups: string[];
 }
 
+interface Props {
+  /** 嵌入抽屉/控制窗口时为 true：隐藏页面级标题（由外层容器提供标题）。 */
+  embedded?: boolean;
+}
+
 /**
- * PDD 采集节奏配置页。数据驱动：表单完全按后端 /pdd-worker-config/specs
+ * PDD 采集节奏配置。数据驱动：表单完全按后端 /pdd-worker-config/specs
  * 返回的参数元数据（范围/标签/help/分组）自动渲染，后端加参数前端无需改。
  * 保存只 PUT 改动过的字段（保持后端"DB 只存被改过项"的语义）。
+ *
+ * 既可作独立页，也可通过 embedded 嵌进「多平台比价」页的采集节奏控制窗口。
  */
-const PddConfig: React.FC = () => {
+const PddConfig: React.FC<Props> = ({ embedded = false }) => {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [specs, setSpecs] = useState<Specs | null>(null);
@@ -155,12 +162,8 @@ const PddConfig: React.FC = () => {
     );
   };
 
-  return (
-    <div>
-      <Title level={3} style={{ marginBottom: 4 }}>采集节奏配置</Title>
-      <Paragraph type="secondary">
-        调整 PDD 采集 worker 的拟人化节奏与配额。保存后家里 worker 会在下个心跳周期（≤45s）自动拉取生效，无需重启。
-      </Paragraph>
+  const body = (
+    <>
       <Alert
         type="warning"
         showIcon
@@ -168,12 +171,12 @@ const PddConfig: React.FC = () => {
         message="谨慎调整反爬相关参数"
         description="波间静默、每日配额、节奏因子调得过激进会增加账号被风控的风险。新号建议保守，稳定后再放宽。"
       />
-      <Card loading={loading}>
+      <Card loading={loading} variant={embedded ? 'borderless' : 'outlined'} styles={embedded ? { body: { padding: 0 } } : undefined}>
         <Form
           form={form}
           layout="vertical"
           onFinish={onFinish}
-          style={{ maxWidth: 720 }}
+          style={{ maxWidth: embedded ? '100%' : 720 }}
         >
           {specs?.groups.map((g) => renderGroup(g))}
           <Divider />
@@ -190,6 +193,20 @@ const PddConfig: React.FC = () => {
           </Space>
         </Form>
       </Card>
+    </>
+  );
+
+  if (embedded) {
+    return body;
+  }
+
+  return (
+    <div>
+      <Title level={3} style={{ marginBottom: 4 }}>采集节奏配置</Title>
+      <Paragraph type="secondary">
+        调整 PDD 采集 worker 的拟人化节奏与配额。保存后家里 worker 会在下个心跳周期（≤45s）自动拉取生效，无需重启。
+      </Paragraph>
+      {body}
     </div>
   );
 };

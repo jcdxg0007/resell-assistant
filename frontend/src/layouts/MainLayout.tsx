@@ -11,7 +11,6 @@ import {
   CustomerServiceOutlined,
   SettingOutlined,
   AppstoreOutlined,
-  ThunderboltOutlined,
 } from '@ant-design/icons';
 
 const { Header, Sider, Content } = Layout;
@@ -21,7 +20,7 @@ const menuItems = [
   {
     key: 'selection', icon: <SearchOutlined />, label: '选品助手',
     children: [
-      { key: '/selection/xianyu', label: '闲鱼比价' },
+      { key: '/selection/xianyu', label: '多平台比价' },
       { key: '/selection/xhs', label: '小红书选品' },
       { key: '/selection/virtual', label: '虚拟商品' },
     ],
@@ -31,13 +30,6 @@ const menuItems = [
     children: [
       { key: '/sales/xianyu', label: '闲鱼工作台' },
       { key: '/sales/xhs', label: '小红书工作台' },
-    ],
-  },
-  {
-    key: 'pdd', icon: <ThunderboltOutlined />, label: 'PDD采集',
-    children: [
-      { key: '/pdd/ops', label: '采集监控' },
-      { key: '/pdd/config', label: '采集节奏' },
     ],
   },
   { key: '/orders', icon: <ShoppingCartOutlined />, label: '订单管理' },
