@@ -184,6 +184,11 @@ async def batch_start(
     remaining = max(0, quota - int(data["stats"]["total"]))
     batch = pending[:remaining]
 
+    # 闲鱼侧错峰：闲鱼有自己的合规闸（≥60s 最小间隔 + 40/h 上限），
+    # 一次性全派会被白白 rate-limit 跳过。用 countdown 拉开 ~90s 一个，
+    # 顺着平台允许节奏涓流进去（PDD 侧无需错峰，worker BurstScheduler 自己排）。
+    xy_offset = 0
+    xy_scheduled = 0
     for kw in batch:
         task = PddAppTask(
             kind="search",
@@ -203,13 +208,19 @@ async def batch_start(
         if body.both_platforms:
             try:
                 from app.tasks.selection import instant_search
-                instant_search.delay(kw["text"], "xianyu")
+                instant_search.apply_async(args=(kw["text"], "xianyu"), countdown=xy_offset)
+                xy_offset += random.randint(70, 110)
+                xy_scheduled += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"batch xianyu dispatch failed (kw='{kw['text']}'): {exc}")
 
-    logger.info(f"pdd batch start: enqueued={len(batch)} both={body.both_platforms} (pending={len(pending)}, quota_left={remaining})")
+    logger.info(
+        f"pdd batch start: enqueued={len(batch)} xianyu_scheduled={xy_scheduled} "
+        f"both={body.both_platforms} (pending={len(pending)}, quota_left={remaining})"
+    )
     return {
         "ok": True, "enqueued": len(batch), "both_platforms": body.both_platforms,
+        "xianyu_scheduled": xy_scheduled,
         "pending_total": len(pending), "capped_by_quota": remaining < len(pending),
     }
 

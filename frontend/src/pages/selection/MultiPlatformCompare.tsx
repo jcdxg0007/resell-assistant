@@ -238,7 +238,8 @@ const MultiPlatformCompare: React.FC = () => {
     try {
       const res = await api.post('/pdd-runs/batch/start', { both_platforms: bothPlatforms });
       const d = res.data;
-      message.success(`已排入 ${d.enqueued} 个词${d.capped_by_quota ? '（受每日配额限制，剩余下次再跑）' : ''}，worker 按拟人节奏陆续采集`);
+      const xyNote = d.both_platforms && d.xianyu_scheduled ? `；闲鱼 ${d.xianyu_scheduled} 个按 ~90s 错峰陆续跑` : '';
+      message.success(`已排入 ${d.enqueued} 个词${d.capped_by_quota ? '（受每日配额限制，剩余下次再跑）' : ''}，worker 按拟人节奏陆续采集${xyNote}`);
       fetchConsole();
     } catch (err) {
       const e = err as { response?: { status?: number } };
