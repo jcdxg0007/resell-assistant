@@ -59,6 +59,7 @@ const router = createBrowserRouter([
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: lazyLoad(() => import('./pages/dashboard')) },
       { path: 'selection/xianyu', element: lazyLoad(() => import('./pages/selection/MultiPlatformCompare')) },
+      { path: 'selection/pdd-keywords', element: lazyLoad(() => import('./pages/selection/PddKeywords')) },
       { path: 'selection/xhs', element: lazyLoad(() => import('./pages/selection/XhsSelection')) },
       { path: 'selection/virtual', element: lazyLoad(() => import('./pages/selection/VirtualSelection')) },
       { path: 'sales/xianyu', element: lazyLoad(() => import('./pages/sales/XianyuWorkbench')) },

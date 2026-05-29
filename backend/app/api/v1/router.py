@@ -3,7 +3,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     auth, products, selection, xianyu, xiaohongshu, orders,
     accounts, ai_ops, customer, settings, pdd_worker, pdd_worker_config,
-    pdd_runs,
+    pdd_runs, pdd_keywords,
 )
 
 api_router = APIRouter()
@@ -21,3 +21,4 @@ api_router.include_router(settings.router, prefix="/settings", tags=["设置"])
 api_router.include_router(pdd_worker.router, prefix="/pdd-worker", tags=["PDD APP Worker"])
 api_router.include_router(pdd_worker_config.router, prefix="/pdd-worker-config", tags=["PDD Worker 调度配置"])
 api_router.include_router(pdd_runs.router, prefix="/pdd-runs", tags=["PDD 采集历史"])
+api_router.include_router(pdd_keywords.router, prefix="/pdd-keywords", tags=["PDD 词库管理"])
