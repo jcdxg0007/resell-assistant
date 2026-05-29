@@ -20,8 +20,8 @@ const menuItems = [
   {
     key: 'selection', icon: <SearchOutlined />, label: '选品助手',
     children: [
+      { key: '/selection/pdd-keywords', label: '词库管理' },
       { key: '/selection/xianyu', label: '多平台比价' },
-      { key: '/selection/pdd-keywords', label: 'PDD词库' },
       { key: '/selection/xhs', label: '小红书选品' },
       { key: '/selection/virtual', label: '虚拟商品' },
     ],

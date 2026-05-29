@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Table, Card, Input, Button, Space, Tag, Select, Switch,
-  Modal, Form, Popconfirm, App, Row, Col, Tooltip,
+  Modal, Form, Popconfirm, App, Row, Col, Tooltip, Menu,
 } from 'antd';
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
@@ -223,7 +223,7 @@ const PddKeywords: React.FC = () => {
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Row justify="space-between" align="middle">
-        <Col><Title level={4} style={{ margin: 0 }}>PDD 词库管理</Title></Col>
+        <Col><Title level={4} style={{ margin: 0 }}>词库管理</Title></Col>
         <Col>
           <Space>
             <Button icon={<PlusOutlined />} type="primary" onClick={openCreate}>新建词</Button>
@@ -233,40 +233,61 @@ const PddKeywords: React.FC = () => {
         </Col>
       </Row>
 
-      <Card styles={{ body: { padding: 12 } }}>
-        <Space wrap>
-          <Select
-            allowClear placeholder="按分类筛选" style={{ width: 180 }}
-            value={catFilter} onChange={setCatFilter}
-            options={categories.map((c) => ({ value: c.id, label: `${c.name}（${c.keyword_count}）` }))}
-          />
-          <Select
-            allowClear placeholder="安全词状态" style={{ width: 130 }}
-            value={safeFilter}
-            onChange={(v) => setSafeFilter(v)}
-            options={[{ value: true, label: '仅安全词' }, { value: false, label: '仅禁用词' }]}
-          />
-          <Input.Search
-            placeholder="搜索关键词" style={{ width: 200 }}
-            value={q} onChange={(e) => setQ(e.target.value)} onSearch={() => fetchKeywords(1)} allowClear
-          />
-        </Space>
-      </Card>
+      <Row gutter={16}>
+        {/* 左：分类 */}
+        <Col xs={24} sm={8} md={6} lg={5}>
+          <Card title="分类" size="small" styles={{ body: { padding: 4 } }}>
+            <Menu
+              mode="inline"
+              style={{ borderInlineEnd: 'none' }}
+              selectedKeys={[catFilter || '__all__']}
+              onClick={({ key }) => setCatFilter(key === '__all__' ? undefined : key)}
+              items={[
+                { key: '__all__', label: '全部分类' },
+                ...categories.map((c) => ({
+                  key: c.id,
+                  label: (
+                    <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <span>{c.name}</span>
+                      <Text type="secondary" style={{ fontSize: 12 }}>{c.keyword_count}</Text>
+                    </Space>
+                  ),
+                })),
+              ]}
+            />
+          </Card>
+        </Col>
 
-      <Card styles={{ body: { padding: 12 } }}>
-        <Table<KeywordRow>
-          size="small"
-          rowKey="id"
-          loading={loading}
-          columns={columns}
-          dataSource={rows}
-          scroll={{ x: 920 }}
-          pagination={{
-            current: page, total, pageSize: 20, showSizeChanger: false,
-            onChange: (p) => fetchKeywords(p), showTotal: (t) => `共 ${t} 个词`,
-          }}
-        />
-      </Card>
+        {/* 右：关键词 */}
+        <Col xs={24} sm={16} md={18} lg={19}>
+          <Card styles={{ body: { padding: 12 } }}>
+            <Space wrap style={{ marginBottom: 12 }}>
+              <Select
+                allowClear placeholder="安全词状态" style={{ width: 130 }}
+                value={safeFilter}
+                onChange={(v) => setSafeFilter(v)}
+                options={[{ value: true, label: '仅安全词' }, { value: false, label: '仅禁用词' }]}
+              />
+              <Input.Search
+                placeholder="搜索关键词" style={{ width: 200 }}
+                value={q} onChange={(e) => setQ(e.target.value)} onSearch={() => fetchKeywords(1)} allowClear
+              />
+            </Space>
+            <Table<KeywordRow>
+              size="small"
+              rowKey="id"
+              loading={loading}
+              columns={columns}
+              dataSource={rows}
+              scroll={{ x: 820 }}
+              pagination={{
+                current: page, total, pageSize: 20, showSizeChanger: false,
+                onChange: (p) => fetchKeywords(p), showTotal: (t) => `共 ${t} 个词`,
+              }}
+            />
+          </Card>
+        </Col>
+      </Row>
 
       {/* 新建/编辑词 */}
       <Modal
