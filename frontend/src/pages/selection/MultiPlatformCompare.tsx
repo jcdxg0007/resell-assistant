@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, Button, Space, Tag, Row, Col,
   Progress, App, Alert, Modal, Descriptions, Badge, Drawer, Tooltip,
 } from 'antd';
 import {
-  SearchOutlined, ReloadOutlined, ControlOutlined,
+  ReloadOutlined, ControlOutlined, SyncOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -97,9 +97,10 @@ const MultiPlatformCompare: React.FC = () => {
 
   // 搜索
   const [keyword, setKeyword] = useState('');
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchResult, setSearchResult] = useState<'success' | 'error' | null>(null);
-  const [searchKeyword, setSearchKeyword] = useState('');
+  const [searchingXianyu, setSearchingXianyu] = useState(false);
+  const [searchingPdd, setSearchingPdd] = useState(false);
+  const [autoRefreshing, setAutoRefreshing] = useState(false);
+  const pollRef = useRef<number | null>(null);
 
   // 详情
   const [detailVisible, setDetailVisible] = useState(false);
@@ -147,27 +148,85 @@ const MultiPlatformCompare: React.FC = () => {
 
   useEffect(() => { fetchRecommendations(); }, [fetchRecommendations]);
   useEffect(() => { fetchPdd(); }, [fetchPdd]);
+  // 卸载时清掉自动刷新定时器
+  useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
 
   const refreshAll = () => { fetchRecommendations(page); fetchPdd(); };
 
-  const handleSearch = async () => {
-    if (!keyword.trim()) {
-      message.warning('请输入搜索关键词');
-      return;
-    }
-    setSearchLoading(true);
-    setSearchResult(null);
+  // 方案 A：提交后启动自动刷新，每 8s 拉一次结果，约 80s 后停止
+  const startAutoRefresh = useCallback(() => {
+    if (pollRef.current) window.clearInterval(pollRef.current);
+    setAutoRefreshing(true);
+    let n = 0;
+    pollRef.current = window.setInterval(() => {
+      n += 1;
+      fetchPdd();
+      fetchRecommendations(1);
+      if (n >= 10) {
+        if (pollRef.current) window.clearInterval(pollRef.current);
+        pollRef.current = null;
+        setAutoRefreshing(false);
+      }
+    }, 8000);
+  }, [fetchPdd, fetchRecommendations]);
+
+  // 闲鱼搜索：提交后台爬虫任务
+  const searchXianyu = async (): Promise<boolean> => {
+    const res = await api.post('/products/search', { keyword: keyword.trim(), platform: 'xianyu' });
+    return !!res;
+  };
+
+  // PDD 搜索：紧急派发，后端后台 await 落库
+  const searchPdd = async (): Promise<boolean> => {
+    await api.post('/pdd-runs/dispatch', { keyword: keyword.trim(), mode: 'fast' });
+    return true;
+  };
+
+  const handleXianyu = async () => {
+    if (!keyword.trim()) { message.warning('请输入搜索关键词'); return; }
+    setSearchingXianyu(true);
     try {
-      await api.post('/products/search', { keyword: keyword.trim(), platform: 'xianyu' });
-      setSearchKeyword(keyword.trim());
-      setSearchResult('success');
-      message.success('闲鱼搜索任务已提交');
+      await searchXianyu();
+      message.success('闲鱼搜索任务已提交，完成后点刷新查看');
     } catch {
-      setSearchResult('error');
-      message.error('搜索任务提交失败');
+      message.error('闲鱼搜索任务提交失败');
     } finally {
-      setSearchLoading(false);
+      setSearchingXianyu(false);
     }
+  };
+
+  const handlePdd = async () => {
+    if (!keyword.trim()) { message.warning('请输入搜索关键词'); return; }
+    setSearchingPdd(true);
+    try {
+      await searchPdd();
+      message.success('PDD 搜索任务已紧急派发，结果稍后落库');
+    } catch (err) {
+      const e = err as { response?: { status?: number } };
+      if (e.response?.status === 503) message.error('PDD Worker 离线，无法派发');
+      else message.error('PDD 搜索派发失败');
+    } finally {
+      setSearchingPdd(false);
+    }
+  };
+
+  // 同时搜：两边都打，然后按方案 A 自动刷新
+  const handleBoth = async () => {
+    if (!keyword.trim()) { message.warning('请输入搜索关键词'); return; }
+    setSearchingXianyu(true);
+    setSearchingPdd(true);
+    const [xy, pdd] = await Promise.allSettled([searchXianyu(), searchPdd()]);
+    setSearchingXianyu(false);
+    setSearchingPdd(false);
+
+    const xyOk = xy.status === 'fulfilled';
+    const pddOk = pdd.status === 'fulfilled';
+    if (xyOk && pddOk) message.success('闲鱼 + PDD 任务已提交，结果生成后将自动刷新');
+    else if (xyOk) message.warning('闲鱼已提交；PDD 派发失败（worker 可能离线）');
+    else if (pddOk) message.warning('PDD 已提交；闲鱼派发失败');
+    else { message.error('两个平台都派发失败'); return; }
+
+    startAutoRefresh();
   };
 
   const showDetail = (item: ProductItem) => {
@@ -269,26 +328,25 @@ const MultiPlatformCompare: React.FC = () => {
         </Col>
       </Row>
 
-      {/* 搜索 */}
+      {/* 搜索：闲鱼 / PDD / 同时搜 */}
       <Card styles={{ body: { padding: 12 } }}>
-        <Input.Search
-          placeholder="搜索商品关键词或粘贴链接（提交闲鱼采集；拼多多由词库轮播自动采集）"
-          enterButton={<><SearchOutlined /> 搜索</>}
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          onSearch={handleSearch}
-          loading={searchLoading}
-        />
-        {searchResult === 'success' && (
-          <Alert
-            style={{ marginTop: 12 }}
-            message={`闲鱼搜索任务已提交：「${searchKeyword}」，完成后点刷新查看`}
-            type="success" showIcon closable onClose={() => setSearchResult(null)}
-            action={<Button size="small" onClick={() => fetchRecommendations(1)}>刷新</Button>}
+        <Space.Compact style={{ width: '100%' }}>
+          <Input
+            placeholder="输入关键词，选择在闲鱼、拼多多或同时发起采集"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            onPressEnter={handleBoth}
+            allowClear
           />
-        )}
-        {searchResult === 'error' && (
-          <Alert style={{ marginTop: 12 }} message="搜索任务提交失败，请稍后重试" type="error" showIcon closable onClose={() => setSearchResult(null)} />
+          <Button onClick={handleXianyu} loading={searchingXianyu}>闲鱼搜索</Button>
+          <Button onClick={handlePdd} loading={searchingPdd}>PDD搜索</Button>
+          <Button type="primary" onClick={handleBoth} loading={searchingXianyu || searchingPdd}>同时搜</Button>
+        </Space.Compact>
+        {autoRefreshing && (
+          <Space style={{ marginTop: 10 }} size={6}>
+            <SyncOutlined spin style={{ color: '#1677ff' }} />
+            <Text type="secondary">结果生成中，正在自动刷新…（约 1 分钟，也可手动点右上角刷新）</Text>
+          </Space>
         )}
       </Card>
 
