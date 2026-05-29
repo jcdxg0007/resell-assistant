@@ -58,6 +58,30 @@ class Keyword(Base, UUIDMixin, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # ── PDD 调度专属字段 ──────────────────────────────────────────
+    # last_crawled_at 是跨平台共享的时间戳，PDD 这边需要自己独立的
+    # "上次 PDD 跑过的时间" + "上次 PDD 结果"才能做轮播调度。
+    # 添加这组字段的 migration: b8c9d0e1f2g3 (2026-05-28)
+    pdd_last_searched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 最近一次 PDD 任务的结果：ok / empty / risk_blocked / failed
+    pdd_last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 该词在 PDD 上跑什么模式：fast / list_deep / detail_smart / detail_deep
+    # 详情见 docs/PDD-自建采集-roadmap.md §3 (Phase 2 详情页采集)
+    pdd_mode: Mapped[str] = mapped_column(
+        String(16), default="fast", nullable=False, server_default="fast"
+    )
+    # 是否安全词。FALSE = 即使 schedule_enabled=TRUE 也被 fire_from_lib 跳过。
+    # 用于永久禁用敏感词（美瞳 / 医美 / 烟草 等 PDD 风控偏紧的品类）
+    pdd_safe: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default="true"
+    )
+    # 累计 PDD 搜索次数（监控用，调度也可以用来选久未跑的词）
+    pdd_searches_total: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
+
     category: Mapped["Category"] = relationship(back_populates="keywords")
     products: Mapped[list["KeywordProduct"]] = relationship(
         back_populates="keyword", cascade="all, delete-orphan"
