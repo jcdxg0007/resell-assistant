@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, InputNumber, Button, Space, Tag, Row, Col,
-  Progress, App, Alert, Modal, Descriptions, Badge, Drawer, Tooltip, List, Popconfirm, Empty,
+  Progress, App, Alert, Modal, Descriptions, Badge, Drawer, Tooltip, List, Popconfirm, Empty, Switch,
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
+  PlayCircleOutlined, PauseCircleOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -43,6 +44,8 @@ interface Console {
   collected: CollectedKw[];
   recent_risk: RiskItem[];
   worker: { online: boolean; devices?: string[] };
+  paused?: boolean;
+  queued?: number;
 }
 
 const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
@@ -92,6 +95,10 @@ const MultiPlatformCompare: React.FC = () => {
   const [tcMax, setTcMax] = useState<number | null>(null);
   const [savingRange, setSavingRange] = useState(false);
 
+  // 批量任务：同时跑开关（默认开）+ 开始/暂停
+  const [bothPlatforms, setBothPlatforms] = useState(true);
+  const [batchLoading, setBatchLoading] = useState(false);
+
   // 选中的已采集关键词 + 其商品
   const [selectedKw, setSelectedKw] = useState<string | null>(null);
   const [items, setItems] = useState<PddProduct[]>([]);
@@ -140,6 +147,14 @@ const MultiPlatformCompare: React.FC = () => {
   useEffect(() => { fetchConsole(); }, [fetchConsole]);
   useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
 
+  // 批量任务运行中（队列还有 + 未暂停）时，每 10s 刷新控制台看进度
+  const batchRunning = !!cons && !cons.paused && (cons.queued ?? 0) > 0;
+  useEffect(() => {
+    if (!batchRunning) return;
+    const id = window.setInterval(fetchConsole, 10000);
+    return () => window.clearInterval(id);
+  }, [batchRunning, fetchConsole]);
+
   const refreshAll = () => {
     fetchConsole();
     if (selectedKw) loadItems(selectedKw);
@@ -165,7 +180,7 @@ const MultiPlatformCompare: React.FC = () => {
   }, [fetchConsole, fetchXianyu, loadItems]);
 
   // 搜索动作
-  const searchXianyu = async () => { await api.post('/products/search', { keyword: keyword.trim(), platform: 'xianyu' }); };
+  const searchXianyu = async (kw?: string) => { await api.post('/products/search', { keyword: (kw ?? keyword).trim(), platform: 'xianyu' }); };
   const searchPdd = async (kw: string) => { await api.post('/pdd-runs/dispatch', { keyword: kw, mode: 'fast' }); };
 
   const handleXianyu = async () => {
@@ -204,16 +219,41 @@ const MultiPlatformCompare: React.FC = () => {
     startAutoRefresh(kw);
   };
 
-  // 待采集池里直接采一个词
+  // 待采集池里直接采一个词（同时跑开启则闲鱼也跑）
   const dispatchPending = async (kw: string) => {
     try {
       await searchPdd(kw);
+      if (bothPlatforms) { try { await searchXianyu(kw); } catch { /* 闲鱼失败不影响 PDD */ } }
       message.success(`已派发「${kw}」，结果生成后自动刷新`);
       startAutoRefresh(kw);
     } catch (err) {
       const e = err as { response?: { status?: number } };
       message.error(e.response?.status === 503 ? 'PDD Worker 离线' : '派发失败');
     }
+  };
+
+  // 批量任务
+  const startBatch = async () => {
+    setBatchLoading(true);
+    try {
+      const res = await api.post('/pdd-runs/batch/start', { both_platforms: bothPlatforms });
+      const d = res.data;
+      message.success(`已排入 ${d.enqueued} 个词${d.capped_by_quota ? '（受每日配额限制，剩余下次再跑）' : ''}，worker 按拟人节奏陆续采集`);
+      fetchConsole();
+    } catch (err) {
+      const e = err as { response?: { status?: number } };
+      message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法开始' : '开始任务失败');
+    } finally { setBatchLoading(false); }
+  };
+
+  const pauseBatch = async () => {
+    setBatchLoading(true);
+    try {
+      const res = await api.post('/pdd-runs/batch/pause');
+      message.success(`已暂停，清掉 ${res.data.purged} 个排队任务（在跑的不打断）`);
+      fetchConsole();
+    } catch { message.error('暂停失败'); }
+    finally { setBatchLoading(false); }
   };
 
   const saveRange = async () => {
@@ -323,10 +363,32 @@ const MultiPlatformCompare: React.FC = () => {
         )}
       </Card>
 
-      {/* 今日搜索任务 + 商品量范围 */}
-      <Card title="今日搜索任务" size="small" loading={consLoading}>
+      {/* 今日搜索任务 + 商品量范围 + 批量开关 */}
+      <Card
+        title="今日搜索任务"
+        size="small"
+        loading={consLoading}
+        extra={
+          <Space size={12} wrap>
+            <Tooltip title="开启后：批量任务和待采集池的「采集」按钮，每个词都同时跑闲鱼+PDD">
+              <Space size={4}>
+                <Text type="secondary" style={{ fontSize: 12 }}>关键词同时跑</Text>
+                <Switch size="small" checked={bothPlatforms} onChange={setBothPlatforms} />
+              </Space>
+            </Tooltip>
+            {(cons?.queued ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 12 }}>队列 {cons?.queued}</Text>}
+            {cons?.paused && <Tag color="orange">已暂停</Tag>}
+            {batchRunning ? (
+              <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading} onClick={pauseBatch}>暂停任务</Button>
+            ) : (
+              <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={batchLoading} onClick={startBatch}>开始任务</Button>
+            )}
+          </Space>
+        }
+      >
         <Space size="large" wrap>
           <Text>今日任务 <Text strong>{stats?.total ?? 0}</Text></Text>
+          <Text type="secondary">待采集 <Text strong>{cons?.pending.length ?? 0}</Text></Text>
           <Space size={8}>
             <Text type="secondary">单词商品量</Text>
             <InputNumber size="small" min={1} max={100} value={tcMin} onChange={(v) => setTcMin(v)} style={{ width: 72 }} placeholder="下限" />

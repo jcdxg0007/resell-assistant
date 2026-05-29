@@ -52,6 +52,7 @@ from app.services.pdd_app_queue import (  # noqa: E402
     await_result,
     enqueue_task,
     get_worker_status,
+    is_collection_paused,
 )
 from app.services.pdd_search_run import persist_search_run  # noqa: E402
 from app.services.pdd_worker_config import get_runtime_config  # noqa: E402
@@ -246,6 +247,10 @@ async def main() -> int:
 
     if args.dry_run:
         print("(dry-run，不实际派任务)")
+        return 0
+
+    if await is_collection_paused():
+        print("⏸ 采集已被前端暂停（pdd_app:collection_paused），跳过本次轮播")
         return 0
 
     status = await get_worker_status()

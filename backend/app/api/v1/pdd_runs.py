@@ -23,6 +23,7 @@ from app.core.database import get_db
 from app.models.system import User
 from app.services.pdd_app_queue import (
     PddAppTask, await_result, enqueue_task, get_worker_status,
+    is_collection_paused, purge_queue, queue_depth, set_collection_paused,
 )
 from app.services.pdd_search_run import (
     clear_today, console_data, keyword_items, list_runs, persist_search_run, summary,
@@ -34,8 +35,12 @@ router = APIRouter()
 
 # 紧急派发用：priority=9 让 worker LPUSH 插队 + 跳过 inter-burst 静默期
 _DISPATCH_PRIORITY = 9
+# 批量任务用普通优先级，让 worker 按 BurstScheduler 拟人节奏慢慢消化
+_BATCH_PRIORITY = 1
 # 后台 await 任务的强引用集合，防止 create_task 出来的协程被 GC 提前回收
 _bg_tasks: set[asyncio.Task] = set()
+# 批量任务的后台等待协程，暂停时统一取消（停止派发 + 不再等已清掉的任务）
+_batch_tasks: set[asyncio.Task] = set()
 
 
 @router.get("/summary", summary="Ops 看板聚合")
@@ -55,19 +60,30 @@ class DispatchBody(BaseModel):
     mode: str = Field("fast", description="fast / deep")
 
 
-async def _await_and_persist(task_id: str, keyword: str, mode: str, timeout_s: int) -> None:
-    """后台等 worker 把结果推回来，再落到 pdd_search_runs（source=manual）。
+async def _await_and_persist(
+    task_id: str, keyword: str, mode: str, timeout_s: int,
+    *, source: str = "manual", priority: int = _DISPATCH_PRIORITY,
+    keyword_id: str | None = None, category_name: str | None = None,
+    write_timeout: bool = True,
+) -> None:
+    """后台等 worker 把结果推回来，再落到 pdd_search_runs。
 
     跑在 FastAPI 事件循环里、不阻塞派发请求的响应。worker 离线/慢/静默都
-    由 await_result 超时兜底（落 timeout 行），绝不卡住进程。
+    由 await_result 超时兜底，绝不卡住进程。
+
+    - source/priority：手动派发 = manual/9；批量跑池 = batch/1
+    - write_timeout=False：超时不落 timeout 行（批量任务被清队列后会超时，
+      不该留误导性的超时记录）
     """
     try:
         result = await await_result(task_id, timeout_s=timeout_s)
         if result is None:
-            await persist_search_run(
-                status="timeout", keyword_text=keyword, task_id=task_id,
-                source="manual", mode=mode, priority=_DISPATCH_PRIORITY,
-            )
+            if write_timeout:
+                await persist_search_run(
+                    status="timeout", keyword_text=keyword, task_id=task_id,
+                    source=source, mode=mode, priority=priority,
+                    keyword_id=keyword_id, category_name=category_name,
+                )
             return
         items = result.items or []
         prices = sorted(float(it["price"]) for it in items if it.get("price"))
@@ -77,14 +93,17 @@ async def _await_and_persist(task_id: str, keyword: str, mode: str, timeout_s: i
         if bucket == "ok" and not items:
             bucket = "empty"
         await persist_search_run(
-            status=bucket, keyword_text=keyword, task_id=task_id, source="manual",
+            status=bucket, keyword_text=keyword, task_id=task_id, source=source,
             mode=mode, items_count=len(items), price_min=p_min, price_median=p_median,
             risk_signals=result.risk_signals, items=items, device_serial=result.device_serial,
             account_name=result.account_name, elapsed_ms=result.elapsed_ms,
-            priority=_DISPATCH_PRIORITY, error=result.error,
+            keyword_id=keyword_id, category_name=category_name,
+            priority=priority, error=result.error,
         )
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001 — 后台任务异常只记日志
-        logger.warning(f"pdd dispatch await/persist failed (kw='{keyword}'): {exc}")
+        logger.warning(f"pdd await/persist failed (kw='{keyword}'): {exc}")
 
 
 @router.post("/dispatch", summary="手动派发一个 PDD 搜索任务（紧急插队）")
@@ -131,6 +150,86 @@ async def dispatch_search(
     return {"ok": True, "task_id": task.task_id, "keyword": body.keyword.strip(), "mode": mode}
 
 
+class BatchStartBody(BaseModel):
+    """开始今日批量任务。"""
+
+    both_platforms: bool = Field(True, description="True=每个词同时跑闲鱼+PDD；False=只跑PDD")
+
+
+@router.post("/batch/start", summary="开始批量跑今日待采集池（正常节奏，worker 慢慢消化）")
+async def batch_start(
+    body: BatchStartBody,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """把今日待采集池的词按普通优先级排进 PDD 队列，worker 按 BurstScheduler
+    拟人节奏慢慢消化。开启同时跑则每个词同时触发一次闲鱼采集。
+
+    数量受 daily_search_quota 限制（扣掉今天已跑的），避免一次塞爆 + 触发风控。
+    """
+    wstatus = await get_worker_status()
+    if not wstatus.get("online"):
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE, detail="pdd_worker_offline",
+        )
+    await set_collection_paused(False)
+    data = await console_data(db)
+    pending = data["pending"]
+    cfg = await get_runtime_config(db)
+    lo = int(cfg.get("target_count_min") or 8)
+    hi = int(cfg.get("target_count_max") or 20)
+    if lo > hi:
+        lo, hi = hi, lo
+    quota = int(cfg.get("daily_search_quota") or 30)
+    remaining = max(0, quota - int(data["stats"]["total"]))
+    batch = pending[:remaining]
+
+    for kw in batch:
+        task = PddAppTask(
+            kind="search",
+            payload={"keyword": kw["text"], "mode": "fast", "target_count": random.randint(lo, hi)},
+            priority=_BATCH_PRIORITY,
+            timeout_s=90,
+        )
+        await enqueue_task(task)
+        bg = asyncio.create_task(_await_and_persist(
+            task.task_id, kw["text"], "fast", 4 * 3600,
+            source="batch", priority=_BATCH_PRIORITY,
+            keyword_id=kw["keyword_id"], category_name=kw["category_name"],
+            write_timeout=False,
+        ))
+        _batch_tasks.add(bg)
+        bg.add_done_callback(_batch_tasks.discard)
+        if body.both_platforms:
+            try:
+                from app.tasks.selection import instant_search
+                instant_search.delay(kw["text"], "xianyu")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"batch xianyu dispatch failed (kw='{kw['text']}'): {exc}")
+
+    logger.info(f"pdd batch start: enqueued={len(batch)} both={body.both_platforms} (pending={len(pending)}, quota_left={remaining})")
+    return {
+        "ok": True, "enqueued": len(batch), "both_platforms": body.both_platforms,
+        "pending_total": len(pending), "capped_by_quota": remaining < len(pending),
+    }
+
+
+@router.post("/batch/pause", summary="暂停批量任务（停止派发 + 清掉队列里还没跑的）")
+async def batch_pause(
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """暂停：标记暂停（fire_from_lib 轮播会跳过）+ 清空队列里还没被 worker 拉走的，
+    并取消批量后台等待协程。已被 worker 拉走、正在跑的不打断。
+    """
+    await set_collection_paused(True)
+    purged = await purge_queue()
+    for t in list(_batch_tasks):
+        t.cancel()
+    _batch_tasks.clear()
+    logger.info(f"pdd batch pause: purged={purged}")
+    return {"ok": True, "paused": True, "purged": purged}
+
+
 @router.get("/console", summary="今日搜索任务控制台（统计+待采集/已采集池+商品量范围+worker）")
 async def read_console(
     db: AsyncSession = Depends(get_db),
@@ -138,6 +237,8 @@ async def read_console(
 ) -> dict[str, Any]:
     data = await console_data(db)
     data["worker"] = await get_worker_status()
+    data["paused"] = await is_collection_paused()
+    data["queued"] = await queue_depth()
     return data
 
 

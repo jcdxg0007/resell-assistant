@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 TASK_QUEUE_KEY = "pdd_app:task_q"          # 任务队列（FIFO）
 RESULT_KEY_PREFIX = "pdd_app:result:"      # 单任务结果（短 TTL）
 WORKER_HEARTBEAT_KEY = "pdd_app:worker:heartbeat"  # worker 最近活跃时间
+COLLECTION_PAUSED_KEY = "pdd_app:collection_paused"  # 批量采集暂停标志（"1"/未设）
 
 # 默认 TTL
 RESULT_TTL_SECONDS = 600  # 结果在 Redis 里保留 10 分钟，超时未取走就丢弃
@@ -152,6 +153,34 @@ async def record_worker_heartbeat(device_serials: list[str]) -> None:
     await redis_client.set(
         WORKER_HEARTBEAT_KEY, json.dumps(payload), ex=120  # 2min 没心跳就视为离线
     )
+
+
+async def queue_depth() -> int:
+    """当前排队中（worker 还没 BLPOP 走）的任务数。"""
+    return int(await redis_client.llen(TASK_QUEUE_KEY) or 0)
+
+
+async def purge_queue() -> int:
+    """清空任务队列里还没被 worker 拉走的任务。返回清掉的条数。
+
+    已被 worker BLPOP 走、正在跑的任务不受影响（"在跑的不打断"）。
+    """
+    n = await queue_depth()
+    await redis_client.delete(TASK_QUEUE_KEY)
+    logger.info(f"pdd_app_queue: purged {n} queued task(s)")
+    return n
+
+
+async def set_collection_paused(paused: bool) -> None:
+    """设置/清除批量采集暂停标志。暂停后 fire_from_lib 轮播会跳过。"""
+    if paused:
+        await redis_client.set(COLLECTION_PAUSED_KEY, "1")
+    else:
+        await redis_client.delete(COLLECTION_PAUSED_KEY)
+
+
+async def is_collection_paused() -> bool:
+    return bool(await redis_client.get(COLLECTION_PAUSED_KEY))
 
 
 async def get_worker_status() -> dict[str, Any]:
