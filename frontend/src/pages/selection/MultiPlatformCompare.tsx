@@ -100,12 +100,13 @@ const MultiPlatformCompare: React.FC = () => {
   // 采集节奏控制窗口
   const [rhythmOpen, setRhythmOpen] = useState(false);
 
-  const fetchXianyu = useCallback(async (p: number = 1) => {
+  // kw 给定时按关键词过滤（闲鱼商品落库时 category 存的就是搜索词），实现同词比价
+  const fetchXianyu = useCallback(async (p: number = 1, kw?: string | null) => {
     setXyLoading(true);
     try {
-      const res = await api.get('/selection/xianyu/recommendations', {
-        params: { page: p, page_size: 10, min_score: 0 },
-      });
+      const params: Record<string, unknown> = { page: p, page_size: 10, min_score: 0 };
+      if (kw) params.category = kw;
+      const res = await api.get('/selection/xianyu/recommendations', { params });
       setXyData(res.data.items || []);
       setXyTotal(res.data.total || 0);
       setXyPage(p);
@@ -124,14 +125,16 @@ const MultiPlatformCompare: React.FC = () => {
     } catch { /* ignore */ } finally { setConsLoading(false); }
   }, []);
 
+  // 选中一个词：同时加载 PDD 采到的商品 + 同词的闲鱼选品
   const loadItems = useCallback(async (kw: string) => {
     setItemsLoading(true);
     setSelectedKw(kw);
+    fetchXianyu(1, kw);
     try {
       const res = await api.get('/pdd-runs/items', { params: { keyword: kw } });
       setItems(res.data.items || []);
     } catch { setItems([]); } finally { setItemsLoading(false); }
-  }, []);
+  }, [fetchXianyu]);
 
   useEffect(() => { fetchXianyu(); }, [fetchXianyu]);
   useEffect(() => { fetchConsole(); }, [fetchConsole]);
@@ -139,8 +142,8 @@ const MultiPlatformCompare: React.FC = () => {
 
   const refreshAll = () => {
     fetchConsole();
-    fetchXianyu(xyPage);
     if (selectedKw) loadItems(selectedKw);
+    else fetchXianyu(xyPage);
   };
 
   // 方案 A：提交后自动刷新（每 8s，约 80s）
@@ -151,8 +154,8 @@ const MultiPlatformCompare: React.FC = () => {
     pollRef.current = window.setInterval(() => {
       n += 1;
       fetchConsole();
-      fetchXianyu(1);
       if (watchKw) loadItems(watchKw);
+      else fetchXianyu(1);
       if (n >= 10) {
         if (pollRef.current) window.clearInterval(pollRef.current);
         pollRef.current = null;
@@ -232,7 +235,7 @@ const MultiPlatformCompare: React.FC = () => {
       await api.delete('/pdd-runs/today', { params: { keyword: selectedKw } });
       message.success(`已清空「${selectedKw}」今日结果`);
       setSelectedKw(null); setItems([]);
-      fetchConsole();
+      fetchConsole(); fetchXianyu(1);
     } catch { message.error('清空失败'); }
   };
 
@@ -241,7 +244,7 @@ const MultiPlatformCompare: React.FC = () => {
       await api.delete('/pdd-runs/today');
       message.success('已清空今日全部结果');
       setSelectedKw(null); setItems([]);
-      fetchConsole();
+      fetchConsole(); fetchXianyu(1);
     } catch { message.error('清空失败'); }
   };
 
@@ -434,16 +437,20 @@ const MultiPlatformCompare: React.FC = () => {
         )}
       </Card>
 
-      {/* 闲鱼选品结果（比价参考）*/}
-      <Card title={<Space><Tag color="gold">闲鱼</Tag>选品结果</Space>} extra={<Text type="secondary">共 {xyTotal}</Text>} styles={{ body: { padding: 12 } }}>
+      {/* 闲鱼选品结果（按选中词同词比价；未选词时显示全局推荐）*/}
+      <Card
+        title={<Space><Tag color="gold">闲鱼</Tag>选品结果{selectedKw ? <Tag>{selectedKw}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>（全局推荐）</Text>}</Space>}
+        extra={<Text type="secondary">共 {xyTotal}</Text>}
+        styles={{ body: { padding: 12 } }}
+      >
         <Table<ProductItem>
           size="small"
           columns={xianyuColumns}
           dataSource={xyData}
           rowKey={(r) => r.product.id}
           loading={xyLoading}
-          pagination={{ current: xyPage, total: xyTotal, pageSize: 10, size: 'small', onChange: (p) => fetchXianyu(p), showSizeChanger: false }}
-          locale={{ emptyText: '暂无闲鱼选品数据' }}
+          pagination={{ current: xyPage, total: xyTotal, pageSize: 10, size: 'small', onChange: (p) => fetchXianyu(p, selectedKw), showSizeChanger: false }}
+          locale={{ emptyText: selectedKw ? `闲鱼暂无「${selectedKw}」的选品数据（需先对该词跑过闲鱼搜索）` : '暂无闲鱼选品数据' }}
         />
       </Card>
 
