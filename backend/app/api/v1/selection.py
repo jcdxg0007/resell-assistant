@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -73,21 +73,19 @@ async def clear_xianyu_products(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """软删除（is_active=False）闲鱼采集到的商品，从推荐/采集结果里移除。
+    """硬删除闲鱼采集到的商品行（物理 DELETE，不可恢复）。
 
     与 PDD 的 DELETE /pdd-runs/today 对齐：清当前词 = category 给定；清全部 = 留空。
-    软删除可恢复，且推荐接口按 is_active 过滤，清掉后立即从结果消失。
+    products.id 的外键子表（ProductScore / KeywordProduct / XianyuMarketData /
+    ProductImage 等）均为 ON DELETE CASCADE，删父行时数据库自动级联清理；
+    orders / conversations 等业务引用为 SET NULL，不受影响。
     """
-    stmt = (
-        update(Product)
-        .where(Product.source_platform == "xianyu")
-        .where(Product.is_active == True)  # noqa: E712
-    )
+    stmt = delete(Product).where(Product.source_platform == "xianyu")
     if category:
         stmt = stmt.where(Product.category == category)
-    res = await db.execute(stmt.values(is_active=False))
+    res = await db.execute(stmt)
     await db.commit()
-    return {"ok": True, "deactivated": res.rowcount or 0}
+    return {"ok": True, "deleted": res.rowcount or 0}
 
 
 @router.post("/score/{product_id}", summary="触发商品评分")

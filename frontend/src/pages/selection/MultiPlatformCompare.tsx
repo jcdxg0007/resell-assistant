@@ -289,12 +289,12 @@ const MultiPlatformCompare: React.FC = () => {
     } catch { message.error('清空失败'); }
   };
 
-  // 闲鱼采集结果清空（软删除 is_active=False）
+  // 闲鱼采集结果清空（硬删除，不可恢复）
   const clearXianyuCurrent = async () => {
     if (!selectedKw) return;
     try {
       const res = await api.delete('/selection/xianyu/products', { params: { category: selectedKw } });
-      message.success(`已清空闲鱼「${selectedKw}」结果（${res.data.deactivated} 条）`);
+      message.success(`已删除闲鱼「${selectedKw}」结果（${res.data.deleted} 条）`);
       fetchXianyu(1, selectedKw);
     } catch { message.error('清空失败'); }
   };
@@ -302,7 +302,7 @@ const MultiPlatformCompare: React.FC = () => {
   const clearXianyuAll = async () => {
     try {
       const res = await api.delete('/selection/xianyu/products');
-      message.success(`已清空闲鱼全部采集结果（${res.data.deactivated} 条）`);
+      message.success(`已删除闲鱼全部采集结果（${res.data.deleted} 条）`);
       fetchXianyu(1, selectedKw);
     } catch { message.error('清空失败'); }
   };
@@ -531,7 +531,7 @@ const MultiPlatformCompare: React.FC = () => {
                 <Popconfirm title={selectedKw ? `清空闲鱼「${selectedKw}」结果？` : '请先选择一个已采集关键词'} onConfirm={clearXianyuCurrent} okText="清空" cancelText="取消" disabled={!selectedKw}>
                   <Button size="small" icon={<DeleteOutlined />} disabled={!selectedKw}>清空当前结果</Button>
                 </Popconfirm>
-                <Popconfirm title="清空闲鱼全部采集结果？（软删除，可恢复）" onConfirm={clearXianyuAll} okText="清空全部" okButtonProps={{ danger: true }} cancelText="取消">
+                <Popconfirm title="清空闲鱼全部采集结果？此操作不可恢复" onConfirm={clearXianyuAll} okText="清空全部" okButtonProps={{ danger: true }} cancelText="取消">
                   <Button size="small" danger icon={<DeleteOutlined />}>清空全部结果</Button>
                 </Popconfirm>
               </Space>
