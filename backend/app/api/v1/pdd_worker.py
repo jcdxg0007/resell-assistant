@@ -13,6 +13,7 @@ worker 端 .env 里填同一个值。Token 错误返回 401。
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 
@@ -87,11 +88,21 @@ async def post_result(
     response_model=None,
 )
 async def post_heartbeat(
-    devices: list[str],
+    body: list[str] | dict[str, Any],
     _: None = Depends(verify_worker_token),
 ):
-    """worker 每 30-60s 上报一次：'我在线，连接了 [手机1, 手机2, ...]'"""
-    await record_worker_heartbeat(devices)
+    """worker 每 30-60s 上报一次：'我在线，连接了 [手机1, 手机2, ...]'
+
+    兼容两种 body：
+    - 旧：纯列表 ["serial1", ...]
+    - 新：{"devices": [...], "scheduler": {burst 快照}}，scheduler 用于精确预估 ETA
+    """
+    if isinstance(body, list):
+        devices, scheduler = body, None
+    else:
+        devices = body.get("devices") or []
+        scheduler = body.get("scheduler")
+    await record_worker_heartbeat(devices, scheduler=scheduler)
     return {"ok": True}
 
 

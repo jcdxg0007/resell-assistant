@@ -13,6 +13,7 @@ import asyncio
 import logging
 import random
 import time
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
@@ -158,6 +159,68 @@ class BatchStartBody(BaseModel):
     both_platforms: bool = Field(True, description="True=每个词同时跑闲鱼+PDD；False=只跑PDD")
 
 
+def _estimate_pdd_etas(
+    count: int, *, cfg: dict[str, Any], wstatus: dict[str, Any], now: float,
+) -> list[float]:
+    """预估批量入队的前 count 个 PDD 任务各自的开始时刻（相对 now 的秒数列表）。
+
+    用 worker 心跳上报的 BurstScheduler 快照做前向模拟：知道当前在 burst 内还剩
+    几个 / 还是 inter-burst 静默期、距上次动作多久，比"假设从零开始"准得多。
+    没有快照（旧 worker / 刚上线）时退化为"立即从新 burst 开始"。
+    """
+    def _avg(a: float, b: float) -> float:
+        return (float(a) + float(b)) / 2.0
+
+    bs = max(1, round(_avg(cfg.get("burst_size_min", 3), cfg.get("burst_size_max", 5))))
+    pace = float(cfg.get("humanize_pace", 1.0) or 1.0)
+    intra = _avg(cfg.get("intra_burst_gap_seconds_min", 5),
+                 cfg.get("intra_burst_gap_seconds_max", 30)) * pace
+    inter = _avg(cfg.get("inter_burst_gap_minutes_min", 5),
+                 cfg.get("inter_burst_gap_minutes_max", 30)) * 60.0
+    per_task = 45.0  # fast 模式单次搜索 worker 端约耗时
+
+    snap = wstatus.get("scheduler") or {}
+    burst_remaining = int(snap.get("burst_remaining") or 0)
+    in_quiet = bool(snap.get("in_quiet"))
+
+    # 心跳是几秒前发的，把快照里的 *_ago 量补偿到"现在"
+    age = 0.0
+    ts = wstatus.get("ts")
+    if ts:
+        try:
+            age = max(0.0, now - datetime.fromisoformat(ts).timestamp())
+        except (ValueError, TypeError):
+            age = 0.0
+    lsa = snap.get("last_search_ago_s")
+    last_search_ago = (float(lsa) + age) if lsa is not None else None
+    qe = snap.get("quiet_elapsed_s")
+    quiet_elapsed = (float(qe) + age) if qe is not None else None
+
+    etas: list[float] = []
+    t = 0.0
+    rem = burst_remaining
+    first = True
+    for _ in range(count):
+        if rem > 0:
+            # burst 内：下一个任务等 intra-gap（从上次搜索结束算）
+            if first and last_search_ago is not None:
+                t += max(0.0, intra - last_search_ago)
+            elif not first:
+                t += per_task + intra
+            rem -= 1
+        else:
+            # 需要开新 burst：等 inter 静默
+            if first and in_quiet and quiet_elapsed is not None:
+                t += max(0.0, inter - quiet_elapsed)
+            elif not first:
+                t += per_task + inter
+            # first 且非 quiet（worker 空闲/没跑过）→ 立即开 burst，t 不变
+            rem = bs - 1
+        etas.append(t)
+        first = False
+    return etas
+
+
 @router.post("/batch/start", summary="开始批量跑今日待采集池（正常节奏，worker 慢慢消化）")
 async def batch_start(
     body: BatchStartBody,
@@ -186,19 +249,9 @@ async def batch_start(
     remaining = max(0, quota - int(data["stats"]["total"]))
     batch = pending[:remaining]
 
-    # ── PDD 预估开始节奏（粗略）：按 worker BurstScheduler 平均节奏估算 ──
-    # worker 看不到，只能按配置平均值估：一波 bs 个，波内每个间隔 intra+搜索耗时，
-    # 波之间静默 inter。标"预估"，会有几分钟误差。
-    def _avg(a: float, b: float) -> float:
-        return (float(a) + float(b)) / 2
-    bs = max(1, round(_avg(cfg.get("burst_size_min", 3), cfg.get("burst_size_max", 5))))
-    intra = _avg(cfg.get("intra_burst_gap_seconds_min", 5), cfg.get("intra_burst_gap_seconds_max", 30))
-    inter = _avg(cfg.get("inter_burst_gap_minutes_min", 5), cfg.get("inter_burst_gap_minutes_max", 30)) * 60
-    per_task = 45.0  # fast 模式单次搜索 worker 端约耗时
-    cycle_task = intra + per_task
-    burst_block = bs * cycle_task + inter
-
+    # ── PDD 预估开始时刻：用 worker 上报的 burst 快照做前向模拟（含心跳延迟补偿）──
     now = time.time()
+    pdd_etas = _estimate_pdd_etas(len(batch), cfg=cfg, wstatus=wstatus, now=now)
     plan: dict[str, dict] = {}
 
     # 闲鱼侧错峰：闲鱼有自己的合规闸（≥60s 最小间隔 + 40/h 上限），
@@ -223,8 +276,7 @@ async def batch_start(
         _batch_tasks.add(bg)
         bg.add_done_callback(_batch_tasks.discard)
 
-        pdd_sec = (idx // bs) * burst_block + (idx % bs) * cycle_task
-        entry: dict[str, float] = {"pdd": now + pdd_sec}
+        entry: dict[str, float] = {"pdd": now + pdd_etas[idx]}
 
         if body.both_platforms:
             try:

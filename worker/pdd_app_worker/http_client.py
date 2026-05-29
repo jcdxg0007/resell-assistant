@@ -93,10 +93,19 @@ class BackendClient:
                 await asyncio.sleep(2 ** attempt)
         logger.error(f"push_result gave up after 3 attempts: task_id={result.get('task_id')}")
 
-    async def send_heartbeat(self, devices: list[str]) -> None:
-        """心跳上报。失败不抛，下次重试。"""
+    async def send_heartbeat(
+        self, devices: list[str], scheduler: dict[str, Any] | None = None
+    ) -> None:
+        """心跳上报。失败不抛，下次重试。
+
+        body 用对象形式 {"devices": [...], "scheduler": {...}}，后端兼容旧的纯列表。
+        scheduler 是 BurstScheduler 快照，后端据此精确预估队列 ETA。
+        """
         try:
-            r = await self._client.post(f"{API_PREFIX}/heartbeat", json=devices)
+            payload: dict[str, Any] = {"devices": devices}
+            if scheduler is not None:
+                payload["scheduler"] = scheduler
+            r = await self._client.post(f"{API_PREFIX}/heartbeat", json=payload)
             r.raise_for_status()
         except Exception as exc:
             logger.warning(f"send_heartbeat failed: {exc}")

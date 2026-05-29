@@ -135,6 +135,25 @@ class BurstScheduler:
             f"burst_remaining={self._burst_remaining}"
         )
 
+    def snapshot(self) -> dict:
+        """供心跳上报：当前 burst 状态的墙钟相对量，后端据此精确预估队列 ETA。
+
+        ago 字段用 monotonic 算出"距今多少秒"，后端再按心跳延迟补偿。
+        """
+        self._maybe_reset_for_new_day()
+        now = time.monotonic()
+        in_quiet = self._burst_remaining <= 0 and self._last_burst_ended_at > 0
+        return {
+            "burst_remaining": max(0, self._burst_remaining),
+            "in_quiet": in_quiet,
+            # burst 内：距上次搜索结束多少秒（用于算下次 intra-gap 还剩多久）
+            "last_search_ago_s": (now - self._last_search_at) if self._last_search_at > 0 else None,
+            # quiet 期：距本波结束多少秒（用于算 inter-burst 静默还剩多久）
+            "quiet_elapsed_s": (now - self._last_burst_ended_at) if in_quiet else None,
+            "searches_today": self._searches_today,
+            "quota": DAILY_SEARCH_QUOTA,
+        }
+
     async def enforce_pre_search(self, priority: int = 1) -> None:
         """阻塞调用：等到下一次搜索可以执行。
 
@@ -389,7 +408,7 @@ async def _heartbeat_loop(client: "BackendClient") -> None:
     last_devices: list[str] | None = None
     while not _shutdown.is_set():
         devices = healthy_serials()
-        await client.send_heartbeat(devices)
+        await client.send_heartbeat(devices, scheduler=_scheduler.snapshot())
 
         # 顺便拉运行时配置热更新调度参数（前端改过的会在这里生效，≤45s 延迟）
         cfg = await client.fetch_runtime_config()
@@ -718,7 +737,7 @@ async def main() -> int:
         # 启动时先上报一次，建立 worker_status
         from pdd_app_worker.device_manager import healthy_serials
         devs = healthy_serials()
-        await client.send_heartbeat(devs)
+        await client.send_heartbeat(devs, scheduler=_scheduler.snapshot())
         logger.info(f"initial heartbeat sent: devices={devs}")
 
         # 并发跑心跳 + 任务 poll

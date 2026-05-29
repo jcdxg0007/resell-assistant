@@ -144,12 +144,20 @@ async def push_result(result: PddAppResult) -> None:
     )
 
 
-async def record_worker_heartbeat(device_serials: list[str]) -> None:
-    """worker 定期上报"我活着，连了这些手机"。"""
-    payload = {
+async def record_worker_heartbeat(
+    device_serials: list[str], scheduler: dict[str, Any] | None = None
+) -> None:
+    """worker 定期上报"我活着，连了这些手机"。
+
+    scheduler 是 BurstScheduler 快照（burst_remaining / in_quiet / *_ago_s 等），
+    用于 batch_start 精确预估 PDD 队列 ETA；可为空（旧 worker 不上报）。
+    """
+    payload: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "devices": device_serials,
     }
+    if scheduler is not None:
+        payload["scheduler"] = scheduler
     await redis_client.set(
         WORKER_HEARTBEAT_KEY, json.dumps(payload), ex=120  # 2min 没心跳就视为离线
     )
