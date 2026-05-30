@@ -44,7 +44,8 @@ _A_DIMS = [
     ("标题质量", 10.0),
     ("客单价区间", 10.0),
     ("闲鱼竞争度", 10.0),
-    ("图片/卖家信誉", 10.0),
+    ("图片质量", 5.0),
+    ("挂牌新鲜度", 5.0),
 ]
 _B_DIMS = [
     ("价格竞争力", 20.0),
@@ -53,8 +54,14 @@ _B_DIMS = [
     ("标题质量", 10.0),
     ("客单价区间", 10.0),
     ("货源正规度", 10.0),
-    ("图片/店铺信誉", 10.0),
+    ("图片质量", 10.0),
 ]
+
+# PDD worker 上报的 item 是自由 dict，图片字段名不固定，探测多种常见 key。
+_PDD_IMAGE_KEYS = (
+    "image", "image_url", "thumbnail", "thumb_url",
+    "goods_thumbnail_url", "hd_thumb_url", "goods_image",
+)
 
 SIDE_DECISION_LABELS = {
     "buy": "推荐",
@@ -174,6 +181,45 @@ def _supply_quality_frac(badges: list[str] | None, sales: int) -> tuple[float, s
     return min(frac, 1.0), " ".join(bits)
 
 
+def _image_quality_frac(image_count: int) -> tuple[float, str, bool]:
+    """图片质量：列表页一般只有 1 张主图，故主要区分有图/无图；多图留给详情页。"""
+    if image_count <= 0:
+        return 0.2, "无主图", True
+    if image_count >= 3:
+        return 1.0, "多图", True
+    return 0.7, "有主图", True
+
+
+def _freshness_frac(published_at_iso: str | None) -> tuple[float, str, bool]:
+    """挂牌新鲜度：发布越近越好（二手转卖里新挂牌通常更有效、更易成交）。"""
+    if not published_at_iso:
+        return 0.5, "无发布时间", False
+    try:
+        dt = datetime.fromisoformat(published_at_iso)
+    except (ValueError, TypeError):
+        return 0.5, "无发布时间", False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+    if days <= 3:
+        return 1.0, "刚上架", True
+    if days <= 7:
+        return 0.85, "近一周", True
+    if days <= 30:
+        return 0.6, "近一月", True
+    if days <= 90:
+        return 0.35, "较久", True
+    return 0.15, "陈旧挂牌", True
+
+
+def _pdd_image_count(item: dict[str, Any]) -> int:
+    for k in _PDD_IMAGE_KEYS:
+        v = item.get(k)
+        if v:
+            return len(v) if isinstance(v, list) else 1
+    return 0
+
+
 def _profit_margin_frac(margin_pct: float) -> tuple[float, str]:
     if margin_pct > 40:
         return 1.0, "高利润"
@@ -219,12 +265,19 @@ def score_xianyu_side(
     *,
     active_listings: int | None = None,
 ) -> dict[str, Any]:
-    """items: [{product_id, title, price, item_wants}]"""
+    """items: [{product_id, title, price, item_wants, image_urls?, published_at?}]"""
+    orig_by_id: dict[str, dict[str, Any]] = {
+        str(it.get("product_id")): it for it in items if it.get("product_id")
+    }
     cleaned, single_stats, _suite = clean_keyword_sample(items, keyword)
     median = single_stats.median
 
     ranked: list[dict[str, Any]] = []
     for cp in cleaned:
+        orig = orig_by_id.get(cp.product_id, {})
+        image_urls = orig.get("image_urls") or []
+        published_at = orig.get("published_at")
+
         dims: list[dict[str, Any]] = []
         f, lbl = _price_comp_frac(cp.price, median, cp.is_suspicious_low)
         dims.append(_dim("价格竞争力", f, 20.0, lbl, has_data=(median > 0)))
@@ -237,7 +290,10 @@ def score_xianyu_side(
         dims.append(_dim("客单价区间", ps / 10.0, 10.0, pl))
         cf, cl, chas = _competition_frac(active_listings)
         dims.append(_dim("闲鱼竞争度", cf, 10.0, cl, has_data=chas))
-        dims.append(_dim("图片/卖家信誉", 0.5, 10.0, "待详情页数据", has_data=False))
+        imgf, imgl, imghas = _image_quality_frac(len(image_urls) if isinstance(image_urls, list) else 0)
+        dims.append(_dim("图片质量", imgf, 5.0, imgl, has_data=imghas))
+        frf, frl, frhas = _freshness_frac(published_at)
+        dims.append(_dim("挂牌新鲜度", frf, 5.0, frl, has_data=frhas))
 
         total = round(sum(d["score"] for d in dims), 1)
         ranked.append({
@@ -305,7 +361,8 @@ def score_pdd_side(keyword: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         dims.append(_dim("客单价区间", ps / 10.0, 10.0, pl))
         sf, sl = _supply_quality_frac(badges, sales)
         dims.append(_dim("货源正规度", sf, 10.0, sl))
-        dims.append(_dim("图片/店铺信誉", 0.5, 10.0, "待详情页数据", has_data=False))
+        imgf, imgl, imghas = _image_quality_frac(_pdd_image_count(orig))
+        dims.append(_dim("图片质量", imgf, 10.0, imgl, has_data=imghas))
 
         total = round(sum(d["score"] for d in dims), 1)
         ranked.append({

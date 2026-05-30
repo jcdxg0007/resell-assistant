@@ -236,6 +236,8 @@ async def _gather_xianyu_raw(db: AsyncSession, keyword: str) -> tuple[list[dict]
         "title": p.title,
         "price": p.price,
         "item_wants": p.sales_count or 0,
+        "image_urls": p.image_urls,
+        "published_at": p.published_at.isoformat() if p.published_at else None,
     } for p in rows]
     active_listings = (await db.execute(
         select(XianyuMarketData.active_listings)

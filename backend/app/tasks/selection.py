@@ -51,6 +51,16 @@ _ALIBABA_1688_DISABLED: bool = True
 _PDD_USE_APP_WORKER: bool = False
 
 
+def _ms_to_dt(ms) -> datetime | None:
+    """闲鱼列表页 publish_time_ms（毫秒时间戳）→ aware datetime；非法值返回 None。"""
+    try:
+        if not ms:
+            return None
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return None
+
+
 def run_async(coro):
     """Helper to run async code from sync Celery tasks.
 
@@ -473,6 +483,7 @@ async def _xianyu_product_discovery():
                         price=item["price"],
                         image_urls=[item["image_url"]] if item.get("image_url") else None,
                         category=keyword,
+                        published_at=_ms_to_dt(item.get("publish_time_ms")),
                         last_crawled_at=datetime.now(timezone.utc),
                     )
                     db.add(product)
@@ -1254,6 +1265,8 @@ async def _instant_search(
             if product:
                 product.price = item.get("price", product.price)
                 product.last_crawled_at = datetime.now(timezone.utc)
+                if not product.published_at:
+                    product.published_at = _ms_to_dt(item.get("publish_time_ms"))
             else:
                 product = Product(
                     source_platform=Platform.XIANYU,
@@ -1264,6 +1277,7 @@ async def _instant_search(
                     image_urls=[item["image_url"]] if item.get("image_url") else None,
                     category=keyword,
                     sales_count=item.get("want_count", 0),
+                    published_at=_ms_to_dt(item.get("publish_time_ms")),
                     last_crawled_at=datetime.now(timezone.utc),
                 )
                 db.add(product)
