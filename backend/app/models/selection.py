@@ -82,6 +82,19 @@ class Keyword(Base, UUIDMixin, TimestampMixin):
         Integer, default=0, nullable=False, server_default="0"
     )
 
+    # ── 闲鱼 调度专属字段（与 PDD 一组对称，迁移 a1b2c3d4e5f6）──
+    # 让闲鱼自动采集也走词库：xianyu_safe=FALSE 的词不参与闲鱼自动跑批。
+    xianyu_safe: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False, server_default="true"
+    )
+    xianyu_last_searched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    xianyu_last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    xianyu_searches_total: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False, server_default="0"
+    )
+
     category: Mapped["Category"] = relationship(back_populates="keywords")
     products: Mapped[list["KeywordProduct"]] = relationship(
         back_populates="keyword", cascade="all, delete-orphan"

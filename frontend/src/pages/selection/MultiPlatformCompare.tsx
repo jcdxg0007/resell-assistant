@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, InputNumber, Button, Space, Tag, Row, Col,
-  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Empty, Switch,
+  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Empty, Switch, Segmented,
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
@@ -23,8 +23,17 @@ interface ProductItem {
 }
 
 // ── PDD 侧 ────────────────────────────────────────────────────
-interface PendingKw { keyword_id: string; text: string; category_name: string | null; pdd_mode: string; pdd_eta_sec?: number | null; xianyu_eta_sec?: number | null; }
-interface CollectedKw { keyword_text: string; category_name: string | null; status: string; items_count: number; run_id: string; last_run_at: string | null; pdd_last_at?: string | null; xianyu_last_at?: string | null; }
+interface PendingKw {
+  keyword_id: string; text: string; category_name: string | null; pdd_mode: string;
+  pdd_pending?: boolean; xianyu_pending?: boolean;
+  pdd_eta_sec?: number | null; xianyu_eta_sec?: number | null;
+}
+interface CollectedKw {
+  keyword_text: string; category_name: string | null; run_id: string | null;
+  last_run_at: string | null;
+  pdd?: { status: string; items_count: number; last_at: string | null } | null;
+  xianyu?: { items_count: number; last_at: string | null } | null;
+}
 interface RiskItem { id: string; keyword_text: string; risk_signals: string[]; created_at: string | null; }
 interface PddProduct { title?: string; price?: number | string; sales?: number; badges?: string[]; }
 
@@ -34,6 +43,8 @@ interface Console {
   target_count_max: number | null;
   auto_batch_enabled?: boolean;
   auto_next_at?: string | null;
+  xianyu_auto_batch_enabled?: boolean;
+  xianyu_auto_next_at?: string | null;
   pending: PendingKw[];
   collected: CollectedKw[];
   recent_risk: RiskItem[];
@@ -44,12 +55,17 @@ interface Console {
 
 interface AutoConfig {
   auto_batch_enabled: boolean;
-  auto_both_platforms: boolean;
   auto_active_start_hour: number;
   auto_active_end_hour: number;
   auto_interval_min_minutes: number;
   auto_interval_max_minutes: number;
   auto_batch_count: number;
+  xianyu_auto_batch_enabled: boolean;
+  xianyu_auto_active_start_hour: number;
+  xianyu_auto_active_end_hour: number;
+  xianyu_auto_interval_min_minutes: number;
+  xianyu_auto_interval_max_minutes: number;
+  xianyu_auto_batch_count: number;
 }
 
 const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
@@ -60,11 +76,6 @@ const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
   risk_blocked: { color: 'volcano', label: '风控' },
   timeout: { color: 'orange', label: '超时' },
 };
-const pddStatusTag = (s: string) => {
-  const m = PDD_STATUS_META[s] || { color: 'default', label: s };
-  return <Tag color={m.color}>{m.label}</Tag>;
-};
-
 const fmtTime = (iso: string | null) => {
   if (!iso) return '—';
   return new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -107,8 +118,8 @@ const MultiPlatformCompare: React.FC = () => {
   const [tcMax, setTcMax] = useState<number | null>(null);
   const [savingRange, setSavingRange] = useState(false);
 
-  // 批量任务：同时跑开关（默认开）+ 开始/暂停
-  const [bothPlatforms, setBothPlatforms] = useState(true);
+  // 批量任务：平台选择（闲鱼/PDD/同时）+ 开始/暂停
+  const [batchPlatform, setBatchPlatform] = useState<'both' | 'pdd' | 'xianyu'>('both');
   const [batchLoading, setBatchLoading] = useState(false);
 
   // 选中的已采集关键词 + 其商品
@@ -129,12 +140,17 @@ const MultiPlatformCompare: React.FC = () => {
       const c = res.data || {};
       setAuto({
         auto_batch_enabled: !!c.auto_batch_enabled,
-        auto_both_platforms: c.auto_both_platforms ?? true,
         auto_active_start_hour: c.auto_active_start_hour ?? 9,
         auto_active_end_hour: c.auto_active_end_hour ?? 23,
         auto_interval_min_minutes: c.auto_interval_min_minutes ?? 40,
         auto_interval_max_minutes: c.auto_interval_max_minutes ?? 120,
         auto_batch_count: c.auto_batch_count ?? 3,
+        xianyu_auto_batch_enabled: !!c.xianyu_auto_batch_enabled,
+        xianyu_auto_active_start_hour: c.xianyu_auto_active_start_hour ?? 9,
+        xianyu_auto_active_end_hour: c.xianyu_auto_active_end_hour ?? 23,
+        xianyu_auto_interval_min_minutes: c.xianyu_auto_interval_min_minutes ?? 40,
+        xianyu_auto_interval_max_minutes: c.xianyu_auto_interval_max_minutes ?? 120,
+        xianyu_auto_batch_count: c.xianyu_auto_batch_count ?? 3,
       });
     } catch { /* 静默 */ }
   }, []);
@@ -145,7 +161,8 @@ const MultiPlatformCompare: React.FC = () => {
       await api.put('/pdd-worker-config/', { patch });
       setAuto((prev) => prev ? { ...prev, ...patch } : prev);
       message.success('已保存，下个唤醒周期生效');
-    } catch (e: any) {
+    } catch (err) {
+      const e = err as { response?: { data?: { detail?: string } } };
       message.error(e?.response?.data?.detail || '保存失败');
       await loadAuto();
     } finally {
@@ -267,11 +284,15 @@ const MultiPlatformCompare: React.FC = () => {
     startAutoRefresh(kw);
   };
 
-  // 待采集池里直接采一个词（同时跑开启则闲鱼也跑）
-  const dispatchPending = async (kw: string) => {
+  // 待采集池里直接采一个词：按该词还缺哪个平台就派哪个（闲鱼失败不阻断 PDD）
+  const dispatchPending = async (p: PendingKw) => {
+    const kw = p.text;
     try {
-      await searchPdd(kw);
-      if (bothPlatforms) { try { await searchXianyu(kw); } catch { /* 闲鱼失败不影响 PDD */ } }
+      const jobs: Promise<unknown>[] = [];
+      if (p.pdd_pending) jobs.push(searchPdd(kw));
+      if (p.xianyu_pending) jobs.push(searchXianyu(kw).catch(() => undefined));
+      if (jobs.length === 0) jobs.push(searchXianyu(kw));  // 兜底
+      await Promise.all(jobs);
       message.success(`已派发「${kw}」，结果生成后自动刷新`);
       startAutoRefresh(kw);
     } catch (err) {
@@ -280,18 +301,20 @@ const MultiPlatformCompare: React.FC = () => {
     }
   };
 
-  // 批量任务
+  // 批量任务（按所选平台跑今日待采集池）
   const startBatch = async () => {
     setBatchLoading(true);
     try {
-      const res = await api.post('/pdd-runs/batch/start', { both_platforms: bothPlatforms });
+      const res = await api.post('/pdd-runs/batch/start', { platform: batchPlatform });
       const d = res.data;
-      const xyNote = d.both_platforms && d.xianyu_scheduled ? `；闲鱼 ${d.xianyu_scheduled} 个按 ~90s 错峰陆续跑` : '';
-      message.success(`已排入 ${d.enqueued} 个词${d.capped_by_quota ? '（受每日配额限制，剩余下次再跑）' : ''}，worker 按拟人节奏陆续采集${xyNote}`);
+      const parts: string[] = [];
+      if (d.enqueued) parts.push(`PDD 排入 ${d.enqueued} 个词`);
+      if (d.xianyu_scheduled) parts.push(`闲鱼 ${d.xianyu_scheduled} 个按 ~90s 错峰陆续跑`);
+      message.success(parts.length ? `已开始：${parts.join('；')}` : '今日待采集池为空，无需开始');
       fetchConsole();
     } catch (err) {
       const e = err as { response?: { status?: number } };
-      message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法开始' : '开始任务失败');
+      message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法开始 PDD 任务' : '开始任务失败');
     } finally { setBatchLoading(false); }
   };
 
@@ -445,100 +468,153 @@ const MultiPlatformCompare: React.FC = () => {
             </Space>
           </Space>
           <Space size={12} wrap>
-            <Tooltip title="开启后：批量任务和待采集池的「采集」按钮，每个词都同时跑闲鱼+PDD">
-              <Space size={4}>
-                <Text type="secondary" style={{ fontSize: 12 }}>关键词同时跑</Text>
-                <Switch size="small" checked={bothPlatforms} onChange={setBothPlatforms} />
-              </Space>
+            <Tooltip title="选择「开始任务」批量跑哪个平台的待采集词：同时 = 两边各按各自待采集集合派">
+              <Segmented
+                size="small"
+                value={batchPlatform}
+                onChange={(v) => setBatchPlatform(v as 'both' | 'pdd' | 'xianyu')}
+                options={[{ label: '同时', value: 'both' }, { label: '仅闲鱼', value: 'xianyu' }, { label: '仅PDD', value: 'pdd' }]}
+              />
             </Tooltip>
-            {batchRunning ? (
-              <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading} onClick={pauseBatch}>暂停任务</Button>
-            ) : (
-              <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={batchLoading} onClick={startBatch}>开始任务</Button>
+            <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={batchLoading} onClick={startBatch}>开始任务</Button>
+            {batchRunning && (
+              <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading} onClick={pauseBatch}>暂停 PDD</Button>
             )}
-            {(cons?.queued ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 12 }}>队列 {cons?.queued}</Text>}
+            {(cons?.queued ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 12 }}>PDD 队列 {cons?.queued}</Text>}
             {cons?.paused && <Tag color="orange">已暂停</Tag>}
           </Space>
         </Space>
       </Card>
 
-      {/* 全自动采集（beat 定时随机错峰派词） */}
-      <Card
-        title={
-          <Space>
-            全自动采集
-            <Tooltip title="开启后 backend 定时在活跃时段内按随机间隔自动从词库挑词派任务，无需手动。「暂停任务」会一并停掉它。">
-              <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>（无人值守）</Text>
-            </Tooltip>
-          </Space>
-        }
-        size="small"
-        extra={
-          auto?.auto_batch_enabled
-            ? <Tag color="green">运行中{cons?.auto_next_at ? ` · 下次约 ${fmtHM(cons.auto_next_at)}` : ''}</Tag>
-            : <Tag>已关闭</Tag>
-        }
-      >
-        {auto ? (
-          <Space size="large" wrap>
-            <Space size={4}>
-              <Text type="secondary" style={{ fontSize: 12 }}>全自动跑批</Text>
-              <Switch
-                size="small" checked={auto.auto_batch_enabled} loading={savingAuto}
-                onChange={(v) => saveAuto({ auto_batch_enabled: v })}
-              />
-            </Space>
-            <Space size={4}>
-              <Text type="secondary" style={{ fontSize: 12 }}>同时跑闲鱼</Text>
-              <Switch
-                size="small" checked={auto.auto_both_platforms} loading={savingAuto}
-                onChange={(v) => saveAuto({ auto_both_platforms: v })}
-              />
-            </Space>
-            <Space size={4}>
-              <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
-              <InputNumber
-                size="small" min={0} max={23} value={auto.auto_active_start_hour} style={{ width: 60 }}
-                onChange={(v) => setAuto((p) => p ? { ...p, auto_active_start_hour: v ?? 0 } : p)}
-                onBlur={() => saveAuto({ auto_active_start_hour: auto.auto_active_start_hour })}
-                addonAfter="点"
-              />
-              <Text type="secondary">~</Text>
-              <InputNumber
-                size="small" min={0} max={23} value={auto.auto_active_end_hour} style={{ width: 60 }}
-                onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
-                onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
-                addonAfter="点"
-              />
-            </Space>
-            <Space size={4}>
-              <Tooltip title="两波之间的间隔在此区间内随机取，避免每天固定钟点上线被识别为机器">
-                <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
-              </Tooltip>
-              <InputNumber
-                size="small" min={5} max={720} value={auto.auto_interval_min_minutes} style={{ width: 70 }}
-                onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_min_minutes: v ?? 5 } : p)}
-                onBlur={() => saveAuto({ auto_interval_min_minutes: auto.auto_interval_min_minutes })}
-              />
-              <Text type="secondary">~</Text>
-              <InputNumber
-                size="small" min={5} max={1440} value={auto.auto_interval_max_minutes} style={{ width: 70 }}
-                onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_max_minutes: v ?? 5 } : p)}
-                onBlur={() => saveAuto({ auto_interval_max_minutes: auto.auto_interval_max_minutes })}
-                addonAfter="分"
-              />
-            </Space>
-            <Space size={4}>
-              <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
-              <InputNumber
-                size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 60 }}
-                onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
-                onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
-              />
-            </Space>
-          </Space>
-        ) : <Text type="secondary">加载中…</Text>}
-      </Card>
+      {/* 全自动采集：闲鱼 / PDD 各一套独立开关（beat 定时随机错峰派词，都走词库） */}
+      <Row gutter={16}>
+        <Col xs={24} md={12}>
+          <Card
+            title={<Space><Tag color="gold">闲鱼</Tag>全自动采集</Space>}
+            size="small"
+            extra={
+              auto?.xianyu_auto_batch_enabled
+                ? <Tag color="green">运行中{cons?.xianyu_auto_next_at ? ` · 下次约 ${fmtHM(cons.xianyu_auto_next_at)}` : ''}</Tag>
+                : <Tag>已关闭</Tag>
+            }
+          >
+            {auto ? (
+              <Space size="large" wrap>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>自动开关</Text>
+                  <Switch
+                    size="small" checked={auto.xianyu_auto_batch_enabled} loading={savingAuto}
+                    onChange={(v) => saveAuto({ xianyu_auto_batch_enabled: v })}
+                  />
+                </Space>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
+                  <InputNumber
+                    size="small" min={0} max={23} value={auto.xianyu_auto_active_start_hour} style={{ width: 56 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_active_start_hour: v ?? 0 } : p)}
+                    onBlur={() => saveAuto({ xianyu_auto_active_start_hour: auto.xianyu_auto_active_start_hour })}
+                  />
+                  <Text type="secondary">~</Text>
+                  <InputNumber
+                    size="small" min={0} max={23} value={auto.xianyu_auto_active_end_hour} style={{ width: 56 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_active_end_hour: v ?? 0 } : p)}
+                    onBlur={() => saveAuto({ xianyu_auto_active_end_hour: auto.xianyu_auto_active_end_hour })}
+                    addonAfter="点"
+                  />
+                </Space>
+                <Space size={4}>
+                  <Tooltip title="两波之间的间隔在此区间内随机取，避免固定钟点被识别为机器">
+                    <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
+                  </Tooltip>
+                  <InputNumber
+                    size="small" min={5} max={720} value={auto.xianyu_auto_interval_min_minutes} style={{ width: 64 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_interval_min_minutes: v ?? 5 } : p)}
+                    onBlur={() => saveAuto({ xianyu_auto_interval_min_minutes: auto.xianyu_auto_interval_min_minutes })}
+                  />
+                  <Text type="secondary">~</Text>
+                  <InputNumber
+                    size="small" min={5} max={1440} value={auto.xianyu_auto_interval_max_minutes} style={{ width: 64 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_interval_max_minutes: v ?? 5 } : p)}
+                    onBlur={() => saveAuto({ xianyu_auto_interval_max_minutes: auto.xianyu_auto_interval_max_minutes })}
+                    addonAfter="分"
+                  />
+                </Space>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
+                  <InputNumber
+                    size="small" min={1} max={10} value={auto.xianyu_auto_batch_count} style={{ width: 56 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_batch_count: v ?? 1 } : p)}
+                    onBlur={() => saveAuto({ xianyu_auto_batch_count: auto.xianyu_auto_batch_count })}
+                  />
+                </Space>
+              </Space>
+            ) : <Text type="secondary">加载中…</Text>}
+          </Card>
+        </Col>
+        <Col xs={24} md={12}>
+          <Card
+            title={<Space><Tag color="red">PDD</Tag>全自动采集</Space>}
+            size="small"
+            extra={
+              auto?.auto_batch_enabled
+                ? <Tag color="green">运行中{cons?.auto_next_at ? ` · 下次约 ${fmtHM(cons.auto_next_at)}` : ''}</Tag>
+                : <Tag>已关闭</Tag>
+            }
+          >
+            {auto ? (
+              <Space size="large" wrap>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>自动开关</Text>
+                  <Switch
+                    size="small" checked={auto.auto_batch_enabled} loading={savingAuto}
+                    onChange={(v) => saveAuto({ auto_batch_enabled: v })}
+                  />
+                </Space>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
+                  <InputNumber
+                    size="small" min={0} max={23} value={auto.auto_active_start_hour} style={{ width: 56 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, auto_active_start_hour: v ?? 0 } : p)}
+                    onBlur={() => saveAuto({ auto_active_start_hour: auto.auto_active_start_hour })}
+                  />
+                  <Text type="secondary">~</Text>
+                  <InputNumber
+                    size="small" min={0} max={23} value={auto.auto_active_end_hour} style={{ width: 56 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
+                    onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
+                    addonAfter="点"
+                  />
+                </Space>
+                <Space size={4}>
+                  <Tooltip title="两波之间的间隔在此区间内随机取，避免固定钟点被识别为机器">
+                    <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
+                  </Tooltip>
+                  <InputNumber
+                    size="small" min={5} max={720} value={auto.auto_interval_min_minutes} style={{ width: 64 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_min_minutes: v ?? 5 } : p)}
+                    onBlur={() => saveAuto({ auto_interval_min_minutes: auto.auto_interval_min_minutes })}
+                  />
+                  <Text type="secondary">~</Text>
+                  <InputNumber
+                    size="small" min={5} max={1440} value={auto.auto_interval_max_minutes} style={{ width: 64 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_max_minutes: v ?? 5 } : p)}
+                    onBlur={() => saveAuto({ auto_interval_max_minutes: auto.auto_interval_max_minutes })}
+                    addonAfter="分"
+                  />
+                </Space>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
+                  <InputNumber
+                    size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 56 }}
+                    onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
+                    onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
+                  />
+                </Space>
+              </Space>
+            ) : <Text type="secondary">加载中…</Text>}
+          </Card>
+        </Col>
+      </Row>
 
       {cons?.recent_risk && cons.recent_risk.length > 0 && (
         <Alert
@@ -566,19 +642,23 @@ const MultiPlatformCompare: React.FC = () => {
                 renderItem={(p) => (
                   <List.Item
                     actions={[
-                      <Button key="go" size="small" type="link" icon={<ThunderboltOutlined />} onClick={() => dispatchPending(p.text)}>采集</Button>,
+                      <Button key="go" size="small" type="link" icon={<ThunderboltOutlined />} onClick={() => dispatchPending(p)}>采集</Button>,
                     ]}
                   >
-                    <Space direction="vertical" size={0}>
+                    <Space direction="vertical" size={2}>
                       <Space size={6}>
                         <Text>{p.text}</Text>
                         {p.category_name && <Tag>{p.category_name}</Tag>}
+                        {p.xianyu_pending && <Tag color="gold">待闲鱼</Tag>}
+                        {p.pdd_pending && <Tag color="red">待PDD</Tag>}
                       </Space>
-                      {(p.pdd_eta_sec != null || p.xianyu_eta_sec != null) && (
+                      {(p.pdd_pending && p.pdd_eta_sec != null) || (p.xianyu_pending && p.xianyu_eta_sec != null) ? (
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                          预估开始 PDD：{fmtEta(p.pdd_eta_sec)}　闲鱼：{fmtEta(p.xianyu_eta_sec)}
+                          预估开始
+                          {p.xianyu_pending && p.xianyu_eta_sec != null ? ` 闲鱼：${fmtEta(p.xianyu_eta_sec)}` : ''}
+                          {p.pdd_pending && p.pdd_eta_sec != null ? ` PDD：${fmtEta(p.pdd_eta_sec)}` : ''}
                         </Text>
-                      )}
+                      ) : null}
                     </Space>
                   </List.Item>
                 )}
@@ -598,15 +678,19 @@ const MultiPlatformCompare: React.FC = () => {
                     onClick={() => loadItems(c.keyword_text)}
                     style={{ cursor: 'pointer', background: selectedKw === c.keyword_text ? '#e6f4ff' : undefined, paddingInline: 8, borderRadius: 4 }}
                   >
-                    <Space direction="vertical" size={0}>
-                      <Space size={6}>
-                        <Text strong={selectedKw === c.keyword_text}>{c.keyword_text}</Text>
-                        {pddStatusTag(c.status)}
-                        <Text type="secondary" style={{ fontSize: 12 }}>{c.items_count} 件</Text>
+                    <Space direction="vertical" size={4}>
+                      <Text strong={selectedKw === c.keyword_text}>{c.keyword_text}</Text>
+                      <Space size={6} wrap>
+                        {c.xianyu && (
+                          <Tag color="gold">闲鱼 {fmtHM(c.xianyu.last_at)} · {c.xianyu.items_count}件</Tag>
+                        )}
+                        {c.pdd && (
+                          <Tag color="red">
+                            PDD {fmtHM(c.pdd.last_at)} · {c.pdd.items_count}件
+                            {c.pdd.status !== 'ok' ? ` · ${PDD_STATUS_META[c.pdd.status]?.label || c.pdd.status}` : ''}
+                          </Tag>
+                        )}
                       </Space>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        完成 PDD：{fmtHM(c.pdd_last_at ?? c.last_run_at)}　闲鱼：{fmtHM(c.xianyu_last_at)}
-                      </Text>
                     </Space>
                   </List.Item>
                 )}

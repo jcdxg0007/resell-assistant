@@ -3,7 +3,7 @@ Selection engine Celery tasks.
 Handles periodic product discovery, price monitoring, and data collection.
 """
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from sqlalchemy import select
@@ -432,6 +432,65 @@ async def _xianyu_price_monitor():
             except Exception as e:
                 logger.error(f"Price monitor failed for {product.id}: {e}")
                 continue
+
+
+def _in_window(hour: int, start: int, end: int) -> bool:
+    """当前小时是否在活跃时段内。start==end 视为全天；start>end 视为跨夜。"""
+    if start == end:
+        return True
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+@celery_app.task(name="app.tasks.selection.xianyu_auto_batch_tick")
+def xianyu_auto_batch_tick():
+    """闲鱼全自动采集 tick（beat 每 3 分钟唤醒，闸门全在任务内部判断）。
+
+    与 PDD 自动跑批对称、但独立：开关 / 活跃时段 / 随机下次时刻全读自己那套
+    xianyu_auto_* 配置，从词库挑 xianyu_safe 的词派闲鱼采集。
+    """
+    run_async(_xianyu_auto_batch_tick())
+
+
+async def _xianyu_auto_batch_tick():
+    import random as _random
+    import time as _time
+    from app.services.pdd_app_queue import (
+        get_xianyu_auto_next_ts, set_xianyu_auto_next_ts, is_collection_paused,
+    )
+    from app.services.pdd_worker_config import get_runtime_config
+    from app.services.xianyu_autobatch import dispatch_xianyu_batch
+
+    async with AsyncSessionLocal() as db:
+        cfg = await get_runtime_config(db)
+
+    if not cfg.get("xianyu_auto_batch_enabled"):
+        return
+    if await is_collection_paused():
+        logger.info("xianyu auto tick: 采集已暂停，跳过")
+        return
+
+    cn_tz = timezone(timedelta(hours=8))
+    hour = datetime.now(cn_tz).hour
+    start = int(cfg.get("xianyu_auto_active_start_hour", 9))
+    end = int(cfg.get("xianyu_auto_active_end_hour", 23))
+    if not _in_window(hour, start, end):
+        return
+
+    now = _time.time()
+    next_ts = await get_xianyu_auto_next_ts()
+    if next_ts is not None and now < next_ts:
+        return
+
+    gmin = int(cfg.get("xianyu_auto_interval_min_minutes", 40))
+    gmax = int(cfg.get("xianyu_auto_interval_max_minutes", 120))
+    if gmin > gmax:
+        gmin, gmax = gmax, gmin
+    await set_xianyu_auto_next_ts(now + _random.uniform(gmin, gmax) * 60)
+
+    count = int(cfg.get("xianyu_auto_batch_count", 3))
+    await dispatch_xianyu_batch(count=count)
 
 
 @celery_app.task(name="app.tasks.selection.xianyu_product_discovery")

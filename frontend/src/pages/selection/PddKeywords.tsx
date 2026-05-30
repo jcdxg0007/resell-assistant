@@ -28,6 +28,10 @@ interface KeywordRow {
   pdd_last_searched_at: string | null;
   pdd_last_status: string | null;
   pdd_searches_total: number;
+  xianyu_safe: boolean;
+  xianyu_last_searched_at: string | null;
+  xianyu_last_status: string | null;
+  xianyu_searches_total: number;
 }
 
 const MODE_OPTIONS = [
@@ -115,7 +119,7 @@ const PddKeywords: React.FC = () => {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ pdd_mode: 'fast', pdd_safe: true, schedule_enabled: true, category_id: catFilter });
+    form.setFieldsValue({ pdd_mode: 'fast', pdd_safe: true, xianyu_safe: true, schedule_enabled: true, category_id: catFilter });
     setModalOpen(true);
   };
 
@@ -123,7 +127,7 @@ const PddKeywords: React.FC = () => {
     setEditing(r);
     form.setFieldsValue({
       text: r.text, category_id: r.category_id, pdd_mode: r.pdd_mode,
-      pdd_safe: r.pdd_safe, schedule_enabled: r.schedule_enabled,
+      pdd_safe: r.pdd_safe, xianyu_safe: r.xianyu_safe, schedule_enabled: r.schedule_enabled,
     });
     setModalOpen(true);
   };
@@ -180,15 +184,22 @@ const PddKeywords: React.FC = () => {
       render: (m: string) => <Tag>{MODE_LABEL[m] || m}</Tag>,
     },
     {
-      title: <Tooltip title="关：即使开启调度也会被轮播跳过（用于禁用敏感词）">安全词</Tooltip>,
-      dataIndex: 'pdd_safe', width: 80,
+      title: <Tooltip title="关：PDD 自动跑批会跳过该词（用于禁用敏感词）">PDD</Tooltip>,
+      dataIndex: 'pdd_safe', width: 64,
       render: (v: boolean, r) => (
         <Switch size="small" checked={v} onChange={(c) => patchKeyword(r.id, { pdd_safe: c })} />
       ),
     },
     {
-      title: <Tooltip title="是否纳入词库自动轮播">调度</Tooltip>,
-      dataIndex: 'schedule_enabled', width: 70,
+      title: <Tooltip title="关：闲鱼自动采集会跳过该词">闲鱼</Tooltip>,
+      dataIndex: 'xianyu_safe', width: 64,
+      render: (v: boolean, r) => (
+        <Switch size="small" checked={v} onChange={(c) => patchKeyword(r.id, { xianyu_safe: c })} />
+      ),
+    },
+    {
+      title: <Tooltip title="总开关：关掉后两个平台的自动轮播都跳过该词">调度</Tooltip>,
+      dataIndex: 'schedule_enabled', width: 64,
       render: (v: boolean, r) => (
         <Switch size="small" checked={v} onChange={(c) => patchKeyword(r.id, { schedule_enabled: c })} />
       ),
@@ -279,7 +290,7 @@ const PddKeywords: React.FC = () => {
               loading={loading}
               columns={columns}
               dataSource={rows}
-              scroll={{ x: 820 }}
+              scroll={{ x: 880 }}
               pagination={{
                 current: page, total, pageSize: 20, showSizeChanger: false,
                 onChange: (p) => fetchKeywords(p), showTotal: (t) => `共 ${t} 个词`,
@@ -314,12 +325,17 @@ const PddKeywords: React.FC = () => {
             <Select options={MODE_OPTIONS} />
           </Form.Item>
           <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="pdd_safe" label="安全词（参与轮播）" valuePropName="checked">
-                <Switch checkedChildren="安全" unCheckedChildren="禁用" />
+            <Col span={8}>
+              <Form.Item name="pdd_safe" label="PDD 自动" valuePropName="checked">
+                <Switch checkedChildren="开" unCheckedChildren="关" />
               </Form.Item>
             </Col>
-            <Col span={12}>
+            <Col span={8}>
+              <Form.Item name="xianyu_safe" label="闲鱼 自动" valuePropName="checked">
+                <Switch checkedChildren="开" unCheckedChildren="关" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
               <Form.Item name="schedule_enabled" label="纳入调度" valuePropName="checked">
                 <Switch />
               </Form.Item>

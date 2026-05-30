@@ -41,14 +41,21 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "humanize_pace": 1.0,
     "target_count_min": 8,
     "target_count_max": 20,
-    # ── 全自动跑批（backend celery beat 读，worker 不用）──
+    # ── PDD 全自动跑批（backend celery beat 读，worker 不用）──
     "auto_batch_enabled": False,
-    "auto_both_platforms": True,
+    "auto_both_platforms": False,  # 已弃用：闲鱼有独立自动开关，默认关避免双跑
     "auto_active_start_hour": 9,
     "auto_active_end_hour": 23,
     "auto_interval_min_minutes": 40,
     "auto_interval_max_minutes": 120,
     "auto_batch_count": 3,
+    # ── 闲鱼 全自动采集（与 PDD 独立的一套，backend celery beat 读）──
+    "xianyu_auto_batch_enabled": False,
+    "xianyu_auto_active_start_hour": 9,
+    "xianyu_auto_active_end_hour": 23,
+    "xianyu_auto_interval_min_minutes": 40,
+    "xianyu_auto_interval_max_minutes": 120,
+    "xianyu_auto_batch_count": 3,
 }
 
 # 每个参数的类型 / 范围 / 中文标签 / 分组 / 说明。
@@ -177,6 +184,39 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "help": "每次自动派几个词（同品类聚集）。建议 ≤ 单波最多搜索次数，"
                 "让一波正好在一个 burst 内消化。",
     },
+    "xianyu_auto_batch_enabled": {
+        "type": "bool",
+        "label": "闲鱼全自动采集", "group": "闲鱼自动",
+        "help": "开启后 backend 定时在活跃时段内按随机间隔，从词库里 xianyu_safe 的词"
+                "自动派闲鱼采集。与 PDD 自动跑批互相独立。",
+    },
+    "xianyu_auto_active_start_hour": {
+        "type": "int", "min": 0, "max": 23,
+        "label": "闲鱼活跃时段起(点)", "group": "闲鱼自动",
+        "help": "几点开始允许闲鱼自动采集（北京时间）。起>止视为跨夜。",
+    },
+    "xianyu_auto_active_end_hour": {
+        "type": "int", "min": 0, "max": 23,
+        "label": "闲鱼活跃时段止(点)", "group": "闲鱼自动",
+        "help": "几点停止闲鱼自动采集（北京时间）。起==止视为全天。",
+    },
+    "xianyu_auto_interval_min_minutes": {
+        "type": "int", "min": 5, "max": 720,
+        "label": "闲鱼两波最短间隔(分)", "group": "闲鱼自动",
+        "pair": "xianyu_auto_interval_max_minutes",
+        "help": "两次闲鱼自动派词之间的最短间隔，实际在[最短,最长]随机取。",
+    },
+    "xianyu_auto_interval_max_minutes": {
+        "type": "int", "min": 5, "max": 1440,
+        "label": "闲鱼两波最长间隔(分)", "group": "闲鱼自动",
+        "pair_min": "xianyu_auto_interval_min_minutes",
+        "help": "两次闲鱼自动派词之间的最长间隔。",
+    },
+    "xianyu_auto_batch_count": {
+        "type": "int", "min": 1, "max": 10,
+        "label": "闲鱼每波派词数", "group": "闲鱼自动",
+        "help": "每次闲鱼自动派几个词。闲鱼有自己的合规闸(≥60s/40h)，会自动错峰。",
+    },
 }
 
 
@@ -277,5 +317,5 @@ def specs_for_frontend() -> dict[str, Any]:
     return {
         "params": PARAM_SPECS,
         "defaults": DEFAULT_RUNTIME_CONFIG,
-        "groups": ["节奏", "阵发", "配额", "采集量", "自动跑批"],
+        "groups": ["节奏", "阵发", "配额", "采集量", "自动跑批", "闲鱼自动"],
     }

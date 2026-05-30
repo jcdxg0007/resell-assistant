@@ -52,6 +52,10 @@ def _keyword_out(k: Keyword) -> dict[str, Any]:
         "pdd_last_searched_at": k.pdd_last_searched_at.isoformat() if k.pdd_last_searched_at else None,
         "pdd_last_status": k.pdd_last_status,
         "pdd_searches_total": k.pdd_searches_total,
+        "xianyu_safe": k.xianyu_safe,
+        "xianyu_last_searched_at": k.xianyu_last_searched_at.isoformat() if k.xianyu_last_searched_at else None,
+        "xianyu_last_status": k.xianyu_last_status,
+        "xianyu_searches_total": k.xianyu_searches_total,
     }
 
 
@@ -155,6 +159,7 @@ class KeywordCreate(BaseModel):
     pdd_mode: str = Field("fast")
     pdd_safe: bool = True
     schedule_enabled: bool = True
+    xianyu_safe: bool = True
 
 
 class KeywordUpdate(BaseModel):
@@ -164,6 +169,7 @@ class KeywordUpdate(BaseModel):
     pdd_safe: bool | None = None
     schedule_enabled: bool | None = None
     is_active: bool | None = None
+    xianyu_safe: bool | None = None
 
 
 async def _get_keyword(db: AsyncSession, kid: str) -> Keyword:
@@ -192,6 +198,7 @@ async def create_keyword(
         pdd_mode=body.pdd_mode,
         pdd_safe=body.pdd_safe,
         schedule_enabled=body.schedule_enabled,
+        xianyu_safe=body.xianyu_safe,
     )
     db.add(k)
     try:
@@ -228,6 +235,8 @@ async def update_keyword(
         k.schedule_enabled = body.schedule_enabled
     if body.is_active is not None:
         k.is_active = body.is_active
+    if body.xianyu_safe is not None:
+        k.xianyu_safe = body.xianyu_safe
     try:
         await db.commit()
     except IntegrityError:

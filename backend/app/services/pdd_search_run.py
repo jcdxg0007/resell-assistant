@@ -167,57 +167,80 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
     ok_like = by_status.get("ok", 0) + by_status.get("partial", 0)
     success_rate = round(ok_like / today_total * 100, 1) if today_total else None
 
-    # ── 已采集池（今天跑过的词，按 text 去重取最新）──
+    # ── 今日 PDD 采集（按 keyword_text 去重取最新一条）──
     runs_today_stmt = (
         select(PddSearchRun)
         .where(PddSearchRun.created_at >= day_start)
         .order_by(PddSearchRun.created_at.desc())
     )
-    collected: list[dict[str, Any]] = []
-    seen_text: set[str] = set()
-    done_keyword_ids: set[str] = set()
+    pdd_map: dict[str, dict[str, Any]] = {}  # text -> 该词今日最新 PDD 记录
+    done_pdd_keyword_ids: set[str] = set()
     for r in (await db.execute(runs_today_stmt)).scalars().all():
         if r.keyword_id:
-            done_keyword_ids.add(str(r.keyword_id))
-        if r.keyword_text in seen_text:
+            done_pdd_keyword_ids.add(str(r.keyword_id))
+        if r.keyword_text in pdd_map:
             continue
-        seen_text.add(r.keyword_text)
-        collected.append({
-            "keyword_text": r.keyword_text,
-            "category_name": r.category_name,
+        pdd_map[r.keyword_text] = {
             "status": r.status,
             "items_count": r.items_count,
+            "last_at": r.created_at.isoformat() if r.created_at else None,
+            "ts": r.created_at,
             "run_id": str(r.id),
-            "pdd_last_at": r.created_at.isoformat() if r.created_at else None,
-            "last_run_at": r.created_at.isoformat() if r.created_at else None,
-            "xianyu_last_at": None,  # 下面补
+            "category_name": r.category_name,
+        }
+
+    # ── 今日 闲鱼 采集（按 category=关键词聚合 today 入库商品）──
+    from app.models.product import Product
+    xy_rows = (await db.execute(
+        select(Product.category, func.count(), func.max(Product.created_at))
+        .where(Product.source_platform == "xianyu")
+        .where(Product.category.isnot(None))
+        .where(Product.created_at >= day_start)
+        .group_by(Product.category)
+    )).all()
+    xianyu_map: dict[str, dict[str, Any]] = {}  # text -> {count, last_at, ts}
+    for cat, cnt, ts in xy_rows:
+        xianyu_map[cat] = {
+            "items_count": int(cnt or 0),
+            "last_at": ts.isoformat() if ts else None,
+            "ts": ts,
+        }
+    xianyu_done_texts: set[str] = set(xianyu_map.keys())
+
+    # ── 已采集池：两边并到一行，各带平台标签 + 时间 ──
+    collected: list[dict[str, Any]] = []
+    for text_ in set(pdd_map) | set(xianyu_map):
+        p = pdd_map.get(text_)
+        x = xianyu_map.get(text_)
+        ts_list = [t for t in (p["ts"] if p else None, x["ts"] if x else None) if t]
+        last_ts = max(ts_list) if ts_list else None
+        collected.append({
+            "keyword_text": text_,
+            "category_name": (p or {}).get("category_name"),
+            "run_id": (p or {}).get("run_id"),
+            "pdd": {
+                "status": p["status"], "items_count": p["items_count"],
+                "last_at": p["last_at"],
+            } if p else None,
+            "xianyu": {
+                "items_count": x["items_count"], "last_at": x["last_at"],
+            } if x else None,
+            "last_run_at": last_ts.isoformat() if last_ts else None,
+            "_sort_ts": last_ts,
         })
+    collected.sort(key=lambda c: c["_sort_ts"] or day_start, reverse=True)
+    for c in collected:
+        c.pop("_sort_ts", None)
 
-    # 已采集词的闲鱼完成时间：该词闲鱼商品最近一次入库时间（category=词）
-    if seen_text:
-        from app.models.product import Product
-        xy_rows = (await db.execute(
-            select(Product.category, func.max(Product.created_at))
-            .where(Product.source_platform == "xianyu")
-            .where(Product.category.in_(seen_text))
-            .group_by(Product.category)
-        )).all()
-        xy_last = {cat: ts for cat, ts in xy_rows}
-        for c in collected:
-            ts = xy_last.get(c["keyword_text"])
-            if ts:
-                c["xianyu_last_at"] = ts.isoformat()
-
-    # ── 待采集池（词库里今天还没跑的词）──
+    # ── 待采集池（词库里今天还没采的词，按平台标注 pending）──
+    # 不再只看 PDD：闲鱼用 xianyu_safe 单独控制，所以两边都拉出来。
     pending_stmt = (
         select(Keyword)
         .options(selectinload(Keyword.category))
-        .where(Keyword.pdd_safe.is_(True))
         .where(Keyword.is_active.is_(True))
         .where(Keyword.schedule_enabled.is_(True))
-        .where(_PDD_KW_FILTER)
         .order_by(Keyword.pdd_last_searched_at.asc().nullsfirst(), Keyword.text)
-        .limit(300)
+        .limit(500)
     )
     # 批量任务的预计开始时刻（开始任务时写入 Redis），算每个待采集词的预估倒计时
     from app.services.pdd_app_queue import get_batch_plan
@@ -232,7 +255,12 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
 
     pending: list[dict[str, Any]] = []
     for k in (await db.execute(pending_stmt)).scalars().all():
-        if str(k.id) in done_keyword_ids:
+        tp = k.target_platforms or []
+        pdd_enabled = bool(k.pdd_safe) and ("pdd" in tp)
+        xianyu_enabled = bool(k.xianyu_safe)
+        pdd_pending = pdd_enabled and str(k.id) not in done_pdd_keyword_ids
+        xianyu_pending = xianyu_enabled and k.text not in xianyu_done_texts
+        if not (pdd_pending or xianyu_pending):
             continue
         p = plan.get(k.text) or {}
         pending.append({
@@ -240,6 +268,8 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
             "text": k.text,
             "category_name": k.category.name if k.category else None,
             "pdd_mode": k.pdd_mode,
+            "pdd_pending": pdd_pending,
+            "xianyu_pending": xianyu_pending,
             "pdd_eta_sec": _eta_sec(p.get("pdd")),
             "xianyu_eta_sec": _eta_sec(p.get("xianyu")),
         })
@@ -266,13 +296,14 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
     from app.services.pdd_worker_config import get_runtime_config
     cfg = await get_runtime_config(db)
 
-    # ── 全自动跑批状态（前端「全自动采集」卡显示）──
-    from app.services.pdd_app_queue import get_auto_next_ts
-    auto_next_ts = await get_auto_next_ts()
-    auto_next_at = (
-        datetime.fromtimestamp(auto_next_ts, tz=_CN_TZ).isoformat()
-        if auto_next_ts else None
-    )
+    # ── 全自动跑批状态（前端「全自动采集」卡显示，PDD / 闲鱼 各一套）──
+    from app.services.pdd_app_queue import get_auto_next_ts, get_xianyu_auto_next_ts
+
+    def _ts_to_cn_iso(ts: float | None) -> str | None:
+        return datetime.fromtimestamp(ts, tz=_CN_TZ).isoformat() if ts else None
+
+    auto_next_at = _ts_to_cn_iso(await get_auto_next_ts())
+    xianyu_auto_next_at = _ts_to_cn_iso(await get_xianyu_auto_next_ts())
 
     return {
         "stats": {
@@ -285,6 +316,8 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
         "target_count_max": cfg.get("target_count_max"),
         "auto_batch_enabled": bool(cfg.get("auto_batch_enabled")),
         "auto_next_at": auto_next_at,
+        "xianyu_auto_batch_enabled": bool(cfg.get("xianyu_auto_batch_enabled")),
+        "xianyu_auto_next_at": xianyu_auto_next_at,
         "pending": pending,
         "collected": collected,
         "recent_risk": recent_risk,

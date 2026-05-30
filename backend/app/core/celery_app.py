@@ -49,9 +49,13 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.selection.xianyu_price_monitor",
         "schedule": crontab(minute=0, hour="10,14,18,22"),
     },
-    "xianyu-product-discovery": {
-        "task": "app.tasks.selection.xianyu_product_discovery",
-        "schedule": crontab(minute=0, hour="9,21"),
+    # 闲鱼自动采集改为「走词库」：beat 每 3 分钟唤醒自带闸门的 tick，
+    # 是否真派由任务内部按 开关/暂停/活跃时段/随机下次时刻 判断，从词库挑
+    # xianyu_safe 的词。原写死 12 词的 xianyu_product_discovery 不再调度
+    # （函数保留，可手动调用），改由前端控制 xianyu_auto_* 配置。
+    "xianyu-auto-batch-tick": {
+        "task": "app.tasks.selection.xianyu_auto_batch_tick",
+        "schedule": crontab(minute="*/3"),
     },
     "xhs-hot-article-scan": {
         "task": "app.tasks.selection.xhs_hot_article_scan",

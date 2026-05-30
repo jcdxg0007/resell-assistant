@@ -241,6 +241,29 @@ async def clear_auto_next_ts() -> None:
     await redis_client.delete(AUTO_NEXT_TS_KEY)
 
 
+# 闲鱼全自动采集：与 PDD 独立的下一次派词时刻（闲鱼不走 worker 队列，
+# 直接 celery instant_search，所以单独一个 key）。
+XIANYU_AUTO_NEXT_TS_KEY = "xianyu:auto_next_ts"
+
+
+async def set_xianyu_auto_next_ts(ts: float) -> None:
+    await redis_client.set(XIANYU_AUTO_NEXT_TS_KEY, str(ts), ex=24 * 3600)
+
+
+async def get_xianyu_auto_next_ts() -> float | None:
+    raw = await redis_client.get(XIANYU_AUTO_NEXT_TS_KEY)
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def clear_xianyu_auto_next_ts() -> None:
+    await redis_client.delete(XIANYU_AUTO_NEXT_TS_KEY)
+
+
 async def get_worker_status() -> dict[str, Any]:
     """供管理面 / 自检脚本查 worker 在不在。"""
     raw = await redis_client.get(WORKER_HEARTBEAT_KEY)

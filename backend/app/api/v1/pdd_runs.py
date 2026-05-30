@@ -13,7 +13,7 @@ import asyncio
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
@@ -154,9 +154,9 @@ async def dispatch_search(
 
 
 class BatchStartBody(BaseModel):
-    """开始今日批量任务。"""
+    """开始今日批量任务。platform 选择跑哪个平台的待采集词。"""
 
-    both_platforms: bool = Field(True, description="True=每个词同时跑闲鱼+PDD；False=只跑PDD")
+    platform: str = Field("both", description="pdd / xianyu / both")
 
 
 def _estimate_pdd_etas(
@@ -221,19 +221,25 @@ def _estimate_pdd_etas(
     return etas
 
 
-@router.post("/batch/start", summary="开始批量跑今日待采集池（正常节奏，worker 慢慢消化）")
+@router.post("/batch/start", summary="开始批量跑今日待采集池（按平台 pdd/xianyu/both）")
 async def batch_start(
     body: BatchStartBody,
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """把今日待采集池的词按普通优先级排进 PDD 队列，worker 按 BurstScheduler
-    拟人节奏慢慢消化。开启同时跑则每个词同时触发一次闲鱼采集。
+    """把今日待采集池的词按平台批量派发：
 
-    数量受 daily_search_quota 限制（扣掉今天已跑的），避免一次塞爆 + 触发风控。
+    - platform=pdd：只把 pdd_pending 的词排进 PDD 队列（受 daily_search_quota 限制），
+      worker 按 BurstScheduler 拟人节奏慢慢消化。
+    - platform=xianyu：只把 xianyu_pending 的词错峰派闲鱼采集（不依赖 worker）。
+    - platform=both：两边各按各自待采集集合派。
     """
+    plat = body.platform if body.platform in ("pdd", "xianyu", "both") else "both"
+    want_pdd = plat in ("pdd", "both")
+    want_xianyu = plat in ("xianyu", "both")
+
     wstatus = await get_worker_status()
-    if not wstatus.get("online"):
+    if want_pdd and not wstatus.get("online"):
         raise HTTPException(
             status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE, detail="pdd_worker_offline",
         )
@@ -245,60 +251,74 @@ async def batch_start(
     hi = int(cfg.get("target_count_max") or 20)
     if lo > hi:
         lo, hi = hi, lo
-    quota = int(cfg.get("daily_search_quota") or 30)
-    remaining = max(0, quota - int(data["stats"]["total"]))
-    batch = pending[:remaining]
 
-    # ── PDD 预估开始时刻：用 worker 上报的 burst 快照做前向模拟（含心跳延迟补偿）──
     now = time.time()
-    pdd_etas = _estimate_pdd_etas(len(batch), cfg=cfg, wstatus=wstatus, now=now)
     plan: dict[str, dict] = {}
 
-    # 闲鱼侧错峰：闲鱼有自己的合规闸（≥60s 最小间隔 + 40/h 上限），
-    # 一次性全派会被白白 rate-limit 跳过。用 countdown 拉开 ~90s 一个，
-    # 顺着平台允许节奏涓流进去（PDD 侧无需错峰，worker BurstScheduler 自己排）。
-    xy_offset = 0
+    # ── PDD 侧：只取 pdd_pending 的词，受当日配额限制 ──
+    pdd_enqueued = 0
+    if want_pdd:
+        pdd_pending = [k for k in pending if k.get("pdd_pending")]
+        quota = int(cfg.get("daily_search_quota") or 30)
+        remaining = max(0, quota - int(data["stats"]["total"]))
+        pdd_batch = pdd_pending[:remaining]
+        pdd_etas = _estimate_pdd_etas(len(pdd_batch), cfg=cfg, wstatus=wstatus, now=now)
+        for idx, kw in enumerate(pdd_batch):
+            task = PddAppTask(
+                kind="search",
+                payload={"keyword": kw["text"], "mode": "fast", "target_count": random.randint(lo, hi)},
+                priority=_BATCH_PRIORITY,
+                timeout_s=90,
+            )
+            await enqueue_task(task)
+            bg = asyncio.create_task(_await_and_persist(
+                task.task_id, kw["text"], "fast", 4 * 3600,
+                source="batch", priority=_BATCH_PRIORITY,
+                keyword_id=kw["keyword_id"], category_name=kw["category_name"],
+                write_timeout=False,
+            ))
+            _batch_tasks.add(bg)
+            bg.add_done_callback(_batch_tasks.discard)
+            plan.setdefault(kw["text"], {})["pdd"] = now + pdd_etas[idx]
+        pdd_enqueued = len(pdd_batch)
+
+    # ── 闲鱼 侧：只取 xianyu_pending 的词，错峰派发（闲鱼有自己的 ≥60s/40h 合规闸）──
     xy_scheduled = 0
-    for idx, kw in enumerate(batch):
-        task = PddAppTask(
-            kind="search",
-            payload={"keyword": kw["text"], "mode": "fast", "target_count": random.randint(lo, hi)},
-            priority=_BATCH_PRIORITY,
-            timeout_s=90,
-        )
-        await enqueue_task(task)
-        bg = asyncio.create_task(_await_and_persist(
-            task.task_id, kw["text"], "fast", 4 * 3600,
-            source="batch", priority=_BATCH_PRIORITY,
-            keyword_id=kw["keyword_id"], category_name=kw["category_name"],
-            write_timeout=False,
-        ))
-        _batch_tasks.add(bg)
-        bg.add_done_callback(_batch_tasks.discard)
-
-        entry: dict[str, float] = {"pdd": now + pdd_etas[idx]}
-
-        if body.both_platforms:
-            try:
-                from app.tasks.selection import instant_search
-                instant_search.apply_async(args=(kw["text"], "xianyu"), countdown=xy_offset)
-                entry["xianyu"] = now + xy_offset
+    if want_xianyu:
+        xy_batch = [k for k in pending if k.get("xianyu_pending")]
+        if xy_batch:
+            from app.tasks.selection import instant_search
+            from app.models.selection import Keyword
+            from sqlalchemy import update as _sa_update
+            xy_offset = 0
+            xy_ids: list[str] = []
+            for kw in xy_batch:
+                try:
+                    instant_search.apply_async(args=(kw["text"], "xianyu"), countdown=xy_offset)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"batch xianyu dispatch failed (kw='{kw['text']}'): {exc}")
+                    continue
+                plan.setdefault(kw["text"], {})["xianyu"] = now + xy_offset
                 xy_offset += random.randint(70, 110)
                 xy_scheduled += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"batch xianyu dispatch failed (kw='{kw['text']}'): {exc}")
-
-        plan[kw["text"]] = entry
+                if kw.get("keyword_id"):
+                    xy_ids.append(kw["keyword_id"])
+            if xy_ids:  # 乐观写回，防自动 tick 又挑到同词
+                await db.execute(
+                    _sa_update(Keyword).where(Keyword.id.in_(xy_ids))
+                    .values(xianyu_last_searched_at=datetime.now(timezone.utc))
+                )
+                await db.commit()
 
     await set_batch_plan(plan)
     logger.info(
-        f"pdd batch start: enqueued={len(batch)} xianyu_scheduled={xy_scheduled} "
-        f"both={body.both_platforms} (pending={len(pending)}, quota_left={remaining})"
+        f"pdd batch start: platform={plat} pdd_enqueued={pdd_enqueued} "
+        f"xianyu_scheduled={xy_scheduled} (pending={len(pending)})"
     )
     return {
-        "ok": True, "enqueued": len(batch), "both_platforms": body.both_platforms,
-        "xianyu_scheduled": xy_scheduled,
-        "pending_total": len(pending), "capped_by_quota": remaining < len(pending),
+        "ok": True, "platform": plat,
+        "enqueued": pdd_enqueued, "xianyu_scheduled": xy_scheduled,
+        "pending_total": len(pending),
     }
 
 
