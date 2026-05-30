@@ -3,7 +3,7 @@
 与 PDD 一组对称：xianyu_safe / xianyu_last_searched_at / xianyu_last_status /
 xianyu_searches_total。xianyu_safe 默认 True（存量词默认参与闲鱼自动跑批）。
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: xianyu_kw_sched_01
 Revises: f2a3b4c5d6e7
 Create Date: 2026-05-30
 """
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "a1b2c3d4e5f6"
+revision = "xianyu_kw_sched_01"
 down_revision = "f2a3b4c5d6e7"
 branch_labels = None
 depends_on = None
