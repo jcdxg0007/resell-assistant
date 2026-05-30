@@ -499,16 +499,16 @@ const MultiPlatformCompare: React.FC = () => {
             }
           >
             {auto ? (
-              <Space size="large" wrap>
-                <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>自动开关</Text>
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>自动开关</Text>
                   <Switch
                     size="small" checked={auto.xianyu_auto_batch_enabled} loading={savingAuto}
                     onChange={(v) => saveAuto({ xianyu_auto_batch_enabled: v })}
                   />
                 </Space>
-                <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
+                <Space size={6}>
+                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>活跃时段</Text>
                   <InputNumber
                     size="small" min={0} max={23} value={auto.xianyu_auto_active_start_hour} style={{ width: 56 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_active_start_hour: v ?? 0 } : p)}
@@ -519,12 +519,12 @@ const MultiPlatformCompare: React.FC = () => {
                     size="small" min={0} max={23} value={auto.xianyu_auto_active_end_hour} style={{ width: 56 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_active_end_hour: v ?? 0 } : p)}
                     onBlur={() => saveAuto({ xianyu_auto_active_end_hour: auto.xianyu_auto_active_end_hour })}
-                    addonAfter="点"
                   />
+                  <Text type="secondary" style={{ fontSize: 12 }}>点</Text>
                 </Space>
-                <Space size={4}>
+                <Space size={6}>
                   <Tooltip title="两波之间的间隔在此区间内随机取，避免固定钟点被识别为机器">
-                    <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
+                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>随机间隔</Text>
                   </Tooltip>
                   <InputNumber
                     size="small" min={5} max={720} value={auto.xianyu_auto_interval_min_minutes} style={{ width: 64 }}
@@ -536,13 +536,13 @@ const MultiPlatformCompare: React.FC = () => {
                     size="small" min={5} max={1440} value={auto.xianyu_auto_interval_max_minutes} style={{ width: 64 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_interval_max_minutes: v ?? 5 } : p)}
                     onBlur={() => saveAuto({ xianyu_auto_interval_max_minutes: auto.xianyu_auto_interval_max_minutes })}
-                    addonAfter="分"
                   />
+                  <Text type="secondary" style={{ fontSize: 12 }}>分</Text>
                 </Space>
-                <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
+                <Space size={6}>
+                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>每波词数</Text>
                   <InputNumber
-                    size="small" min={1} max={10} value={auto.xianyu_auto_batch_count} style={{ width: 56 }}
+                    size="small" min={1} max={10} value={auto.xianyu_auto_batch_count} style={{ width: 64 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_batch_count: v ?? 1 } : p)}
                     onBlur={() => saveAuto({ xianyu_auto_batch_count: auto.xianyu_auto_batch_count })}
                   />
@@ -562,16 +562,16 @@ const MultiPlatformCompare: React.FC = () => {
             }
           >
             {auto ? (
-              <Space size="large" wrap>
-                <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>自动开关</Text>
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <Space size={8}>
+                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>自动开关</Text>
                   <Switch
                     size="small" checked={auto.auto_batch_enabled} loading={savingAuto}
                     onChange={(v) => saveAuto({ auto_batch_enabled: v })}
                   />
                 </Space>
-                <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
+                <Space size={6}>
+                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>活跃时段</Text>
                   <InputNumber
                     size="small" min={0} max={23} value={auto.auto_active_start_hour} style={{ width: 56 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, auto_active_start_hour: v ?? 0 } : p)}
@@ -582,12 +582,12 @@ const MultiPlatformCompare: React.FC = () => {
                     size="small" min={0} max={23} value={auto.auto_active_end_hour} style={{ width: 56 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
                     onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
-                    addonAfter="点"
                   />
+                  <Text type="secondary" style={{ fontSize: 12 }}>点</Text>
                 </Space>
-                <Space size={4}>
+                <Space size={6}>
                   <Tooltip title="两波之间的间隔在此区间内随机取，避免固定钟点被识别为机器">
-                    <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
+                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>随机间隔</Text>
                   </Tooltip>
                   <InputNumber
                     size="small" min={5} max={720} value={auto.auto_interval_min_minutes} style={{ width: 64 }}
@@ -599,13 +599,13 @@ const MultiPlatformCompare: React.FC = () => {
                     size="small" min={5} max={1440} value={auto.auto_interval_max_minutes} style={{ width: 64 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_max_minutes: v ?? 5 } : p)}
                     onBlur={() => saveAuto({ auto_interval_max_minutes: auto.auto_interval_max_minutes })}
-                    addonAfter="分"
                   />
+                  <Text type="secondary" style={{ fontSize: 12 }}>分</Text>
                 </Space>
-                <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
+                <Space size={6}>
+                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>每波词数</Text>
                   <InputNumber
-                    size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 56 }}
+                    size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 64 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
                     onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
                   />
