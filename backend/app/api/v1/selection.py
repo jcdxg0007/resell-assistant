@@ -109,6 +109,8 @@ async def xianyu_raw(
         select(Product)
         .where(Product.source_platform == Platform.XIANYU)
         .where(Product.is_active == True)
+        # 只看今日采集（东八区日界），和 PDD 采集池口径对齐
+        .where(Product.last_crawled_at >= _cn_day_start())
     )
     if category:
         query = query.where(Product.category == category)
