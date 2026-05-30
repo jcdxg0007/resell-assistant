@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, InputNumber, Button, Space, Tag, Row, Col,
-  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Switch, Segmented,
+  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Switch, Segmented, Image,
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
@@ -406,7 +406,16 @@ const MultiPlatformCompare: React.FC = () => {
       title: '商品', dataIndex: 'title', ellipsis: true,
       render: (t: string | undefined, r: PddProduct) => (
         <Space size={6}>
-          {r.image && <img src={r.image} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4, flex: '0 0 auto' }} />}
+          {r.image && (
+            <Image
+              src={r.image}
+              alt=""
+              width={32}
+              height={32}
+              style={{ objectFit: 'cover', borderRadius: 4 }}
+              preview={{ mask: false }}
+            />
+          )}
           <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>
         </Space>
       ),
@@ -424,7 +433,16 @@ const MultiPlatformCompare: React.FC = () => {
       title: '商品', dataIndex: ['product', 'title'], ellipsis: true,
       render: (title: string, r: ProductItem) => (
         <Space size={6}>
-          {r.product.image_urls?.[0] && <img src={r.product.image_urls[0]} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4 }} />}
+          {r.product.image_urls?.[0] && (
+            <Image
+              src={r.product.image_urls[0]}
+              alt=""
+              width={32}
+              height={32}
+              style={{ objectFit: 'cover', borderRadius: 4 }}
+              preview={{ mask: false }}
+            />
+          )}
           <Text ellipsis style={{ maxWidth: 240 }}>{title}</Text>
         </Space>
       ),

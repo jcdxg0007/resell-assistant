@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Card, Row, Col, Tag, Space, Button, Table, List, Input,
-  Progress, Statistic, Empty, App, Tooltip, Segmented, Alert, Divider,
+  Progress, Statistic, Empty, App, Tooltip, Segmented, Alert, Divider, Image,
 } from 'antd';
 import {
   ReloadOutlined, ThunderboltOutlined, SwapOutlined, SearchOutlined,
@@ -124,7 +124,16 @@ const SideTable: React.FC<{ side: SidePayload | null; platform: 'xianyu' | 'pdd'
       title: '商品', dataIndex: 'title', ellipsis: true,
       render: (t: string, r: SideItem) => (
         <Space size={6}>
-          {r.image_url && <img src={r.image_url} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4, flex: '0 0 auto' }} />}
+          {r.image_url && (
+            <Image
+              src={r.image_url}
+              alt=""
+              width={32}
+              height={32}
+              style={{ objectFit: 'cover', borderRadius: 4 }}
+              preview={{ mask: false }}
+            />
+          )}
           <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>
           {(r.risk_tags || []).includes('suspicious_low') && <Tag color="volcano">极低价</Tag>}
         </Space>
