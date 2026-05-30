@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 # Redis keys
 TASK_QUEUE_KEY = "pdd_app:task_q"          # 任务队列（FIFO）
 RESULT_KEY_PREFIX = "pdd_app:result:"      # 单任务结果（短 TTL）
-WORKER_HEARTBEAT_KEY = "pdd_app:worker:heartbeat"  # worker 最近活跃时间
+WORKER_HEARTBEAT_KEY = "pdd_app:worker:heartbeat"  # 旧版单 worker 心跳（向后兼容读）
+# 多 worker：每个 worker 一个 key（按 worker_name）。get_worker_status 聚合所有。
+WORKER_HEARTBEAT_PREFIX = "pdd_app:worker:heartbeat:"
 COLLECTION_PAUSED_KEY = "pdd_app:collection_paused"  # 批量采集暂停标志（"1"/未设）
 
 # 默认 TTL
@@ -159,22 +161,29 @@ async def push_result(result: PddAppResult) -> None:
 
 
 async def record_worker_heartbeat(
-    device_serials: list[str], scheduler: dict[str, Any] | None = None
+    device_serials: list[str],
+    scheduler: dict[str, Any] | None = None,
+    worker_name: str | None = None,
 ) -> None:
     """worker 定期上报"我活着，连了这些手机"。
 
     scheduler 是 BurstScheduler 快照（burst_remaining / in_quiet / *_ago_s 等），
     用于 batch_start 精确预估 PDD 队列 ETA；可为空（旧 worker 不上报）。
+
+    worker_name：多 worker 场景每个进程唯一名。写到 per-worker key，
+    get_worker_status 聚合所有 worker。旧 worker 不传 → 退回旧的单 key，
+    行为与改造前一致。
     """
+    name = (worker_name or "").strip()
     payload: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "devices": device_serials,
+        "name": name or "default",
     }
     if scheduler is not None:
         payload["scheduler"] = scheduler
-    await redis_client.set(
-        WORKER_HEARTBEAT_KEY, json.dumps(payload), ex=120  # 2min 没心跳就视为离线
-    )
+    key = f"{WORKER_HEARTBEAT_PREFIX}{name}" if name else WORKER_HEARTBEAT_KEY
+    await redis_client.set(key, json.dumps(payload), ex=120)  # 2min 没心跳视为离线
 
 
 async def queue_depth() -> int:
@@ -279,9 +288,69 @@ async def clear_xianyu_auto_next_ts() -> None:
 
 
 async def get_worker_status() -> dict[str, Any]:
-    """供管理面 / 自检脚本查 worker 在不在。"""
-    raw = await redis_client.get(WORKER_HEARTBEAT_KEY)
-    if not raw:
-        return {"online": False, "devices": []}
-    data = json.loads(raw)
-    return {"online": True, **data}
+    """供管理面 / 自检脚本查 worker 在不在。聚合所有在线 worker。
+
+    返回形状（向后兼容单 worker 的字段）：
+    - online：任一 worker 活着即 True
+    - devices：所有 worker 设备的并集（保序去重）
+    - ts / scheduler：代表性 worker 的快照（给 batch_start ETA 用，挑最就绪那个）
+    - workers：[{name, devices, ts, scheduler}, ...]
+    - worker_count / device_count：数量统计
+    """
+    raws: list[str] = []
+    # 新 per-worker keys
+    try:
+        async for key in redis_client.scan_iter(match=f"{WORKER_HEARTBEAT_PREFIX}*"):
+            raw = await redis_client.get(key)
+            if raw:
+                raws.append(raw)
+    except Exception as exc:  # noqa: BLE001 — scan 失败退回只读旧 key
+        logger.warning(f"get_worker_status scan failed: {exc}")
+    # 旧版单 key（未升级的 worker 仍写这里）
+    legacy = await redis_client.get(WORKER_HEARTBEAT_KEY)
+    if legacy:
+        raws.append(legacy)
+
+    workers: list[dict[str, Any]] = []
+    for raw in raws:
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        workers.append({
+            "name": data.get("name") or "default",
+            "devices": data.get("devices") or [],
+            "ts": data.get("ts"),
+            "scheduler": data.get("scheduler"),
+        })
+
+    if not workers:
+        return {
+            "online": False, "devices": [],
+            "workers": [], "worker_count": 0, "device_count": 0,
+        }
+
+    # 设备并集（保序去重）
+    devices: list[str] = []
+    for w in workers:
+        for d in w["devices"]:
+            if d not in devices:
+                devices.append(d)
+
+    # 代表性 scheduler：挑"最就绪"的 worker（不在静默期、burst 剩得多 → ETA 最小）。
+    # 单 worker 时就是它本身，ETA 行为与改造前完全一致。
+    def _readiness(w: dict[str, Any]) -> tuple[bool, int]:
+        snap = w.get("scheduler") or {}
+        return (bool(snap.get("in_quiet")), -int(snap.get("burst_remaining") or 0))
+
+    rep = min(workers, key=_readiness)
+
+    return {
+        "online": True,
+        "devices": devices,
+        "ts": rep.get("ts"),
+        "scheduler": rep.get("scheduler"),
+        "workers": workers,
+        "worker_count": len(workers),
+        "device_count": len(devices),
+    }

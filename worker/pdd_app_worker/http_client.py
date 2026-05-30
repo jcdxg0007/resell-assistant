@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 BACKEND_BASE_URL = os.environ["BACKEND_BASE_URL"].rstrip("/")
 WORKER_TOKEN = os.environ["WORKER_TOKEN"]
 POLL_WAIT_SECONDS = int(os.environ.get("POLL_WAIT_SECONDS", "25"))
+# 多 worker 场景每个进程必须有唯一 WORKER_NAME，后端按它分 per-worker 心跳 key。
+WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
 
 API_PREFIX = "/api/v1/pdd-worker"
 
@@ -102,7 +104,7 @@ class BackendClient:
         scheduler 是 BurstScheduler 快照，后端据此精确预估队列 ETA。
         """
         try:
-            payload: dict[str, Any] = {"devices": devices}
+            payload: dict[str, Any] = {"devices": devices, "worker": WORKER_NAME}
             if scheduler is not None:
                 payload["scheduler"] = scheduler
             r = await self._client.post(f"{API_PREFIX}/heartbeat", json=payload)

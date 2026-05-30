@@ -62,7 +62,7 @@ interface Console {
   pending: PendingKw[];
   collected: CollectedKw[];
   recent_risk: RiskItem[];
-  worker: { online: boolean; devices?: string[] };
+  worker: { online: boolean; devices?: string[]; worker_count?: number; device_count?: number };
   paused?: boolean;
   queued?: number;
 }
@@ -492,7 +492,9 @@ const MultiPlatformCompare: React.FC = () => {
           <Space>
             <Badge
               status={worker?.online ? 'success' : 'error'}
-              text={worker?.online ? `PDD Worker 在线${worker.devices?.length ? `（${worker.devices.join(', ')}）` : ''}` : 'PDD Worker 离线'}
+              text={worker?.online
+                ? `PDD Worker 在线 ${worker.worker_count ?? 1}台/${worker.device_count ?? worker.devices?.length ?? 0}机${worker.devices?.length ? `（${worker.devices.join(', ')}）` : ''}`
+                : 'PDD Worker 离线'}
             />
             <Button icon={<ControlOutlined />} onClick={() => setRhythmOpen(true)}>采集节奏</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshAll}>刷新</Button>

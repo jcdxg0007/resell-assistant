@@ -95,14 +95,16 @@ async def post_heartbeat(
 
     兼容两种 body：
     - 旧：纯列表 ["serial1", ...]
-    - 新：{"devices": [...], "scheduler": {burst 快照}}，scheduler 用于精确预估 ETA
+    - 新：{"devices": [...], "scheduler": {burst 快照}, "worker": "名字"}
+      scheduler 用于精确预估 ETA；worker 用于多 worker 的 per-worker 心跳 key。
     """
     if isinstance(body, list):
-        devices, scheduler = body, None
+        devices, scheduler, worker_name = body, None, None
     else:
         devices = body.get("devices") or []
         scheduler = body.get("scheduler")
-    await record_worker_heartbeat(devices, scheduler=scheduler)
+        worker_name = body.get("worker")
+    await record_worker_heartbeat(devices, scheduler=scheduler, worker_name=worker_name)
     return {"ok": True}
 
 

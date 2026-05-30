@@ -33,6 +33,9 @@ logger = logging.getLogger("pdd_app_worker")
 
 HEARTBEAT_INTERVAL = int(os.environ.get("HEARTBEAT_INTERVAL_SECONDS", "45"))
 WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
+# 多 worker 单机多手机：本进程绑定的设备 serial（device_manager 据此过滤）。
+# 多开时每个进程必须设不同的 ADB_SERIAL + WORKER_NAME + BOUND_PDD_ACCOUNT。
+ADB_SERIAL = os.environ.get("ADB_SERIAL", "").strip()
 
 # Phase 1 单设备阶段：这台 worker 上当前 PDD APP 登录的账号 account_name。
 # 仅作 audit/日志用途（worker 不切账号，PDD APP 实际登录的是谁就用谁）。
@@ -692,8 +695,24 @@ async def main() -> int:
 
     logger.info(
         f"pdd_app_worker {WORKER_NAME} starting "
-        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT})"
+        f"(BOUND_PDD_ACCOUNT={BOUND_PDD_ACCOUNT}, "
+        f"ADB_SERIAL={ADB_SERIAL or '<all devices>'})"
     )
+    # 多 worker 单机多手机时，没绑 ADB_SERIAL 又插着多台手机 → 所有进程会抢
+    # 同一台（devices[0]），必须给每个进程设不同 ADB_SERIAL。这里强提示一下。
+    if not ADB_SERIAL:
+        try:
+            from pdd_app_worker.device_manager import list_devices
+            _connected = [d.serial for d in list_devices() if d.state == "device"]
+            if len(_connected) > 1:
+                logger.warning(
+                    f"检测到 {len(_connected)} 台手机但未设 ADB_SERIAL："
+                    f"{_connected}。多开 worker 时每个进程都会抢第一台 "
+                    f"({_connected[0]})！请给每个进程设不同的 "
+                    f"ADB_SERIAL + WORKER_NAME + BOUND_PDD_ACCOUNT。"
+                )
+        except Exception:
+            pass
     logger.info(
         f"scheduler config: "
         f"burst_size=[{BURST_SIZE_MIN},{BURST_SIZE_MAX}] "
