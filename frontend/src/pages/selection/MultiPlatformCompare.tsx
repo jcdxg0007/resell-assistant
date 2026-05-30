@@ -11,7 +11,20 @@ import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
 import PddRhythmConfig from '../pdd/Config';
 
-const { Title, Text } = Typography;
+const { Title, Text, Link } = Typography;
+
+// 发布时间：今天/昨天显示相对，更早显示日期
+const fmtPublished = (iso?: string | null): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const now = new Date();
+  const days = Math.floor((now.getTime() - d.getTime()) / 86400000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 30) return `${days}天前`;
+  return d.toLocaleDateString('zh-CN');
+};
 
 // ── 闲鱼侧：选品推荐 ──────────────────────────────────────────
 interface ProductItem {
@@ -19,6 +32,7 @@ interface ProductItem {
     id: string; title: string; source_platform: string;
     price: number; category: string | null; image_urls: string[] | null;
     item_wants?: number | null;
+    source_url?: string | null; seller_name?: string | null; published_at?: string | null;
   };
 }
 
@@ -443,15 +457,26 @@ const MultiPlatformCompare: React.FC = () => {
               preview={{ mask: false }}
             />
           )}
-          <Text ellipsis style={{ maxWidth: 240 }}>{title}</Text>
+          {r.product.source_url
+            ? <Link href={r.product.source_url} target="_blank" rel="noreferrer" ellipsis style={{ maxWidth: 240 }}>{title}</Link>
+            : <Text ellipsis style={{ maxWidth: 240 }}>{title}</Text>}
         </Space>
       ),
     },
-    { title: '价格', dataIndex: ['product', 'price'], width: 90, sorter: (a, b) => a.product.price - b.product.price, render: (v: number) => <Text>¥{v?.toFixed(2)}</Text> },
+    { title: '价格', dataIndex: ['product', 'price'], width: 80, sorter: (a, b) => a.product.price - b.product.price, render: (v: number) => <Text>¥{v?.toFixed(2)}</Text> },
     {
-      title: '想要', dataIndex: ['product', 'item_wants'], width: 80,
+      title: '想要', dataIndex: ['product', 'item_wants'], width: 70,
       sorter: (a, b) => (a.product.item_wants || 0) - (b.product.item_wants || 0), defaultSortOrder: 'descend',
       render: (v?: number | null) => <Text type="secondary">{v ?? 0}</Text>,
+    },
+    {
+      title: '卖家', dataIndex: ['product', 'seller_name'], width: 100, ellipsis: true,
+      render: (v?: string | null) => v ? <Text type="secondary" ellipsis>{v}</Text> : <Text type="secondary">—</Text>,
+    },
+    {
+      title: '发布', dataIndex: ['product', 'published_at'], width: 80,
+      sorter: (a, b) => (new Date(a.product.published_at || 0).getTime()) - (new Date(b.product.published_at || 0).getTime()),
+      render: (v?: string | null) => <Text type="secondary">{fmtPublished(v)}</Text>,
     },
   ];
 

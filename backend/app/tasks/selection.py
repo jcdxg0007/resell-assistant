@@ -542,6 +542,7 @@ async def _xianyu_product_discovery():
                         price=item["price"],
                         image_urls=[item["image_url"]] if item.get("image_url") else None,
                         category=keyword,
+                        seller_name=(item.get("seller_name") or None),
                         published_at=_ms_to_dt(item.get("publish_time_ms")),
                         last_crawled_at=datetime.now(timezone.utc),
                     )
@@ -1335,6 +1336,8 @@ async def _instant_search(
                 product.last_crawled_at = datetime.now(timezone.utc)
                 if not product.published_at:
                     product.published_at = _ms_to_dt(item.get("publish_time_ms"))
+                if not product.seller_name and item.get("seller_name"):
+                    product.seller_name = item["seller_name"]
             else:
                 product = Product(
                     source_platform=Platform.XIANYU,
@@ -1345,6 +1348,7 @@ async def _instant_search(
                     image_urls=[item["image_url"]] if item.get("image_url") else None,
                     category=keyword,
                     sales_count=item.get("want_count", 0),
+                    seller_name=(item.get("seller_name") or None),
                     published_at=_ms_to_dt(item.get("publish_time_ms")),
                     last_crawled_at=datetime.now(timezone.utc),
                 )

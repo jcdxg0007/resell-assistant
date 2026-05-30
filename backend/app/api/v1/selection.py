@@ -128,6 +128,9 @@ async def xianyu_raw(
             "category": p.category,
             "image_urls": p.image_urls,
             "item_wants": p.sales_count,
+            "source_url": p.source_url,
+            "seller_name": p.seller_name,
+            "published_at": p.published_at.isoformat() if p.published_at else None,
         },
     } for p in rows]
     return {"total": total, "page": page, "page_size": page_size, "items": items}

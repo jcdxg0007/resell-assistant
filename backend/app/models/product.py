@@ -49,6 +49,8 @@ class Product(Base, UUIDMixin, TimestampMixin):
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     last_crawled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 卖家昵称（闲鱼列表页 userNickName）。比价页展示用，重采后才回填。
+    seller_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # 平台挂牌发布时间（闲鱼列表页 publish_time_ms 转来），用于「挂牌新鲜度」维度。
     # 旧行为 NULL（重采后才会回填），打分时按无数据优雅降级。
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
