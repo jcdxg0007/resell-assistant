@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, InputNumber, Button, Space, Tag, Row, Col,
-  Progress, App, Alert, Modal, Descriptions, Badge, Drawer, Tooltip, List, Popconfirm, Empty, Switch,
+  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Empty, Switch,
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
@@ -18,17 +18,9 @@ interface ProductItem {
   product: {
     id: string; title: string; source_platform: string;
     price: number; category: string | null; image_urls: string[] | null;
+    item_wants?: number | null;
   };
-  score: {
-    total_score: number; decision: string; decision_label: string;
-    dimensions: Record<string, { score: number; max: number; label: string }>;
-    scored_at: string | null;
-  } | null;
 }
-
-const decisionColors: Record<string, string> = {
-  strong_recommend: 'green', worth_try: 'blue', average: 'orange', skip: 'red',
-};
 
 // ── PDD 侧 ────────────────────────────────────────────────────
 interface PendingKw { keyword_id: string; text: string; category_name: string | null; pdd_mode: string; pdd_eta_sec?: number | null; xianyu_eta_sec?: number | null; }
@@ -106,10 +98,6 @@ const MultiPlatformCompare: React.FC = () => {
   const [autoRefreshing, setAutoRefreshing] = useState(false);
   const pollRef = useRef<number | null>(null);
 
-  // 详情
-  const [detailVisible, setDetailVisible] = useState(false);
-  const [detailItem, setDetailItem] = useState<ProductItem | null>(null);
-
   // PDD 控制台
   const [cons, setCons] = useState<Console | null>(null);
   const [consLoading, setConsLoading] = useState(false);
@@ -165,13 +153,14 @@ const MultiPlatformCompare: React.FC = () => {
     }
   }, [message, loadAuto]);
 
-  // kw 给定时按关键词过滤（闲鱼商品落库时 category 存的就是搜索词），实现同词比价
+  // kw 给定时按关键词过滤（闲鱼商品落库时 category 存的就是搜索词），实现同词比价。
+  // 改调 /xianyu/raw：比价页只展示采集到的原始挂牌，打分已挪到「十维度选品」页。
   const fetchXianyu = useCallback(async (p: number = 1, kw?: string | null) => {
     setXyLoading(true);
     try {
-      const params: Record<string, unknown> = { page: p, page_size: 10, min_score: 0 };
+      const params: Record<string, unknown> = { page: p, page_size: 10 };
       if (kw) params.category = kw;
-      const res = await api.get('/selection/xianyu/recommendations', { params });
+      const res = await api.get('/selection/xianyu/raw', { params });
       setXyData(res.data.items || []);
       setXyTotal(res.data.total || 0);
       setXyPage(p);
@@ -366,8 +355,6 @@ const MultiPlatformCompare: React.FC = () => {
     } catch { message.error('清空失败'); }
   };
 
-  const showDetail = (item: ProductItem) => { setDetailItem(item); setDetailVisible(true); };
-
   // ── 表格列 ──────────────────────────────────────────────
   const itemColumns: ColumnsType<PddProduct> = [
     { title: '商品', dataIndex: 'title', ellipsis: true, render: (t?: string) => <Text>{t || '—'}</Text> },
@@ -385,21 +372,16 @@ const MultiPlatformCompare: React.FC = () => {
       render: (title: string, r: ProductItem) => (
         <Space size={6}>
           {r.product.image_urls?.[0] && <img src={r.product.image_urls[0]} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4 }} />}
-          <Text ellipsis style={{ maxWidth: 220 }}>{title}</Text>
+          <Text ellipsis style={{ maxWidth: 240 }}>{title}</Text>
         </Space>
       ),
     },
-    { title: '采购价', dataIndex: ['product', 'price'], width: 90, sorter: (a, b) => a.product.price - b.product.price, render: (v: number) => <Text>¥{v?.toFixed(2)}</Text> },
+    { title: '价格', dataIndex: ['product', 'price'], width: 90, sorter: (a, b) => a.product.price - b.product.price, render: (v: number) => <Text>¥{v?.toFixed(2)}</Text> },
     {
-      title: '评分', dataIndex: ['score', 'total_score'], width: 80,
-      sorter: (a, b) => (a.score?.total_score || 0) - (b.score?.total_score || 0), defaultSortOrder: 'descend',
-      render: (score: number, r: ProductItem) => {
-        if (!score) return <Text type="secondary">—</Text>;
-        const color = score >= 80 ? '#52c41a' : score >= 60 ? '#1677ff' : score >= 40 ? '#faad14' : '#ff4d4f';
-        return <Tooltip title={r.score?.decision_label}><Text strong style={{ color, cursor: 'pointer' }} onClick={() => showDetail(r)}>{score}</Text></Tooltip>;
-      },
+      title: '想要', dataIndex: ['product', 'item_wants'], width: 80,
+      sorter: (a, b) => (a.product.item_wants || 0) - (b.product.item_wants || 0), defaultSortOrder: 'descend',
+      render: (v?: number | null) => <Text type="secondary">{v ?? 0}</Text>,
     },
-    { title: '判定', dataIndex: ['score', 'decision'], width: 88, render: (d: string, r: ProductItem) => d ? <Tag color={decisionColors[d]}>{r.score?.decision_label}</Tag> : '—' },
   ];
 
   const worker = cons?.worker;
@@ -672,7 +654,7 @@ const MultiPlatformCompare: React.FC = () => {
 
         <Col xs={24} xl={12}>
           <Card
-            title={<Space><Tag color="gold">闲鱼</Tag>采集结果{selectedKw ? <Tag>{selectedKw}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>（全局推荐）</Text>}</Space>}
+            title={<Space><Tag color="gold">闲鱼</Tag>采集结果{selectedKw ? <Tag>{selectedKw}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>（全部）</Text>}</Space>}
             styles={{ body: { padding: 12 } }}
             extra={
               <Space size={8} wrap>
@@ -703,30 +685,6 @@ const MultiPlatformCompare: React.FC = () => {
       <Drawer title="PDD 采集节奏控制" width={560} open={rhythmOpen} onClose={() => setRhythmOpen(false)} destroyOnHidden>
         <PddRhythmConfig embedded />
       </Drawer>
-
-      {/* 闲鱼评分详情 */}
-      <Modal title="商品评分详情" open={detailVisible} onCancel={() => setDetailVisible(false)} footer={null} width={640}>
-        {detailItem && (
-          <>
-            <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="商品名称" span={2}>{detailItem.product.title}</Descriptions.Item>
-              <Descriptions.Item label="采购价">¥{detailItem.product.price}</Descriptions.Item>
-              <Descriptions.Item label="综合评分"><Text strong style={{ fontSize: 18 }}>{detailItem.score?.total_score || '—'}</Text>/100</Descriptions.Item>
-            </Descriptions>
-            {detailItem.score?.dimensions && (
-              <Card title="十维度评分" size="small">
-                {Object.entries(detailItem.score.dimensions).map(([name, dim]) => (
-                  <div key={name} style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-                    <Text style={{ width: 140 }}>{name}</Text>
-                    <Progress percent={Math.round((dim.score / dim.max) * 100)} size="small" style={{ flex: 1, marginRight: 12 }} format={() => `${dim.score}/${dim.max}`} />
-                    <Tag>{dim.label}</Tag>
-                  </div>
-                ))}
-              </Card>
-            )}
-          </>
-        )}
-      </Modal>
     </Space>
   );
 };

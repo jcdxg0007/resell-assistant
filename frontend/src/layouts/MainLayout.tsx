@@ -22,6 +22,7 @@ const menuItems = [
     children: [
       { key: '/selection/pdd-keywords', label: '词库管理' },
       { key: '/selection/xianyu', label: '多平台比价' },
+      { key: '/selection/ten-dim', label: '十维度选品' },
       { key: '/selection/xhs', label: '小红书选品' },
       { key: '/selection/virtual', label: '虚拟商品' },
     ],

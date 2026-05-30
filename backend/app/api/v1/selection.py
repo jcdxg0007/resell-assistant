@@ -6,8 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.api.deps import get_current_user
-from app.models.product import Product, ProductScore
+from app.models.product import Product, ProductScore, Platform
 from app.models.xianyu import XianyuMarketData
+from app.models.selection import SelectionAnalysis
+from app.models.pdd_run import PddSearchRun
 from app.models.system import User
 from app.schemas.product import ScoreRequest
 from app.services.selection.scoring import (
@@ -15,6 +17,8 @@ from app.services.selection.scoring import (
     PriceStats,
 )
 from app.services.selection.pricing import smart_pricing
+from app.services.selection import ten_dim_scoring
+from app.services.pdd_search_run import keyword_items, _cn_day_start
 
 router = APIRouter()
 
@@ -86,6 +90,47 @@ async def clear_xianyu_products(
     res = await db.execute(stmt)
     await db.commit()
     return {"ok": True, "deleted": res.rowcount or 0}
+
+
+@router.get("/xianyu/raw", summary="闲鱼采集原始挂牌（不依赖打分，多平台比价页用）")
+async def xianyu_raw(
+    category: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """只查 products 原始行，不 join product_scores。
+
+    多平台比价页要的是「爬到什么就展示什么」的原始数据；打分挪到了
+    「十维度选品」页（/selection/ten-dim）。
+    """
+    query = (
+        select(Product)
+        .where(Product.source_platform == Platform.XIANYU)
+        .where(Product.is_active == True)
+    )
+    if category:
+        query = query.where(Product.category == category)
+
+    count_q = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_q)).scalar() or 0
+
+    query = query.order_by(Product.last_crawled_at.desc().nullslast()).offset((page - 1) * page_size).limit(page_size)
+    rows = (await db.execute(query)).scalars().all()
+
+    items = [{
+        "product": {
+            "id": str(p.id),
+            "title": p.title,
+            "source_platform": p.source_platform,
+            "price": p.price,
+            "category": p.category,
+            "image_urls": p.image_urls,
+            "item_wants": p.sales_count,
+        },
+    } for p in rows]
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
 
 
 @router.post("/score/{product_id}", summary="触发商品评分")
@@ -176,6 +221,143 @@ async def score_product(
             "breakdown": pricing.breakdown,
         },
     }
+
+
+async def _gather_xianyu_raw(db: AsyncSession, keyword: str) -> tuple[list[dict], int | None]:
+    """取某关键词的闲鱼原始挂牌 + 同词最新在卖挂牌数。"""
+    rows = (await db.execute(
+        select(Product)
+        .where(Product.source_platform == Platform.XIANYU)
+        .where(Product.is_active == True)
+        .where(Product.category == keyword)
+    )).scalars().all()
+    items = [{
+        "product_id": str(p.id),
+        "title": p.title,
+        "price": p.price,
+        "item_wants": p.sales_count or 0,
+    } for p in rows]
+    active_listings = (await db.execute(
+        select(XianyuMarketData.active_listings)
+        .where(XianyuMarketData.keyword == keyword)
+        .order_by(XianyuMarketData.captured_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    return items, active_listings
+
+
+async def _compute_and_cache(db: AsyncSession, keyword: str) -> dict:
+    """实时算 A/B/C 并落 selection_analysis 缓存（upsert）。"""
+    xy_items, active_listings = await _gather_xianyu_raw(db, keyword)
+    pdd_res = await keyword_items(db, keyword)
+    pdd_items = pdd_res.get("items") or []
+
+    payload = ten_dim_scoring.analyze(
+        keyword,
+        xianyu_items=xy_items,
+        pdd_items=pdd_items,
+        active_listings=active_listings,
+    )
+    now = datetime.now(timezone.utc)
+    existing = (await db.execute(
+        select(SelectionAnalysis).where(SelectionAnalysis.keyword == keyword)
+    )).scalar_one_or_none()
+    if existing:
+        existing.scored_at = now
+        existing.xianyu_payload = payload["xianyu"]
+        existing.pdd_payload = payload["pdd"]
+        existing.arbitrage = payload["arbitrage"]
+    else:
+        db.add(SelectionAnalysis(
+            keyword=keyword,
+            scored_at=now,
+            xianyu_payload=payload["xianyu"],
+            pdd_payload=payload["pdd"],
+            arbitrage=payload["arbitrage"],
+        ))
+    await db.commit()
+    payload["scored_at"] = now.isoformat()
+    payload["cached"] = False
+    return payload
+
+
+@router.get("/ten-dim/keywords", summary="十维度选品候选关键词（今日两池有数据的）")
+async def ten_dim_keywords(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    day_start = _cn_day_start()
+
+    pdd_rows = (await db.execute(
+        select(PddSearchRun.keyword_text, func.max(PddSearchRun.created_at))
+        .where(PddSearchRun.created_at >= day_start)
+        .group_by(PddSearchRun.keyword_text)
+    )).all()
+    pdd_map = {kw: ts for kw, ts in pdd_rows if kw}
+
+    xy_rows = (await db.execute(
+        select(Product.category)
+        .where(Product.source_platform == Platform.XIANYU)
+        .where(Product.is_active == True)
+        .where(Product.category.isnot(None))
+        .distinct()
+    )).scalars().all()
+    xy_set = {c for c in xy_rows if c}
+
+    cache_rows = (await db.execute(select(SelectionAnalysis))).scalars().all()
+    cache_map = {c.keyword: c.scored_at for c in cache_rows}
+
+    all_kw = sorted(set(pdd_map) | xy_set)
+    items = []
+    for kw in all_kw:
+        has_pdd = kw in pdd_map
+        has_xianyu = kw in xy_set
+        scored_at = cache_map.get(kw)
+        latest_pdd = pdd_map.get(kw)
+        # 缓存比最新一次 PDD 采集还旧 = 过期，建议重新分析
+        stale = bool(scored_at and latest_pdd and scored_at < latest_pdd)
+        items.append({
+            "keyword": kw,
+            "has_pdd": has_pdd,
+            "has_xianyu": has_xianyu,
+            "both": has_pdd and has_xianyu,
+            "cached": scored_at is not None,
+            "scored_at": scored_at.isoformat() if scored_at else None,
+            "stale": stale,
+        })
+    # 两池齐全的排前面
+    items.sort(key=lambda x: (not x["both"], x["keyword"]))
+    return {"total": len(items), "items": items}
+
+
+@router.get("/ten-dim/{keyword}", summary="某关键词的十维度分析（有缓存直接返回）")
+async def ten_dim_get(
+    keyword: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    existing = (await db.execute(
+        select(SelectionAnalysis).where(SelectionAnalysis.keyword == keyword)
+    )).scalar_one_or_none()
+    if existing:
+        return {
+            "keyword": keyword,
+            "scored_at": existing.scored_at.isoformat() if existing.scored_at else None,
+            "cached": True,
+            "xianyu": existing.xianyu_payload,
+            "pdd": existing.pdd_payload,
+            "arbitrage": existing.arbitrage,
+        }
+    return await _compute_and_cache(db, keyword)
+
+
+@router.post("/ten-dim/{keyword}/refresh", summary="重新分析（强制重算覆盖缓存）")
+async def ten_dim_refresh(
+    keyword: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await _compute_and_cache(db, keyword)
 
 
 @router.get("/xhs/recommendations", summary="小红书选品推荐")

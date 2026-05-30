@@ -135,6 +135,26 @@ class KeywordProduct(Base, UUIDMixin, TimestampMixin):
     )
 
 
+class SelectionAnalysis(Base, UUIDMixin, TimestampMixin):
+    """「十维度选品」页的实时打分缓存（按关键词一行）。
+
+    打分是 on-demand 触发（打开页/点关键词时算），结果落这里缓存，
+    同词再打开秒出；「重新分析」按钮强制重算覆盖。
+
+    payload 都是 JSON：
+      xianyu_payload —— A 闲鱼端排序结果 + 维度 + 价格分布
+      pdd_payload    —— B PDD 端排序结果
+      arbitrage      —— C 跨平台套利结论
+    """
+    __tablename__ = "selection_analysis"
+
+    keyword: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    xianyu_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    pdd_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    arbitrage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class KeywordScore(Base, UUIDMixin, TimestampMixin):
     """Keyword-level (market) score — how good this keyword is to sell into.
 
