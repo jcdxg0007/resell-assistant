@@ -109,6 +109,15 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.compliance.enforce_product_cap",
         "schedule": crontab(minute=15, hour=4),
     },
+
+    # === PDD 全自动跑批 ===
+    # 每 3 分钟唤醒一次「自带闸门」的 tick：是否真派由任务内部按 开关/暂停/
+    # 活跃时段/随机下次时刻/配额/worker在线 判断。固定高频唤醒，实际派词时刻
+    # 每天随机错峰，避免「每天 X 点准时上线」的机器指纹。频率/时段/词数前端可调。
+    "pdd-auto-batch-tick": {
+        "task": "app.tasks.pdd.auto_batch_tick",
+        "schedule": crontab(minute="*/3"),
+    },
 }
 
 celery_app.autodiscover_tasks([
@@ -119,4 +128,5 @@ celery_app.autodiscover_tasks([
     "app.tasks.ai_ops",
     "app.tasks.session",
     "app.tasks.compliance",
+    "app.tasks.pdd",
 ])

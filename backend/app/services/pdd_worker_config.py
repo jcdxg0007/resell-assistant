@@ -41,6 +41,14 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "humanize_pace": 1.0,
     "target_count_min": 8,
     "target_count_max": 20,
+    # ── 全自动跑批（backend celery beat 读，worker 不用）──
+    "auto_batch_enabled": False,
+    "auto_both_platforms": True,
+    "auto_active_start_hour": 9,
+    "auto_active_end_hour": 23,
+    "auto_interval_min_minutes": 40,
+    "auto_interval_max_minutes": 120,
+    "auto_batch_count": 3,
 }
 
 # 每个参数的类型 / 范围 / 中文标签 / 分组 / 说明。
@@ -128,6 +136,47 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "pair_min": "target_count_min",
         "help": "每次采集一个关键词的目标商品数上限。",
     },
+    "auto_batch_enabled": {
+        "type": "bool",
+        "label": "全自动跑批", "group": "自动跑批",
+        "help": "开启后 backend 定时唤醒，在活跃时段内按随机间隔自动从词库挑词派任务。"
+                "「暂停任务」会一并停掉它（共用同一暂停标志）。",
+    },
+    "auto_both_platforms": {
+        "type": "bool",
+        "label": "自动跑批同时跑闲鱼", "group": "自动跑批",
+        "help": "自动派 PDD 词的同时错峰触发一次闲鱼采集。",
+    },
+    "auto_active_start_hour": {
+        "type": "int", "min": 0, "max": 23,
+        "label": "活跃时段起(点)", "group": "自动跑批",
+        "help": "几点开始允许自动跑批（按北京时间）。避免凌晨搜索这种非真人时段。"
+                "起>止视为跨夜（如 22→2）。",
+    },
+    "auto_active_end_hour": {
+        "type": "int", "min": 0, "max": 23,
+        "label": "活跃时段止(点)", "group": "自动跑批",
+        "help": "几点停止自动跑批（按北京时间）。起==止视为全天。",
+    },
+    "auto_interval_min_minutes": {
+        "type": "int", "min": 5, "max": 720,
+        "label": "两波最短间隔(分)", "group": "自动跑批",
+        "pair": "auto_interval_max_minutes",
+        "help": "两次自动派词之间的最短间隔。实际间隔在[最短,最长]随机取，"
+                "避免每天固定钟点上线被识别为机器。",
+    },
+    "auto_interval_max_minutes": {
+        "type": "int", "min": 5, "max": 1440,
+        "label": "两波最长间隔(分)", "group": "自动跑批",
+        "pair_min": "auto_interval_min_minutes",
+        "help": "两次自动派词之间的最长间隔。",
+    },
+    "auto_batch_count": {
+        "type": "int", "min": 1, "max": 10,
+        "label": "每波派词数", "group": "自动跑批",
+        "help": "每次自动派几个词（同品类聚集）。建议 ≤ 单波最多搜索次数，"
+                "让一波正好在一个 burst 内消化。",
+    },
 }
 
 
@@ -135,6 +184,12 @@ def _coerce(key: str, value: Any) -> Any:
     """按 spec 把值转成正确类型；类型不对抛 ValueError。"""
     spec = PARAM_SPECS[key]
     try:
+        if spec["type"] == "bool":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(int(value))
         if spec["type"] == "int":
             return int(value)
         return float(value)
@@ -156,7 +211,7 @@ def validate_patch(patch: dict[str, Any], merged: dict[str, Any]) -> dict[str, A
             raise ValueError(f"未知参数: {key}")
         val = _coerce(key, raw)
         spec = PARAM_SPECS[key]
-        if val < spec["min"] or val > spec["max"]:
+        if spec.get("min") is not None and (val < spec["min"] or val > spec["max"]):
             raise ValueError(
                 f"参数 {key}={val} 越界，允许范围 [{spec['min']}, {spec['max']}]"
             )
@@ -222,5 +277,5 @@ def specs_for_frontend() -> dict[str, Any]:
     return {
         "params": PARAM_SPECS,
         "defaults": DEFAULT_RUNTIME_CONFIG,
-        "groups": ["节奏", "阵发", "配额", "采集量"],
+        "groups": ["节奏", "阵发", "配额", "采集量", "自动跑批"],
     }

@@ -40,12 +40,24 @@ interface Console {
   stats: { total: number; items_total: number; success_rate: number | null; risk_blocked: number };
   target_count_min: number | null;
   target_count_max: number | null;
+  auto_batch_enabled?: boolean;
+  auto_next_at?: string | null;
   pending: PendingKw[];
   collected: CollectedKw[];
   recent_risk: RiskItem[];
   worker: { online: boolean; devices?: string[] };
   paused?: boolean;
   queued?: number;
+}
+
+interface AutoConfig {
+  auto_batch_enabled: boolean;
+  auto_both_platforms: boolean;
+  auto_active_start_hour: number;
+  auto_active_end_hour: number;
+  auto_interval_min_minutes: number;
+  auto_interval_max_minutes: number;
+  auto_batch_count: number;
 }
 
 const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
@@ -119,6 +131,40 @@ const MultiPlatformCompare: React.FC = () => {
   // 采集节奏控制窗口
   const [rhythmOpen, setRhythmOpen] = useState(false);
 
+  // 全自动跑批配置
+  const [auto, setAuto] = useState<AutoConfig | null>(null);
+  const [savingAuto, setSavingAuto] = useState(false);
+
+  const loadAuto = useCallback(async () => {
+    try {
+      const res = await api.get('/pdd-worker-config/');
+      const c = res.data || {};
+      setAuto({
+        auto_batch_enabled: !!c.auto_batch_enabled,
+        auto_both_platforms: c.auto_both_platforms ?? true,
+        auto_active_start_hour: c.auto_active_start_hour ?? 9,
+        auto_active_end_hour: c.auto_active_end_hour ?? 23,
+        auto_interval_min_minutes: c.auto_interval_min_minutes ?? 40,
+        auto_interval_max_minutes: c.auto_interval_max_minutes ?? 120,
+        auto_batch_count: c.auto_batch_count ?? 3,
+      });
+    } catch { /* 静默 */ }
+  }, []);
+
+  const saveAuto = useCallback(async (patch: Partial<AutoConfig>) => {
+    setSavingAuto(true);
+    try {
+      await api.put('/pdd-worker-config/', { patch });
+      setAuto((prev) => prev ? { ...prev, ...patch } : prev);
+      message.success('已保存，下个唤醒周期生效');
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '保存失败');
+      await loadAuto();
+    } finally {
+      setSavingAuto(false);
+    }
+  }, [message, loadAuto]);
+
   // kw 给定时按关键词过滤（闲鱼商品落库时 category 存的就是搜索词），实现同词比价
   const fetchXianyu = useCallback(async (p: number = 1, kw?: string | null) => {
     setXyLoading(true);
@@ -157,6 +203,7 @@ const MultiPlatformCompare: React.FC = () => {
 
   useEffect(() => { fetchXianyu(); }, [fetchXianyu]);
   useEffect(() => { fetchConsole(); }, [fetchConsole]);
+  useEffect(() => { loadAuto(); }, [loadAuto]);
   useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
 
   // 批量任务运行中（队列还有 + 未暂停）时，每 10s 刷新控制台看进度
@@ -431,6 +478,84 @@ const MultiPlatformCompare: React.FC = () => {
             {cons?.paused && <Tag color="orange">已暂停</Tag>}
           </Space>
         </Space>
+      </Card>
+
+      {/* 全自动采集（beat 定时随机错峰派词） */}
+      <Card
+        title={
+          <Space>
+            全自动采集
+            <Tooltip title="开启后 backend 定时在活跃时段内按随机间隔自动从词库挑词派任务，无需手动。「暂停任务」会一并停掉它。">
+              <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>（无人值守）</Text>
+            </Tooltip>
+          </Space>
+        }
+        size="small"
+        extra={
+          auto?.auto_batch_enabled
+            ? <Tag color="green">运行中{cons?.auto_next_at ? ` · 下次约 ${fmtHM(cons.auto_next_at)}` : ''}</Tag>
+            : <Tag>已关闭</Tag>
+        }
+      >
+        {auto ? (
+          <Space size="large" wrap>
+            <Space size={4}>
+              <Text type="secondary" style={{ fontSize: 12 }}>全自动跑批</Text>
+              <Switch
+                size="small" checked={auto.auto_batch_enabled} loading={savingAuto}
+                onChange={(v) => saveAuto({ auto_batch_enabled: v })}
+              />
+            </Space>
+            <Space size={4}>
+              <Text type="secondary" style={{ fontSize: 12 }}>同时跑闲鱼</Text>
+              <Switch
+                size="small" checked={auto.auto_both_platforms} loading={savingAuto}
+                onChange={(v) => saveAuto({ auto_both_platforms: v })}
+              />
+            </Space>
+            <Space size={4}>
+              <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
+              <InputNumber
+                size="small" min={0} max={23} value={auto.auto_active_start_hour} style={{ width: 60 }}
+                onChange={(v) => setAuto((p) => p ? { ...p, auto_active_start_hour: v ?? 0 } : p)}
+                onBlur={() => saveAuto({ auto_active_start_hour: auto.auto_active_start_hour })}
+                addonAfter="点"
+              />
+              <Text type="secondary">~</Text>
+              <InputNumber
+                size="small" min={0} max={23} value={auto.auto_active_end_hour} style={{ width: 60 }}
+                onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
+                onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
+                addonAfter="点"
+              />
+            </Space>
+            <Space size={4}>
+              <Tooltip title="两波之间的间隔在此区间内随机取，避免每天固定钟点上线被识别为机器">
+                <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
+              </Tooltip>
+              <InputNumber
+                size="small" min={5} max={720} value={auto.auto_interval_min_minutes} style={{ width: 70 }}
+                onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_min_minutes: v ?? 5 } : p)}
+                onBlur={() => saveAuto({ auto_interval_min_minutes: auto.auto_interval_min_minutes })}
+              />
+              <Text type="secondary">~</Text>
+              <InputNumber
+                size="small" min={5} max={1440} value={auto.auto_interval_max_minutes} style={{ width: 70 }}
+                onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_max_minutes: v ?? 5 } : p)}
+                onBlur={() => saveAuto({ auto_interval_max_minutes: auto.auto_interval_max_minutes })}
+                addonAfter="分"
+              />
+            </Space>
+            <Space size={4}>
+              <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
+              <InputNumber
+                size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 60 }}
+                onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
+                onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
+              />
+            </Space>
+          </Space>
+        ) : <Text type="secondary">加载中…</Text>}
       </Card>
 
       {cons?.recent_risk && cons.recent_risk.length > 0 && (

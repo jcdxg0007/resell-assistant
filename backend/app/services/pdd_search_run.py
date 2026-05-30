@@ -266,6 +266,14 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
     from app.services.pdd_worker_config import get_runtime_config
     cfg = await get_runtime_config(db)
 
+    # ── 全自动跑批状态（前端「全自动采集」卡显示）──
+    from app.services.pdd_app_queue import get_auto_next_ts
+    auto_next_ts = await get_auto_next_ts()
+    auto_next_at = (
+        datetime.fromtimestamp(auto_next_ts, tz=_CN_TZ).isoformat()
+        if auto_next_ts else None
+    )
+
     return {
         "stats": {
             "total": today_total,
@@ -275,6 +283,8 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
         },
         "target_count_min": cfg.get("target_count_min"),
         "target_count_max": cfg.get("target_count_max"),
+        "auto_batch_enabled": bool(cfg.get("auto_batch_enabled")),
+        "auto_next_at": auto_next_at,
         "pending": pending,
         "collected": collected,
         "recent_risk": recent_risk,

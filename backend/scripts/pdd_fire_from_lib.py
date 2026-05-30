@@ -99,72 +99,12 @@ async def _select_keywords(
 ) -> list[Keyword]:
     """挑 N 个词，遵循「burst 内同品类聚集 + burst 间品类轮换」。
 
-    两步走：
-
-    1. 锁定品类：在所有「有可调度 PDD 词」的品类里，挑整体最久没被碰过
-       的那个 —— 按该品类下 ``MAX(pdd_last_searched_at) ASC NULLS FIRST``。
-       全新品类（一个词都没跑过 → MAX=NULL）最优先；``random()`` 给同级
-       品类打散。指定 ``--category`` 时跳过这步，直接锁定该品类。
-    2. 品类内选词：从锁定品类里按 ``pdd_last_searched_at ASC NULLS FIRST``
-       取 N 个（最久没跑优先；``random()`` 给完全同级的词打散顺序）。
-
-    为什么这样：真人一次 session 的搜索主题是聚集的（要买婴儿用品就连搜
-    婴儿床 / 围挡 / 地垫），不会「婴儿床 → 猫包 → 相机壳」大杂烩 —— 后者
-    是比价采集器的典型指纹。靠"品类轮换"让长期覆盖均匀、又让每个 burst
-    看起来像一个有真实需求的买家。详见 docs/PDD-自建采集-roadmap.md
-    §"Day 4 词库选词策略"。
-
-    边界：锁定品类里可跑词不足 N 个时，就只返回那几个（不跨品类硬凑，
-    保持 session 主题纯净）。
+    选词策略的权威实现已搬到 app.services.pdd_autobatch.select_cohesive_keywords
+    （beat 自动跑批与本脚本共用同一份，避免漂移）。本函数只负责开 session。
     """
+    from app.services.pdd_autobatch import select_cohesive_keywords  # noqa: E402
     async with AsyncSessionLocal() as db:
-        # ── 步骤 1：锁定品类 ──────────────────────────────────
-        if category_slug:
-            cat = (
-                await db.execute(
-                    select(Category).where(Category.slug == category_slug)
-                )
-            ).scalar_one_or_none()
-            if cat is None:
-                return []
-            chosen_cat_id = cat.id
-        else:
-            cat_stmt = (
-                select(Category.id)
-                .join(Keyword, Keyword.category_id == Category.id)
-                .where(Keyword.pdd_safe.is_(True))
-                .where(Keyword.is_active.is_(True))
-                .where(Keyword.schedule_enabled.is_(True))
-                .where(_PDD_PLATFORM_FILTER)
-                .group_by(Category.id)
-                .order_by(
-                    func.max(Keyword.pdd_last_searched_at).asc().nullsfirst(),
-                    func.random(),
-                )
-                .limit(1)
-            )
-            chosen_cat_id = (await db.execute(cat_stmt)).scalar_one_or_none()
-            if chosen_cat_id is None:
-                return []
-
-        # ── 步骤 2：品类内选 N 个最久没跑的词 ─────────────────
-        kw_stmt = (
-            select(Keyword)
-            .options(selectinload(Keyword.category))
-            .where(Keyword.category_id == chosen_cat_id)
-            .where(Keyword.pdd_safe.is_(True))
-            .where(Keyword.is_active.is_(True))
-            .where(Keyword.schedule_enabled.is_(True))
-            .where(_PDD_PLATFORM_FILTER)
-            .order_by(
-                Keyword.pdd_last_searched_at.asc().nullsfirst(),
-                Keyword.pdd_searches_total.asc(),
-                func.random(),
-            )
-            .limit(count)
-        )
-        rows = (await db.execute(kw_stmt)).scalars().all()
-        return list(rows)
+        return await select_cohesive_keywords(db, count, category_slug)
 
 
 async def _write_back_result(

@@ -218,6 +218,29 @@ async def clear_batch_plan() -> None:
     await redis_client.delete(BATCH_PLAN_KEY)
 
 
+# 全自动跑批：下一次派词的预计时刻（epoch 秒）。beat tick 据此随机错峰，
+# 避免每天固定钟点上线。1 天过期（跨天自然失效，新一天重新排）。
+AUTO_NEXT_TS_KEY = "pdd_app:auto_next_ts"
+
+
+async def set_auto_next_ts(ts: float) -> None:
+    await redis_client.set(AUTO_NEXT_TS_KEY, str(ts), ex=24 * 3600)
+
+
+async def get_auto_next_ts() -> float | None:
+    raw = await redis_client.get(AUTO_NEXT_TS_KEY)
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+async def clear_auto_next_ts() -> None:
+    await redis_client.delete(AUTO_NEXT_TS_KEY)
+
+
 async def get_worker_status() -> dict[str, Any]:
     """供管理面 / 自检脚本查 worker 在不在。"""
     raw = await redis_client.get(WORKER_HEARTBEAT_KEY)
