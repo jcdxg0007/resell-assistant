@@ -16,7 +16,6 @@ from app.models.product import Product, PriceSnapshot, Platform, ProductScore
 from app.models.xianyu import XianyuMarketData
 from app.models.selection import Category, Keyword, KeywordProduct, KeywordScore
 from app.services.xianyu.crawler import xianyu_crawler
-from app.services.pinduoduo.crawler import pdd_crawler
 from app.services.alibaba_1688.crawler import alibaba_1688_crawler
 from app.services.xiaohongshu.crawler import xhs_crawler
 from app.services import anti_risk
@@ -1020,48 +1019,18 @@ async def _instant_search(
                 "error": "platform_disabled:pdd_h5_search_closed",
                 "risk_signals": [],
             }
-        # Phase 1：APP worker 通道分支。bypass H5 的 compliance_gate /
-        # browser_manager / proxy_pool —— APP 路径是物理设备 + 用户家庭
-        # 网络，跟服务端代理池/反爬 cookie 完全脱钩，所以这里短路。
-        # APP 通道自带速率控制（worker 端 _MIN_GAP_SECONDS）+ 账号绑定，
-        # 不需要重复加 server-side 闸口。
+        # H5 网页搜索通道已彻底下线（高风险，且 2026 起 PDD 对游客搜索返空），
+        # 模块 app/services/pinduoduo/crawler.py 已删除。现在唯一的 PDD 通道是
+        # 家里物理手机的 APP worker。拔 _PDD_DISABLED 时必须同时把
+        # _PDD_USE_APP_WORKER 翻 True，否则没有可用通道、直接返回 unavailable。
         if _PDD_USE_APP_WORKER:
             return await _pdd_search_via_app_worker(keyword, mode="fast")
-        blocked = await _pass_gate("pdd")
-        if blocked:
-            return blocked
-        ctx = await browser_manager.get_anonymous_context(
-            proxy_url=proxy_url, platform="pdd",
-            proxy_area=pdd_bound_area, account_id=pdd_account_id,
-        )
-        # V4: merge previously-frozen device cookies (_nano_fp etc.)
-        # over the account's stored cookies so the device identity
-        # stays stable across sessions even though PDD's JS would
-        # otherwise rewrite _nano_fp on every page load.
-        eff_cookies = pdd_cookies
-        if pdd_account_id:
-            try:
-                fp = await get_or_init_fingerprint(pdd_account_id)
-                eff_cookies = merge_frozen_into(
-                    fp, "pdd", pdd_cookies, ".yangkeduo.com"
-                )
-            except Exception as e:
-                logger.warning(f"PDD frozen-cookie merge failed: {e}")
-        result = await pdd_crawler.collect_market_data(
-            ctx, keyword, cookies=eff_cookies,
-        )
-        # Capture this session's _nano_fp etc. on a successful crawl so
-        # the next visit (possibly from a different exit IP) presents
-        # the same device identity.
-        if pdd_account_id and (result.get("active_listings", 0) or 0) > 0:
-            try:
-                session_cookies = await ctx.cookies()
-                await freeze_platform_cookies(
-                    pdd_account_id, "pdd", session_cookies
-                )
-            except Exception as e:
-                logger.warning(f"PDD freeze cookies failed: {e}")
-        return result
+        return {
+            "platform": "pdd",
+            "__unavailable__": True,
+            "error": "no_pdd_channel:h5_removed_and_app_worker_off",
+            "risk_signals": [],
+        }
 
     async def _1688_call() -> dict:
         if _ALIBABA_1688_DISABLED:
