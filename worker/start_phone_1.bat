@@ -8,7 +8,14 @@ REM   BOUND_PDD_ACCOUNT  这台手机登录的 PDD 账号
 REM 其它配置（backend 地址 / token）共用 worker\.env
 REM ============================================================
 cd /d C:\resell\worker
-call .venv\Scripts\activate.bat
+REM 自动找虚拟环境（C:\resell\.venv 或 C:\resell\worker\.venv）
+if exist "C:\resell\.venv\Scripts\activate.bat" (
+  call "C:\resell\.venv\Scripts\activate.bat"
+) else if exist "C:\resell\worker\.venv\Scripts\activate.bat" (
+  call "C:\resell\worker\.venv\Scripts\activate.bat"
+) else (
+  echo [警告] 没找到 .venv，将用全局 python。若报 ModuleNotFoundError 请改本行 venv 路径。
+)
 
 set ADB_SERIAL=PKT0220416005274
 set WORKER_NAME=phone-1
