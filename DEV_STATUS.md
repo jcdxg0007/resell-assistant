@@ -1,6 +1,9 @@
 # 开发进度总览
 
-> 最后更新：2026-04-13（第二次更新）
+> 最后更新：2026-05-30
+>
+> 📌 **架构 / 目录 / 数据流总览见 [`docs/项目结构与架构速览.md`](docs/项目结构与架构速览.md)**（断上下文优先读那篇）。
+> 本文件偏「模块完成度进度」，速览篇偏「东西在哪、怎么连」。
 
 ## 项目简介
 
@@ -31,9 +34,13 @@
 
 | 模块 | 后端 | 前端 | 说明 |
 |------|:----:|:----:|------|
-| 选品 — 闲鱼 | ✅ | ✅ | 推荐/评分/搜索已打通，搜索 → Celery 即时爬虫 → 刷新查看 |
+| 选品 — 多平台比价 | ✅ | ✅ | 闲鱼+PDD 原始采集并排展示（解耦后无打分）+ 采集控制台/全自动跑批 |
+| 选品 — 十维度选品 | ✅ | ✅ | A闲鱼端/B PDD端/C跨平台套利 三层打分，on-demand 算+缓存（`selection_analysis`）|
+| 选品 — PDD 词库管理 | ✅ | ✅ | 分类 + 关键词 CRUD（`/pdd-keywords`）|
+| 选品 — 闲鱼（旧推荐） | ✅ | ✅ | `/selection/xianyu/recommendations` 仍在，搜索 → Celery 即时爬虫 |
 | 选品 — 小红书 | ✅ | ✅ | 话题/关键词/推荐 API 齐全，前端页面已对接 |
 | 选品 — 虚拟商品 | ✅ | ✅ | 前端已对接 `/selection/virtual/recommendations` |
+| PDD 采集（APP worker） | ✅ | ✅ | 家里手机 worker（H5 爬虫已删）；派发/回传/落 `pdd_search_runs` |
 | 闲鱼工作台 | ✅ | ✅ | API → Celery → Playwright 全链路打通，前端支持发布/擦亮/下架 |
 | 小红书工作台 | ✅ | ✅ | 笔记 CRUD + 发布 + AI 内容生成 API 已完整，前端已对接 |
 | 客服消息 | ✅ | ✅ | 会话列表、消息详情、AI 预回复、发送回复均已对接 |
@@ -63,6 +70,7 @@
 | 发布执行 | ⚠️ | cron | 服务层实现，HTTP→Celery 触发未打通 |
 | 退款检查 | ⚠️ | 定时 | 循环体内 TODO |
 | 日计数重置 | ✅ | 每日 0 点 | 重置每日发布计数 |
+| PDD 全自动跑批 tick | ✅ | 每 3 分钟 | 活跃时段内按随机间隔自动派 PDD 采集词 |
 
 ---
 
@@ -134,17 +142,19 @@
 | `.github/workflows/build-and-push.yml` | CI/CD（条件构建+Docker缓存+Sealos重启）|
 | `backend/Dockerfile` | 后端镜像 |
 | `frontend/Dockerfile` | 前端镜像 |
-| `deploy/backend.yaml` | Sealos 后端部署清单 |
-| `deploy/frontend.yaml` | Sealos 前端部署清单 |
+| `deploy/sealos/backend-deployment.yaml` | Sealos 后端部署清单 |
+| `deploy/sealos/frontend-deployment.yaml` | Sealos 前端部署清单 |
+| `deploy/sealos/celery-deployment.yaml` | Sealos Celery worker+beat 清单 |
+| `backend/entrypoint.sh` | 容器入口（API 模式启动前自动 `alembic upgrade head`）|
 
 ---
 
 ## 已知问题
 
 1. **`/accounts/stats/summary` 路由顺序**：写在 `/{account_id}` 之后，可能被当成 `account_id="stats"` 处理
-2. **前端闲鱼搜索**：调用 `POST /products/search`，但后端不存在此路由
-3. **容器 IP 不固定**：Sealos 重启后 IP 会变，已通过自动白名单解决
-4. **Playwright 状态持久化**：Cookie 已同步存储到 PostgreSQL，容器重启不丢失
+2. **容器 IP 不固定**：Sealos 重启后 IP 会变，已通过自动白名单解决
+3. **Playwright 状态持久化**：Cookie 已同步存储到 PostgreSQL，容器重启不丢失
+4. **卖家信誉维度无数据**：闲鱼列表页不返回卖家信用，十维度里已去掉；要真信誉需做详情页爬虫（未做）
 
 ---
 
