@@ -34,6 +34,7 @@ interface SideItem {
   product_id?: string;
   title: string;
   price: number;
+  image_url?: string | null;
   item_wants?: number;
   sales?: number;
   badges?: string[];
@@ -122,8 +123,9 @@ const SideTable: React.FC<{ side: SidePayload | null; platform: 'xianyu' | 'pdd'
     {
       title: '商品', dataIndex: 'title', ellipsis: true,
       render: (t: string, r: SideItem) => (
-        <Space size={4}>
-          <Text ellipsis style={{ maxWidth: 240 }}>{t || '—'}</Text>
+        <Space size={6}>
+          {r.image_url && <img src={r.image_url} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4, flex: '0 0 auto' }} />}
+          <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>
           {(r.risk_tags || []).includes('suspicious_low') && <Tag color="volcano">极低价</Tag>}
         </Space>
       ),

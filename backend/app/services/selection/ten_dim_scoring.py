@@ -301,6 +301,7 @@ def score_xianyu_side(
             "title": cp.title,
             "price": cp.price,
             "item_wants": cp.item_wants,
+            "image_url": (image_urls[0] if isinstance(image_urls, list) and image_urls else None),
             "relevance": cp.relevance_score,
             "risk_tags": cp.risk_tags,
             "total_score": total,

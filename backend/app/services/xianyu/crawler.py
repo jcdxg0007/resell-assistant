@@ -458,16 +458,19 @@ class XianyuCrawler:
         finally:
             await page.close()
 
-    async def collect_market_data(self, context, keyword: str) -> dict:
+    async def collect_market_data(self, context, keyword: str, max_items: int = 100) -> dict:
         """Collect aggregate market data for a keyword on Xianyu.
 
         Captures risk signals (CAPTCHA / RGV587 / login wall) into the
         returned ``risk_signals`` list so the orchestrator can aggregate
         DingTalk alerts across platforms.
+
+        ``max_items`` 上限由调用方传入（instant_search 用「单词商品量」配置的
+        上限，让前端那个数量控制对闲鱼也生效）；默认 100 保持价格监控等旧调用不变。
         """
         risks: list[anti_risk.RiskSignal] = []
         items = await self.search_products(
-            context, keyword, max_items=100, risks_sink=risks,
+            context, keyword, max_items=max_items, risks_sink=risks,
         )
         if not items:
             return {

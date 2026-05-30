@@ -339,6 +339,16 @@ async def batch_pause(
     return {"ok": True, "paused": True, "purged": purged}
 
 
+@router.post("/batch/resume", summary="恢复采集（解除暂停，闲鱼/PDD 自动跑批可继续）")
+async def batch_resume(
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """解除全局暂停标志。PDD/闲鱼 自动跑批 tick 下个唤醒周期即可继续派词。"""
+    await set_collection_paused(False)
+    logger.info("collection resume: paused flag cleared")
+    return {"ok": True, "paused": False}
+
+
 @router.get("/console", summary="今日搜索任务控制台（统计+待采集/已采集池+商品量范围+worker）")
 async def read_console(
     db: AsyncSession = Depends(get_db),

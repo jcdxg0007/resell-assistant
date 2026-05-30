@@ -322,9 +322,19 @@ const MultiPlatformCompare: React.FC = () => {
     setBatchLoading(true);
     try {
       const res = await api.post('/pdd-runs/batch/pause');
-      message.success(`已暂停，清掉 ${res.data.purged} 个排队任务（在跑的不打断）`);
+      message.success(`已暂停全部：清掉 ${res.data.purged} 个 PDD 排队任务，并停掉闲鱼/PDD 自动跑批（在跑的不打断）`);
       fetchConsole();
     } catch { message.error('暂停失败'); }
+    finally { setBatchLoading(false); }
+  };
+
+  const resumeBatch = async () => {
+    setBatchLoading(true);
+    try {
+      await api.post('/pdd-runs/batch/resume');
+      message.success('已恢复，闲鱼/PDD 自动跑批下个周期继续');
+      fetchConsole();
+    } catch { message.error('恢复失败'); }
     finally { setBatchLoading(false); }
   };
 
@@ -477,8 +487,12 @@ const MultiPlatformCompare: React.FC = () => {
               />
             </Tooltip>
             <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={batchLoading} onClick={startBatch}>开始任务</Button>
-            {batchRunning && (
-              <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading} onClick={pauseBatch}>暂停 PDD</Button>
+            {cons?.paused ? (
+              <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} loading={batchLoading} onClick={resumeBatch}>恢复采集</Button>
+            ) : (
+              <Tooltip title="清掉 PDD 排队任务 + 停掉闲鱼/PDD 全自动跑批（正在跑的不打断）">
+                <Button size="small" danger icon={<PauseCircleOutlined />} loading={batchLoading} onClick={pauseBatch}>暂停全部</Button>
+              </Tooltip>
             )}
             {(cons?.queued ?? 0) > 0 && <Text type="secondary" style={{ fontSize: 12 }}>PDD 队列 {cons?.queued}</Text>}
             {cons?.paused && <Tag color="orange">已暂停</Tag>}

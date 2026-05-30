@@ -1072,7 +1072,16 @@ async def _instant_search(
         ctx = await browser_manager.get_anonymous_context(
             proxy_url=proxy_url, platform="xianyu"
         )
-        return await xianyu_crawler.collect_market_data(ctx, keyword)
+        # 「单词商品量」上限对闲鱼也生效：取运行时配置的 target_count_max 作为采集上限
+        xy_max = 100
+        try:
+            from app.services.pdd_worker_config import get_runtime_config
+            async with AsyncSessionLocal() as _cfg_db:
+                _cfg = await get_runtime_config(_cfg_db)
+            xy_max = max(1, int(_cfg.get("target_count_max") or 100))
+        except Exception:  # noqa: BLE001 — 配置读不到就退回默认 100
+            pass
+        return await xianyu_crawler.collect_market_data(ctx, keyword, max_items=xy_max)
 
     # V3/V4 helpers — keep platform branches symmetric.
     from app.services.account_fingerprint import (

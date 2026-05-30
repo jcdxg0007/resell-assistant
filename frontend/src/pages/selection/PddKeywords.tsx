@@ -116,16 +116,18 @@ const PddKeywords: React.FC = () => {
     }
   };
 
-  // 表头全选：把当前页所有词的某个开关一起开/关
+  // 表头全选：作用到当前筛选范围（分类 + 搜索词）下的全部词，跨页
   type SwitchField = 'pdd_safe' | 'xianyu_safe' | 'schedule_enabled';
   const allOn = (field: SwitchField) => rows.length > 0 && rows.every((r) => !!r[field]);
   const bulkPatchField = async (field: SwitchField, value: boolean) => {
-    if (!rows.length) return;
-    const prev = rows;
-    setRows((rs) => rs.map((r) => ({ ...r, [field]: value })));  // 乐观更新
+    setRows((rs) => rs.map((r) => ({ ...r, [field]: value })));  // 乐观更新本页
     try {
-      await Promise.all(prev.map((r) => api.put(`/pdd-keywords/${r.id}`, { [field]: value })));
-      message.success(`本页已全部${value ? '开启' : '关闭'}`);
+      const res = await api.post('/pdd-keywords/bulk-toggle', {
+        field, value, category_id: catFilter, q: q || undefined,
+      });
+      const scope = catFilter ? '该分类' : '全部';
+      message.success(`${scope}共 ${res.data.updated} 个词已全部${value ? '开启' : '关闭'}`);
+      fetchKeywords();
     } catch {
       message.error('批量更新失败');
       fetchKeywords();

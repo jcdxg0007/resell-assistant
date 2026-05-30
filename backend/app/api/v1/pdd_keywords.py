@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -178,6 +178,36 @@ async def _get_keyword(db: AsyncSession, kid: str) -> Keyword:
     if k is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="词不存在")
     return k
+
+
+class BulkToggleBody(BaseModel):
+    """按当前筛选范围（分类 + 搜索词）批量开关某个字段。"""
+
+    field: str = Field(..., description="pdd_safe / xianyu_safe / schedule_enabled")
+    value: bool
+    category_id: str | None = None
+    q: str | None = None
+
+
+@router.post("/bulk-toggle", summary="按筛选范围批量开关 pdd_safe/xianyu_safe/schedule_enabled（跨页）")
+async def bulk_toggle(
+    body: BulkToggleBody,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    if body.field not in ("pdd_safe", "xianyu_safe", "schedule_enabled"):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="不支持的字段")
+    conds = [_PDD_FILTER]
+    if body.category_id:
+        conds.append(Keyword.category_id == body.category_id)
+    if body.q:
+        conds.append(Keyword.text.ilike(f"%{body.q}%"))
+    stmt = sa_update(Keyword).values(**{body.field: body.value})
+    for c in conds:
+        stmt = stmt.where(c)
+    res = await db.execute(stmt)
+    await db.commit()
+    return {"ok": True, "updated": res.rowcount or 0, "field": body.field, "value": body.value}
 
 
 @router.post("/", summary="新建 PDD 词")
