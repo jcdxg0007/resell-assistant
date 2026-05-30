@@ -350,6 +350,70 @@ async def keyword_items(db: AsyncSession, keyword_text: str) -> dict[str, Any]:
     }
 
 
+async def paginated_items(
+    db: AsyncSession,
+    keyword_text: str | None,
+    *,
+    page: int = 1,
+    page_size: int = 10,
+) -> dict[str, Any]:
+    """给前端比价页结果区用：今日采集到的逐条商品，分页。
+
+    - 给 keyword_text：取该词今天最新一条采集记录的逐条商品；
+    - 不给：把今日每个词的最新一条记录的商品全合并（每条带上 keyword_text），
+      和闲鱼侧"不选词就看全部"对齐。
+    """
+    day_start = _cn_day_start()
+    flat: list[dict[str, Any]] = []
+    if keyword_text:
+        r = (await db.execute(
+            select(PddSearchRun)
+            .where(PddSearchRun.created_at >= day_start)
+            .where(PddSearchRun.keyword_text == keyword_text)
+            .order_by(PddSearchRun.created_at.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        for it in ((r.items if r else None) or []):
+            d = dict(it)
+            d.setdefault("keyword_text", keyword_text)
+            flat.append(d)
+    else:
+        # 今日每个关键词的最新一条记录
+        sub = (
+            select(
+                PddSearchRun.keyword_text,
+                func.max(PddSearchRun.created_at).label("mx"),
+            )
+            .where(PddSearchRun.created_at >= day_start)
+            .group_by(PddSearchRun.keyword_text)
+            .subquery()
+        )
+        rows = (await db.execute(
+            select(PddSearchRun)
+            .join(
+                sub,
+                (PddSearchRun.keyword_text == sub.c.keyword_text)
+                & (PddSearchRun.created_at == sub.c.mx),
+            )
+            .order_by(PddSearchRun.created_at.desc())
+        )).scalars().all()
+        for r in rows:
+            for it in (r.items or []):
+                d = dict(it)
+                d.setdefault("keyword_text", r.keyword_text)
+                flat.append(d)
+
+    total = len(flat)
+    start = max(0, (page - 1) * page_size)
+    return {
+        "keyword_text": keyword_text,
+        "found": total > 0,
+        "total": total,
+        "page": page,
+        "items": flat[start:start + page_size],
+    }
+
+
 async def clear_today(db: AsyncSession, keyword_text: str | None = None) -> int:
     """清空今日采集记录。keyword_text 给定则只清该词；否则清今日全部。返回删除条数。"""
     day_start = _cn_day_start()

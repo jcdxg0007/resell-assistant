@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, InputNumber, Button, Space, Tag, Row, Col,
-  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Empty, Switch, Segmented,
+  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Switch, Segmented,
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
@@ -126,6 +126,8 @@ const MultiPlatformCompare: React.FC = () => {
   const [selectedKw, setSelectedKw] = useState<string | null>(null);
   const [items, setItems] = useState<PddProduct[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
+  const [pddTotal, setPddTotal] = useState(0);
+  const [pddPage, setPddPage] = useState(1);
 
   // 采集节奏控制窗口
   const [rhythmOpen, setRhythmOpen] = useState(false);
@@ -196,18 +198,28 @@ const MultiPlatformCompare: React.FC = () => {
     } catch { /* ignore */ } finally { setConsLoading(false); }
   }, []);
 
+  // PDD 商品分页拉取：和闲鱼侧对齐——给 kw 看该词，不给看今日全部。
+  const fetchPdd = useCallback(async (p: number = 1, kw?: string | null) => {
+    setItemsLoading(true);
+    try {
+      const params: Record<string, unknown> = { page: p, page_size: 10 };
+      if (kw) params.keyword = kw;
+      const res = await api.get('/pdd-runs/items', { params });
+      setItems(res.data.items || []);
+      setPddTotal(res.data.total || 0);
+      setPddPage(p);
+    } catch { setItems([]); setPddTotal(0); } finally { setItemsLoading(false); }
+  }, []);
+
   // 选中一个词：同时加载 PDD 采到的商品 + 同词的闲鱼选品
   const loadItems = useCallback(async (kw: string) => {
-    setItemsLoading(true);
     setSelectedKw(kw);
     fetchXianyu(1, kw);
-    try {
-      const res = await api.get('/pdd-runs/items', { params: { keyword: kw } });
-      setItems(res.data.items || []);
-    } catch { setItems([]); } finally { setItemsLoading(false); }
-  }, [fetchXianyu]);
+    fetchPdd(1, kw);
+  }, [fetchXianyu, fetchPdd]);
 
   useEffect(() => { fetchXianyu(); }, [fetchXianyu]);
+  useEffect(() => { fetchPdd(); }, [fetchPdd]);
   useEffect(() => { fetchConsole(); }, [fetchConsole]);
   useEffect(() => { loadAuto(); }, [loadAuto]);
   useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
@@ -223,7 +235,7 @@ const MultiPlatformCompare: React.FC = () => {
   const refreshAll = () => {
     fetchConsole();
     if (selectedKw) loadItems(selectedKw);
-    else fetchXianyu(xyPage);
+    else { fetchXianyu(xyPage); fetchPdd(pddPage); }
   };
 
   // 方案 A：提交后自动刷新（每 8s，约 80s）
@@ -235,14 +247,14 @@ const MultiPlatformCompare: React.FC = () => {
       n += 1;
       fetchConsole();
       if (watchKw) loadItems(watchKw);
-      else fetchXianyu(1);
+      else { fetchXianyu(1); fetchPdd(1); }
       if (n >= 10) {
         if (pollRef.current) window.clearInterval(pollRef.current);
         pollRef.current = null;
         setAutoRefreshing(false);
       }
     }, 8000);
-  }, [fetchConsole, fetchXianyu, loadItems]);
+  }, [fetchConsole, fetchXianyu, fetchPdd, loadItems]);
 
   // 搜索动作
   const searchXianyu = async (kw?: string) => { await api.post('/products/search', { keyword: (kw ?? keyword).trim(), platform: 'xianyu' }); };
@@ -357,7 +369,7 @@ const MultiPlatformCompare: React.FC = () => {
       await api.delete('/pdd-runs/today', { params: { keyword: selectedKw } });
       message.success(`已清空「${selectedKw}」今日结果`);
       setSelectedKw(null); setItems([]);
-      fetchConsole(); fetchXianyu(1);
+      fetchConsole(); fetchXianyu(1); fetchPdd(1);
     } catch { message.error('清空失败'); }
   };
 
@@ -366,7 +378,7 @@ const MultiPlatformCompare: React.FC = () => {
       await api.delete('/pdd-runs/today');
       message.success('已清空今日全部结果');
       setSelectedKw(null); setItems([]);
-      fetchConsole(); fetchXianyu(1);
+      fetchConsole(); fetchXianyu(1); fetchPdd(1);
     } catch { message.error('清空失败'); }
   };
 
@@ -726,12 +738,12 @@ const MultiPlatformCompare: React.FC = () => {
       <Row gutter={16}>
         <Col xs={24} xl={12}>
           <Card
-            title={<Space><Tag color="red">PDD</Tag>采集结果{selectedKw && <Tag>{selectedKw}</Tag>}</Space>}
+            title={<Space><Tag color="red">PDD</Tag>采集结果{selectedKw ? <Tag>{selectedKw}</Tag> : <Text type="secondary" style={{ fontSize: 12 }}>（全部）</Text>}</Space>}
             styles={{ body: { padding: 12 } }}
             extra={
               <Space size={8} wrap>
+                <Text type="secondary">共 {pddTotal}</Text>
                 <Text type="secondary">成功率 <Text strong style={{ color: (stats?.success_rate ?? 0) >= 80 ? '#52c41a' : '#faad14' }}>{stats?.success_rate ?? 0}%</Text></Text>
-                <Text type="secondary">商品 <Text strong>{stats?.items_total ?? 0}</Text></Text>
                 <Text type="secondary">风控 <Text strong style={{ color: (stats?.risk_blocked ?? 0) > 0 ? '#cf1322' : undefined }}>{stats?.risk_blocked ?? 0}</Text></Text>
                 <Popconfirm title={selectedKw ? `清空 PDD「${selectedKw}」今日结果？` : '请先选择一个已采集关键词'} onConfirm={clearCurrent} okText="清空" cancelText="取消" disabled={!selectedKw}>
                   <Button size="small" icon={<DeleteOutlined />} disabled={!selectedKw}>清空当前结果</Button>
@@ -742,19 +754,15 @@ const MultiPlatformCompare: React.FC = () => {
               </Space>
             }
           >
-            {selectedKw ? (
-              <Table<PddProduct>
-                size="small"
-                rowKey={(_, i) => String(i)}
-                loading={itemsLoading}
-                columns={itemColumns}
-                dataSource={items}
-                pagination={{ pageSize: 20, size: 'small', showSizeChanger: false }}
-                locale={{ emptyText: '该关键词本次未采到商品' }}
-              />
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点上方「今日已采集关键词」查看采到的商品" />
-            )}
+            <Table<PddProduct>
+              size="small"
+              rowKey={(_, i) => String(i)}
+              loading={itemsLoading}
+              columns={itemColumns}
+              dataSource={items}
+              pagination={{ current: pddPage, total: pddTotal, pageSize: 10, size: 'small', onChange: (p) => fetchPdd(p, selectedKw), showSizeChanger: false }}
+              locale={{ emptyText: selectedKw ? '该关键词本次未采到商品' : '暂无 PDD 采集数据' }}
+            />
           </Card>
         </Col>
 

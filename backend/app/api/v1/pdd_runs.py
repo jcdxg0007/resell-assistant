@@ -29,7 +29,8 @@ from app.services.pdd_app_queue import (
     set_collection_paused,
 )
 from app.services.pdd_search_run import (
-    clear_today, console_data, keyword_items, list_runs, persist_search_run, summary,
+    clear_today, console_data, list_runs, paginated_items,
+    persist_search_run, summary,
 )
 from app.services.pdd_worker_config import get_runtime_config
 
@@ -369,13 +370,15 @@ async def read_console(
     return data
 
 
-@router.get("/items", summary="某关键词今日采集到的逐条商品")
+@router.get("/items", summary="今日采集到的逐条商品（给词=该词，不给=全部，分页）")
 async def read_items(
-    keyword: str = Query(..., min_length=1, description="关键词文本"),
+    keyword: str | None = Query(None, description="关键词文本；留空=今日全部"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return await keyword_items(db, keyword)
+    return await paginated_items(db, keyword, page=page, page_size=page_size)
 
 
 @router.delete("/today", summary="清空今日采集记录（给 keyword 则只清该词，否则清全部）")
