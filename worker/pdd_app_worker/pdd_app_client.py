@@ -1163,13 +1163,23 @@ class PddAppClient:
         """
         seen_titles: dict[str, dict[str, Any]] = {}  # title → 最新数据
 
-        for screen_idx in range(scroll_screens):
+        # PDD 每次"滚一屏"实际只滑约半屏（见 _human_scroll_down），相邻两屏
+        # 重叠近半，去重后每屏净增的新卡片有限。所以这里不按固定屏数收，而是
+        # 滚到凑够 target_count 为止：
+        #   - scroll_screens 只当"至少滚这么多屏"的下限提示；
+        #   - max_screens 硬上限，防在结果稀少的词上无限滚；
+        #   - 连续两屏一个新卡片都没有 → 视为到底/卡住，提前结束。
+        max_screens = max(int(scroll_screens), 10)
+        stagnant = 0
+        screen_idx = 0
+        while screen_idx < max_screens:
             cards = await self._dump_with_lazy_recovery()
             # OCR 兜底必须用当前屏的实时截图，所以放在跨屏合并之前
             cards = await self._ocr_missing_prices(cards)
             # 主图裁剪同理：必须在滚走之前，用当前屏截图按 image_bounds 裁
             cards = await self._attach_card_images(cards)
 
+            new_this_screen = 0
             for card in cards:
                 title = card.get("title", "").strip()
                 if not title:
@@ -1190,11 +1200,31 @@ class PddAppClient:
                         existing["sales"] = card["sales"]
                     continue
                 seen_titles[title] = card
+                new_this_screen += 1
                 if len(seen_titles) >= target_count:
                     return list(seen_titles.values())
-            if screen_idx < scroll_screens - 1:
+
+            # 连续两屏零新增 → 多半到底了或列表卡住，别再无意义地滚
+            if new_this_screen == 0:
+                stagnant += 1
+                if stagnant >= 2:
+                    logger.info(
+                        f"[{self.serial}] 连续 {stagnant} 屏无新增，提前结束"
+                        f"（已采 {len(seen_titles)}/{target_count}）"
+                    )
+                    break
+            else:
+                stagnant = 0
+
+            screen_idx += 1
+            if screen_idx < max_screens:
                 await self._human_scroll_down()
                 await _sleep_jitter(1.0)
+
+        logger.info(
+            f"[{self.serial}] 采集结束：{len(seen_titles)}/{target_count} "
+            f"（滚了 {screen_idx} 屏，上限 {max_screens}）"
+        )
         return list(seen_titles.values())
 
     async def _ocr_missing_prices(
