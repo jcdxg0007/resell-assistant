@@ -67,6 +67,20 @@ class PddAppResult(BaseModel):
 EMERGENCY_PRIORITY_THRESHOLD = 8
 
 
+def scroll_screens_for(target_count: int) -> int:
+    """按目标商品数推导 PDD worker 应滚的屏数。
+
+    worker 的 fast 模式默认只滚 1 屏（写死），导致 target_count(单词商品量)
+    形同虚设——第一屏几个就几个、根本不往下滚。这里按 ~5 件/屏估算需要的屏数，
+    夹在 [2, 5]：至少给第二屏一次机会，又不超过 5 屏（PDD 风控按单 session
+    滚动深度打分，建议 ≤5）。worker 的采集循环本身"够数即停"，所以传的是上限，
+    够了不会硬滚满；某词结果稀疏时最多滚到 5 屏兜底。
+    """
+    import math
+    n = math.ceil(max(1, int(target_count)) / 5)
+    return max(2, min(n, 5))
+
+
 async def enqueue_task(task: PddAppTask) -> None:
     """把任务推进 Redis 队列。worker 会 BLPOP 拉走。
 

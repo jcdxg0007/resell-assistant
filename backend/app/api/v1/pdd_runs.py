@@ -25,7 +25,7 @@ from app.core.database import get_db
 from app.models.system import User
 from app.services.pdd_app_queue import (
     PddAppTask, await_result, clear_batch_plan, enqueue_task, get_worker_status,
-    is_collection_paused, purge_queue, queue_depth, set_batch_plan,
+    is_collection_paused, purge_queue, queue_depth, scroll_screens_for, set_batch_plan,
     set_collection_paused,
 )
 from app.services.pdd_search_run import (
@@ -130,7 +130,8 @@ async def dispatch_search(
             detail="pdd_worker_offline",
         )
     mode = "deep" if body.mode == "deep" else "fast"
-    task_timeout = 180 if mode == "deep" else 90
+    # fast 现在按 target_count 最多滚 5 屏，单次耗时比单屏长，超时相应放宽
+    task_timeout = 180 if mode == "deep" else 150
     cfg = await get_runtime_config(db)
     lo = int(cfg.get("target_count_min") or 8)
     hi = int(cfg.get("target_count_max") or 20)
@@ -139,7 +140,10 @@ async def dispatch_search(
     target_count = random.randint(lo, hi)
     task = PddAppTask(
         kind="search",
-        payload={"keyword": body.keyword.strip(), "mode": mode, "target_count": target_count},
+        payload={
+            "keyword": body.keyword.strip(), "mode": mode, "target_count": target_count,
+            "scroll_screens": scroll_screens_for(target_count),
+        },
         priority=_DISPATCH_PRIORITY,
         timeout_s=task_timeout,
     )
@@ -264,11 +268,15 @@ async def batch_start(
         pdd_batch = pdd_pending[:remaining]
         pdd_etas = _estimate_pdd_etas(len(pdd_batch), cfg=cfg, wstatus=wstatus, now=now)
         for idx, kw in enumerate(pdd_batch):
+            tc = random.randint(lo, hi)
             task = PddAppTask(
                 kind="search",
-                payload={"keyword": kw["text"], "mode": "fast", "target_count": random.randint(lo, hi)},
+                payload={
+                    "keyword": kw["text"], "mode": "fast", "target_count": tc,
+                    "scroll_screens": scroll_screens_for(tc),
+                },
                 priority=_BATCH_PRIORITY,
-                timeout_s=90,
+                timeout_s=150,
             )
             await enqueue_task(task)
             bg = asyncio.create_task(_await_and_persist(

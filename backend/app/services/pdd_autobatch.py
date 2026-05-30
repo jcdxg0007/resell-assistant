@@ -21,7 +21,7 @@ from app.core.database import AsyncSessionLocal
 from app.models.pdd_run import PddSearchRun
 from app.models.selection import Category, Keyword
 from app.services.pdd_app_queue import (
-    PddAppTask, await_result, enqueue_task, get_worker_status,
+    PddAppTask, await_result, enqueue_task, get_worker_status, scroll_screens_for,
 )
 from app.services.pdd_search_run import _cn_day_start, persist_search_run
 from app.services.pdd_worker_config import get_runtime_config
@@ -172,12 +172,15 @@ async def dispatch_auto_batch(
         now0 = datetime.now(timezone.utc)
         for k in keywords:
             worker_mode, _d, scroll = MODE_MAP.get(k.pdd_mode, MODE_MAP["fast"])
+            tc = random.randint(tc_lo, tc_hi)
+            # fast 模式按 target_count 推导滚屏数（够数即停），深抓模式沿用 MODE_MAP
+            eff_scroll = scroll_screens_for(tc) if worker_mode == "fast" else scroll
             task = PddAppTask(
                 kind="search",
                 payload={
                     "keyword": k.text,
-                    "target_count": random.randint(tc_lo, tc_hi),
-                    "scroll_screens": scroll,
+                    "target_count": tc,
+                    "scroll_screens": eff_scroll,
                     "mode": worker_mode,
                 },
                 priority=priority,
