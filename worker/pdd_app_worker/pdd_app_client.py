@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import random
@@ -35,6 +36,14 @@ PDD_PACKAGE = "com.xunmeng.pinduoduo"
 DEFAULT_MAX_ITEMS = 20
 APP_START_TIMEOUT = 30  # 启动 PDD APP 等待秒数（冷启动可能要 10-20s）
 SEARCH_RESULT_TIMEOUT = 15  # 提交搜索后等结果列表出现的最长时间
+
+# ─── 主图缩略图截屏裁剪 ─────────────────────────────────────
+# PDD APP 控件树拿不到图片 URL（图是渲染出来的位图），只能截屏裁剪卡片图区。
+# 缩略图编码成 base64 data URL 塞进 item["image"]，方便选品页直接 <img> 引用。
+# 三个参数都可用环境变量覆盖；PDD_CAPTURE_IMAGES=0 可整体关掉。
+_CAPTURE_IMAGES = os.environ.get("PDD_CAPTURE_IMAGES", "1") != "0"
+_THUMB_MAX_PX = int(os.environ.get("PDD_THUMB_MAX_PX", "160") or "160")  # 缩略图最长边
+_THUMB_JPEG_Q = int(os.environ.get("PDD_THUMB_JPEG_Q", "62") or "62")   # JPEG 质量 1-100
 
 # 同一台手机两次任务之间最少间隔（人类不会 1 秒内连发搜索），由 worker
 # 在调用层维护即可，client 内部只对单次任务内的步骤加 jitter。
@@ -1158,6 +1167,8 @@ class PddAppClient:
             cards = await self._dump_with_lazy_recovery()
             # OCR 兜底必须用当前屏的实时截图，所以放在跨屏合并之前
             cards = await self._ocr_missing_prices(cards)
+            # 主图裁剪同理：必须在滚走之前，用当前屏截图按 image_bounds 裁
+            cards = await self._attach_card_images(cards)
 
             for card in cards:
                 title = card.get("title", "").strip()
@@ -1298,6 +1309,84 @@ class PddAppClient:
                 f"[{self.serial}] OCR fallback: filled {n_ok}/{len(missing)} "
                 f"(still missing {n_fail}, avg_conf={avg_conf:.2f})"
             )
+        return items
+
+    async def _attach_card_images(
+        self, items: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """给每张卡片裁一张主图缩略图（base64 data URL）塞进 ``item["image"]``。
+
+        PDD APP 控件树没有图片 URL（图是渲染位图），只能截屏裁剪。必须在跨屏
+        滚动之前调用——和 OCR 兜底一样，滚走后截图就跟 bounds 对不上了。
+
+        任何一步失败都 swallow，绝不影响价格/销量主流程。
+        """
+        if not _CAPTURE_IMAGES:
+            return items
+        targets = [
+            it for it in items
+            if it.get("image_bounds") and not it.get("image")
+        ]
+        if not targets:
+            return items
+
+        try:
+            import cv2  # noqa: PLC0415 — 延迟导入，环境没装也不影响采集
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{self.serial}] cv2 不可用，跳过主图裁剪: {exc}")
+            return items
+        try:
+            screenshot = await asyncio.to_thread(
+                lambda: self._d.screenshot(format="opencv")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"[{self.serial}] 主图截图失败，跳过: {type(exc).__name__}: {exc}"
+            )
+            return items
+        if screenshot is None:
+            return items
+        try:
+            h, w = screenshot.shape[:2]
+        except Exception:  # noqa: BLE001
+            return items
+
+        n_ok = 0
+        for it in targets:
+            ib = it["image_bounds"]
+            try:
+                x1, y1, x2, y2 = int(ib[0]), int(ib[1]), int(ib[2]), int(ib[3])
+            except Exception:  # noqa: BLE001
+                continue
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w, x2)
+            y2 = min(h, y2)
+            if x2 - x1 < 60 or y2 - y1 < 60:
+                continue
+            try:
+                crop = screenshot[y1:y2, x1:x2]
+                ch, cw = crop.shape[:2]
+                scale = _THUMB_MAX_PX / float(max(ch, cw))
+                if scale < 1.0:
+                    crop = cv2.resize(
+                        crop,
+                        (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                ok, buf = cv2.imencode(
+                    ".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, _THUMB_JPEG_Q]
+                )
+                if not ok:
+                    continue
+                b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+                it["image"] = f"data:image/jpeg;base64,{b64}"
+                n_ok += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[{self.serial}] crop image failed: {exc}")
+                continue
+
+        logger.info(f"[{self.serial}] 主图裁剪 {n_ok}/{len(targets)}")
         return items
 
     async def _dump_with_lazy_recovery(self) -> list[dict[str, Any]]:
@@ -1452,6 +1541,11 @@ class PddAppClient:
             )
             return []
 
+        # 商品主图候选：所有 ImageView。每张卡的主图都在标题正上方、卡片列宽
+        # 内、近正方形的大图，下面按卡片逐个匹配（取"标题正上方、最靠近标题
+        # 底边的够大 ImageView"）。
+        image_nodes = [e for e in all_nodes if "ImageView" in e["class"]]
+
         # 2. 每个标题 → 一个商品卡片
         CARD_UP_EXTEND = 70     # 标题上方延伸 70px 捕获"广告"标识
         CARD_DOWN_EXTEND = 250  # 标题向下延伸 250px 算同卡片
@@ -1482,6 +1576,25 @@ class PddAppClient:
             title = t["desc"] or t["text"]
             if not title:
                 continue
+
+            # 主图 bounds：标题正上方、列宽内、够大的 ImageView，取底边最贴近
+            # 标题顶边的那个（即正上方那张图，排除上一张卡片的图/小角标）。
+            image_bounds = None
+            best_bottom = -1
+            for e in image_nodes:
+                ix1, iy1, ix2, iy2 = e["bounds"]
+                if iy2 > ty1 + 10:           # 必须在标题之上
+                    continue
+                if iy1 < ty1 - 900:          # 离标题太远，多半是上一张卡片的图
+                    continue
+                ecx = (ix1 + ix2) // 2
+                if not (card_x_min <= ecx <= card_x_max):
+                    continue
+                if (ix2 - ix1) < 100 or (iy2 - iy1) < 100:  # 滤掉小图标/角标
+                    continue
+                if iy2 > best_bottom:
+                    best_bottom = iy2
+                    image_bounds = [ix1, iy1, ix2, iy2]
 
             # 拼接价格：把卡片范围内所有"价格 token"按 x 排序后拼字符串
             price_tokens = [
@@ -1561,6 +1674,7 @@ class PddAppClient:
                 "badges": badges,
                 "bounds": list(t["bounds"]),  # title bounds, JSON-friendly
                 "card_bounds": [card_x_min, card_y_min, card_x_max, card_y_max],
+                "image_bounds": image_bounds,  # 主图 ImageView bounds（None=没找到）
             })
 
         # 去重：title 相同的合并

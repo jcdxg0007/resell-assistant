@@ -35,7 +35,7 @@ interface CollectedKw {
   xianyu?: { items_count: number; last_at: string | null } | null;
 }
 interface RiskItem { id: string; keyword_text: string; risk_signals: string[]; created_at: string | null; }
-interface PddProduct { title?: string; price?: number | string; sales?: number; badges?: string[]; }
+interface PddProduct { title?: string; price?: number | string; sales?: number; badges?: string[]; image?: string; }
 
 interface Console {
   stats: { total: number; items_total: number; success_rate: number | null; risk_blocked: number };
@@ -390,7 +390,15 @@ const MultiPlatformCompare: React.FC = () => {
 
   // ── 表格列 ──────────────────────────────────────────────
   const itemColumns: ColumnsType<PddProduct> = [
-    { title: '商品', dataIndex: 'title', ellipsis: true, render: (t?: string) => <Text>{t || '—'}</Text> },
+    {
+      title: '商品', dataIndex: 'title', ellipsis: true,
+      render: (t: string | undefined, r: PddProduct) => (
+        <Space size={6}>
+          {r.image && <img src={r.image} alt="" style={{ width: 32, height: 32, objectFit: 'cover', borderRadius: 4, flex: '0 0 auto' }} />}
+          <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>
+        </Space>
+      ),
+    },
     { title: '价格', dataIndex: 'price', width: 90, render: (p?: number | string) => (p != null && p !== '') ? <Text>¥{p}</Text> : '—' },
     { title: '销量', dataIndex: 'sales', width: 90, render: (s?: number) => s ?? '—' },
     {

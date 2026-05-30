@@ -220,6 +220,18 @@ def _pdd_image_count(item: dict[str, Any]) -> int:
     return 0
 
 
+def _pdd_image_url(item: dict[str, Any]) -> str | None:
+    """取 PDD item 的首图地址（worker 截屏裁的是 data:image/... 的 base64）。"""
+    for k in _PDD_IMAGE_KEYS:
+        v = item.get(k)
+        if not v:
+            continue
+        if isinstance(v, list):
+            return v[0] if v else None
+        return v
+    return None
+
+
 def _profit_margin_frac(margin_pct: float) -> tuple[float, str]:
     if margin_pct > 40:
         return 1.0, "高利润"
@@ -371,6 +383,7 @@ def score_pdd_side(keyword: str, items: list[dict[str, Any]]) -> dict[str, Any]:
             "price": cp.price,
             "sales": sales,
             "badges": badges,
+            "image_url": _pdd_image_url(orig),
             "relevance": cp.relevance_score,
             "risk_tags": cp.risk_tags,
             "total_score": total,
