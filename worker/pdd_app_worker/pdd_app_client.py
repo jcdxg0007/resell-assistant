@@ -1596,6 +1596,18 @@ class PddAppClient:
                     best_bottom = iy2
                     image_bounds = [ix1, iy1, ix2, iy2]
 
+            # 几何兜底：PDD 部分卡片把商品图当自绘视图（跟价格 Canvas 同理），
+            # 控件树里没有对应 ImageView → 上面匹配为 None。这种情况按 PDD 搜索
+            # 页固定版式推算：商品图是标题正上方、列宽见方的正方形。用标题
+            # bounds 的横向范围当列宽，正方形高度=列宽，底边贴标题顶边上方 8px。
+            if image_bounds is None:
+                col_w = tx2 - tx1
+                if col_w >= 120:
+                    g_y2 = ty1 - 8
+                    g_y1 = g_y2 - col_w
+                    if g_y1 >= 0:
+                        image_bounds = [tx1, g_y1, tx2, g_y2]
+
             # 拼接价格：把卡片范围内所有"价格 token"按 x 排序后拼字符串
             price_tokens = [
                 e for e in all_nodes
