@@ -116,6 +116,22 @@ const PddKeywords: React.FC = () => {
     }
   };
 
+  // 表头全选：把当前页所有词的某个开关一起开/关
+  type SwitchField = 'pdd_safe' | 'xianyu_safe' | 'schedule_enabled';
+  const allOn = (field: SwitchField) => rows.length > 0 && rows.every((r) => !!r[field]);
+  const bulkPatchField = async (field: SwitchField, value: boolean) => {
+    if (!rows.length) return;
+    const prev = rows;
+    setRows((rs) => rs.map((r) => ({ ...r, [field]: value })));  // 乐观更新
+    try {
+      await Promise.all(prev.map((r) => api.put(`/pdd-keywords/${r.id}`, { [field]: value })));
+      message.success(`本页已全部${value ? '开启' : '关闭'}`);
+    } catch {
+      message.error('批量更新失败');
+      fetchKeywords();
+    }
+  };
+
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
@@ -184,22 +200,37 @@ const PddKeywords: React.FC = () => {
       render: (m: string) => <Tag>{MODE_LABEL[m] || m}</Tag>,
     },
     {
-      title: <Tooltip title="关：PDD 自动跑批会跳过该词（用于禁用敏感词）">PDD</Tooltip>,
-      dataIndex: 'pdd_safe', width: 64,
+      title: (
+        <Space direction="vertical" size={2} align="center" style={{ lineHeight: 1.1 }}>
+          <Tooltip title="关：PDD 自动跑批会跳过该词（用于禁用敏感词）。表头开关 = 本页全选">PDD</Tooltip>
+          <Switch size="small" checked={allOn('pdd_safe')} onChange={(c) => bulkPatchField('pdd_safe', c)} />
+        </Space>
+      ),
+      dataIndex: 'pdd_safe', width: 72, align: 'center',
       render: (v: boolean, r) => (
         <Switch size="small" checked={v} onChange={(c) => patchKeyword(r.id, { pdd_safe: c })} />
       ),
     },
     {
-      title: <Tooltip title="关：闲鱼自动采集会跳过该词">闲鱼</Tooltip>,
-      dataIndex: 'xianyu_safe', width: 64,
+      title: (
+        <Space direction="vertical" size={2} align="center" style={{ lineHeight: 1.1 }}>
+          <Tooltip title="关：闲鱼自动采集会跳过该词。表头开关 = 本页全选">闲鱼</Tooltip>
+          <Switch size="small" checked={allOn('xianyu_safe')} onChange={(c) => bulkPatchField('xianyu_safe', c)} />
+        </Space>
+      ),
+      dataIndex: 'xianyu_safe', width: 72, align: 'center',
       render: (v: boolean, r) => (
         <Switch size="small" checked={v} onChange={(c) => patchKeyword(r.id, { xianyu_safe: c })} />
       ),
     },
     {
-      title: <Tooltip title="总开关：关掉后两个平台的自动轮播都跳过该词">调度</Tooltip>,
-      dataIndex: 'schedule_enabled', width: 64,
+      title: (
+        <Space direction="vertical" size={2} align="center" style={{ lineHeight: 1.1 }}>
+          <Tooltip title="总开关：关掉后两个平台的自动轮播都跳过该词。表头开关 = 本页全选">调度</Tooltip>
+          <Switch size="small" checked={allOn('schedule_enabled')} onChange={(c) => bulkPatchField('schedule_enabled', c)} />
+        </Space>
+      ),
+      dataIndex: 'schedule_enabled', width: 72, align: 'center',
       render: (v: boolean, r) => (
         <Switch size="small" checked={v} onChange={(c) => patchKeyword(r.id, { schedule_enabled: c })} />
       ),
