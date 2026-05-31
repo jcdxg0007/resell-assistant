@@ -270,13 +270,13 @@ const TenDimSelection: React.FC = () => {
     } finally { setAnalyzing(false); }
   }, [selected, putCache, message, loadKeywords]);
 
-  // 全部分析：把当前列表的词全部灌进前端缓存，点任何词都即时显示。
-  //  - 前端已缓存且未过期 → 跳过（已经能秒显）
-  //  - 过期(stale) → 强制重算 refresh
-  //  - 其余 → GET 取一次（后端有缓存秒回、没有则算一次），灌入前端缓存
+  // 全部分析：把当前列表里每个词都灌进前端缓存，跑完点哪个都秒显。
+  //  - 过期 / 从没分析过 → 重算(refresh)
+  //  - 只是本地缓存没有、但后端有 → 用快速 GET 拉 DB 缓存进来(不重算)
+  //  - 本地已有且不过期 → 跳过
   const analyzeAll = useCallback(async (targets: KeywordEntry[]) => {
-    const todo = targets.filter((k) => !analysisCache[k.keyword] || k.stale);
-    if (todo.length === 0) { message.info('当前列表已全部缓存到本地，点击即时显示'); return; }
+    const todo = targets.filter((k) => !analysisMemo[k.keyword] || k.stale);
+    if (todo.length === 0) { message.info('当前列表都已加载且是最新，点哪个词都秒显'); return; }
     setAnalyzingAll(true);
     setAllProgress({ done: 0, total: todo.length });
     let ok = 0; let fail = 0;
@@ -284,7 +284,8 @@ const TenDimSelection: React.FC = () => {
       const k = todo[i];
       const kw = k.keyword;
       try {
-        const res = k.stale
+        const needRecompute = !k.cached || k.stale;
+        const res = needRecompute
           ? await api.post(`/selection/ten-dim/${encodeURIComponent(kw)}/refresh`)
           : await api.get(`/selection/ten-dim/${encodeURIComponent(kw)}`);
         putCache(kw, res.data);
@@ -295,9 +296,9 @@ const TenDimSelection: React.FC = () => {
     }
     setAnalyzingAll(false);
     setAllProgress(null);
-    message[fail ? 'warning' : 'success'](`全部分析完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}，点击即时显示`);
+    message[fail ? 'warning' : 'success'](`全部分析完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}，点哪个词都秒显`);
     loadKeywords();
-  }, [analysisCache, selected, putCache, message, loadKeywords]);
+  }, [selected, putCache, message, loadKeywords]);
 
   useEffect(() => { loadKeywords(); }, [loadKeywords]);
 
