@@ -87,10 +87,35 @@ const arbDecisionColor: Record<string, string> = { strong: 'green', try: 'blue',
 
 const scoreColor = (s: number) => (s >= 75 ? '#52c41a' : s >= 55 ? '#1677ff' : s >= 40 ? '#faad14' : '#ff4d4f');
 
-// 模块级缓存：组件随路由切换会卸载，state 会丢；放模块级可跨页面切换存活
-// （只要不整页刷新就一直在），切回来已分析过的词直接还原、不再请求后端。
-const analysisMemo: Record<string, Analysis> = {};
-let lastSelectedMemo: string | null = null;
+// 模块级缓存 + sessionStorage 持久化：
+//  - 模块级：跨路由切换存活（组件卸载 state 会丢，模块级不会）。
+//  - sessionStorage：整页刷新(F5)也能瞬间还原，不再请求后端；关掉标签页自动清理。
+// 后端本身有 DB 缓存兜底，前端这层只是为了“切回来/刷新后秒显、不转圈”。
+const CACHE_KEY = 'tendim_analysis_cache_v1';
+const SEL_KEY = 'tendim_last_selected_v1';
+
+function hydrateMemo(): Record<string, Analysis> {
+  try {
+    const raw = sessionStorage.getItem(CACHE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, Analysis>) : {};
+  } catch { return {}; }
+}
+
+const analysisMemo: Record<string, Analysis> = hydrateMemo();
+let lastSelectedMemo: string | null = (() => {
+  try { return sessionStorage.getItem(SEL_KEY); } catch { return null; }
+})();
+
+function persistMemo(): void {
+  try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(analysisMemo)); }
+  catch { /* 容量超限等异常忽略：内存缓存仍在，后端也有 DB 兜底 */ }
+}
+function persistSelected(kw: string | null): void {
+  try {
+    if (kw) sessionStorage.setItem(SEL_KEY, kw);
+    else sessionStorage.removeItem(SEL_KEY);
+  } catch { /* ignore */ }
+}
 
 const fmtTime = (iso: string | null | undefined) => {
   if (!iso) return '—';
@@ -192,9 +217,10 @@ const TenDimSelection: React.FC = () => {
   // 前端缓存：已加载过的词点回来秒显、不再请求后端，避免“又重新分析”
   const [analysisCache, setAnalysisCache] = useState<Record<string, Analysis>>({ ...analysisMemo });
 
-  // 写缓存：同时落到 state（触发渲染）和模块级（跨页面存活）
+  // 写缓存：同时落到 state（触发渲染）、模块级（跨页面）、sessionStorage（跨刷新）
   const putCache = useCallback((kw: string, data: Analysis) => {
     analysisMemo[kw] = data;
+    persistMemo();
     setAnalysisCache((p) => ({ ...p, [kw]: data }));
   }, []);
   const [analyzingAll, setAnalyzingAll] = useState(false);
@@ -211,6 +237,7 @@ const TenDimSelection: React.FC = () => {
   const loadAnalysis = useCallback(async (kw: string) => {
     setSelected(kw);
     lastSelectedMemo = kw;
+    persistSelected(kw);
     // 命中前端缓存：直接展示，不清空、不转圈、不再请求后端
     const hit = analysisCache[kw];
     if (hit) {
