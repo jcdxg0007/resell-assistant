@@ -26,7 +26,7 @@ from app.models.system import User
 from app.services.pdd_app_queue import (
     PddAppTask, await_result, clear_batch_plan, enqueue_task, get_worker_status,
     is_collection_paused, purge_queue, queue_depth, scroll_screens_for, set_batch_plan,
-    set_collection_paused,
+    set_collection_paused, set_task_meta,
 )
 from app.services.pdd_search_run import (
     clear_today, console_data, list_runs, paginated_items,
@@ -122,9 +122,12 @@ async def _await_and_persist(
       不该留误导性的超时记录）
     """
     try:
+        from app.services.pdd_app_queue import acquire_persist_lock
+        from app.services.pdd_autobatch import persist_pdd_result
         result = await await_result(task_id, timeout_s=timeout_s)
         if result is None:
-            if write_timeout:
+            # 真超时：worker 没回结果。走幂等锁，避免和 /result 即时落库重复。
+            if write_timeout and await acquire_persist_lock(task_id):
                 await persist_search_run(
                     status="timeout", keyword_text=keyword, task_id=task_id,
                     source=source, mode=mode, priority=priority,
@@ -132,22 +135,12 @@ async def _await_and_persist(
                 )
                 await _write_back_keyword(keyword_id, "timeout")
             return
-        items = result.items or []
-        prices = sorted(float(it["price"]) for it in items if it.get("price"))
-        p_min = prices[0] if prices else None
-        p_median = prices[len(prices) // 2] if prices else None
-        bucket = result.status
-        if bucket == "ok" and not items:
-            bucket = "empty"
-        await persist_search_run(
-            status=bucket, keyword_text=keyword, task_id=task_id, source=source,
-            mode=mode, items_count=len(items), price_min=p_min, price_median=p_median,
-            risk_signals=result.risk_signals, items=items, device_serial=result.device_serial,
-            account_name=result.account_name, elapsed_ms=result.elapsed_ms,
-            keyword_id=keyword_id, category_name=category_name,
-            priority=priority, error=result.error,
-        )
-        await _write_back_keyword(keyword_id, bucket)
+        # 有结果：交给统一落库入口（内部抢锁去重，/result 已落过则跳过）。
+        await persist_pdd_result(result, {
+            "keyword_id": keyword_id, "keyword_text": keyword,
+            "category_name": category_name, "mode": mode,
+            "source": source, "priority": priority,
+        })
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 — 后台任务异常只记日志
@@ -195,6 +188,12 @@ async def dispatch_search(
     await enqueue_task(task)
     # 命中词库的词，紧急搜完也要回写「上次跑/累计次数」到词库（否则一直显示"从未跑过"）。
     kw_id, cat_name = await _lookup_keyword(db, body.keyword.strip())
+    # 存 task-meta，供 worker /result 回传时即时落库（不依赖后台等待任务）。
+    await set_task_meta(task.task_id, {
+        "keyword_id": kw_id, "keyword_text": body.keyword.strip(),
+        "category_name": cat_name, "mode": mode,
+        "source": "manual", "priority": _DISPATCH_PRIORITY,
+    })
     bg = asyncio.create_task(
         _await_and_persist(
             task.task_id, body.keyword.strip(), mode, task_timeout + 60,
@@ -329,6 +328,11 @@ async def batch_start(
                 timeout_s=150,
             )
             await enqueue_task(task)
+            await set_task_meta(task.task_id, {
+                "keyword_id": kw["keyword_id"], "keyword_text": kw["text"],
+                "category_name": kw["category_name"], "mode": "fast",
+                "source": "batch", "priority": _BATCH_PRIORITY,
+            })
             bg = asyncio.create_task(_await_and_persist(
                 task.task_id, kw["text"], "fast", 4 * 3600,
                 source="batch", priority=_BATCH_PRIORITY,

@@ -21,7 +21,8 @@ from app.core.database import AsyncSessionLocal
 from app.models.pdd_run import PddSearchRun
 from app.models.selection import Category, Keyword
 from app.services.pdd_app_queue import (
-    PddAppTask, await_result, enqueue_task, get_worker_status, scroll_screens_for,
+    PddAppResult, PddAppTask, acquire_persist_lock, await_result, enqueue_task,
+    get_worker_status, scroll_screens_for, set_task_meta,
 )
 from app.services.pdd_search_run import _cn_day_start, persist_search_run
 from app.services.pdd_worker_config import get_runtime_config
@@ -133,6 +134,39 @@ async def _write_back_result(keyword_id: str, status: str, when: datetime) -> No
         await db.commit()
 
 
+async def persist_pdd_result(result: PddAppResult, meta: dict) -> bool:
+    """统一落库入口：把一个 worker 结果写回 keyword 状态 + 落 pdd_search_runs。
+
+    幂等：先抢 acquire_persist_lock(task_id)，抢不到说明已被另一条路径（/result
+    即时落库 或 await-persist 兜底）落过了，直接跳过。这样无论结果是 worker
+    回传时即时落、还是等待任务兜底落，同一个 task 只会写一行、keyword 只 +1 次。
+
+    meta 字段：keyword_id / keyword_text / category_name / mode / source / priority。
+    返回 True=本次真正落了库；False=被去重跳过。
+    """
+    if not await acquire_persist_lock(result.task_id):
+        return False
+    items = result.items or []
+    bucket = result.status
+    if bucket == "ok" and len(items) == 0:
+        bucket = "empty"
+    kid = meta.get("keyword_id")
+    if kid:
+        await _write_back_result(kid, bucket, datetime.now(timezone.utc))
+    p_min, p_median = price_stats(items)
+    await persist_search_run(
+        status=bucket, keyword_text=meta.get("keyword_text") or "",
+        keyword_id=kid, task_id=result.task_id, source=meta.get("source", "auto"),
+        category_name=meta.get("category_name"), mode=meta.get("mode"),
+        items_count=len(items), price_min=p_min, price_median=p_median,
+        risk_signals=result.risk_signals, items=items,
+        device_serial=result.device_serial, account_name=result.account_name,
+        elapsed_ms=result.elapsed_ms, priority=meta.get("priority", 1),
+        error=result.error,
+    )
+    return True
+
+
 async def dispatch_auto_batch(
     *, count: int, both_platforms: bool, priority: int = 1,
     category_slug: str | None = None,
@@ -188,7 +222,7 @@ async def dispatch_auto_batch(
             )
             await enqueue_task(task)
             await _mark_dispatched(str(k.id), now0)  # 乐观写回，防重复挑中
-            descs.append({
+            desc = {
                 "task_id": task.task_id,
                 "keyword_id": str(k.id),
                 "keyword_text": k.text,
@@ -196,7 +230,17 @@ async def dispatch_auto_batch(
                 "category_name": k.category.name if k.category else None,
                 "priority": priority,
                 "timeout_s": per_task_timeout,
+            }
+            # 存一份 task-meta，供 worker /result 回传时即时落库（不依赖等待任务）
+            await set_task_meta(task.task_id, {
+                "keyword_id": str(k.id),
+                "keyword_text": k.text,
+                "category_name": desc["category_name"],
+                "mode": worker_mode,
+                "source": "auto",
+                "priority": priority,
             })
+            descs.append(desc)
 
         # 闲鱼错峰派发（闲鱼有自己的合规闸：≥60s 间隔 + 40/h 上限）
         if both_platforms:
@@ -230,27 +274,24 @@ async def await_and_persist_one(desc: dict, source: str = "auto") -> str:
     priority = desc.get("priority", 1)
 
     if result is None:
-        await _write_back_result(kid, "timeout", now)
-        await persist_search_run(
-            status="timeout", keyword_text=text_, keyword_id=kid,
-            source=source, category_name=cat_name, mode=worker_mode,
-            priority=priority,
-        )
+        # 真超时：worker 没回结果。也走幂等锁——万一结果其实在 /result 落过了
+        # （比如等待任务自己延迟），就别再写一行误导性的 timeout。
+        if await acquire_persist_lock(desc["task_id"]):
+            await _write_back_result(kid, "timeout", now)
+            await persist_search_run(
+                status="timeout", keyword_text=text_, keyword_id=kid,
+                source=source, category_name=cat_name, mode=worker_mode,
+                priority=priority,
+            )
         return "timeout"
 
+    # 有结果：交给统一落库入口（内部抢锁去重，/result 已落过则跳过）。
+    meta = {
+        "keyword_id": kid, "keyword_text": text_, "category_name": cat_name,
+        "mode": worker_mode, "source": source, "priority": priority,
+    }
+    await persist_pdd_result(result, meta)
     bucket = result.status
     if bucket == "ok" and len(result.items) == 0:
         bucket = "empty"
-    await _write_back_result(kid, bucket, now)
-    p_min, p_median = price_stats(result.items)
-    await persist_search_run(
-        status=bucket, keyword_text=text_, keyword_id=kid,
-        task_id=result.task_id, source=source, category_name=cat_name,
-        mode=worker_mode, items_count=len(result.items),
-        price_min=p_min, price_median=p_median,
-        risk_signals=result.risk_signals, items=result.items,
-        device_serial=result.device_serial,
-        account_name=result.account_name, elapsed_ms=result.elapsed_ms,
-        priority=priority, error=result.error,
-    )
     return bucket

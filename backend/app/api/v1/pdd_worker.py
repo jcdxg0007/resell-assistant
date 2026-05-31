@@ -22,6 +22,7 @@ from app.core.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.pdd_app_queue import (
     PddAppResult,
+    get_task_meta,
     get_worker_status,
     pop_task,
     push_result,
@@ -77,8 +78,22 @@ async def post_result(
     result: PddAppResult,
     _: None = Depends(verify_worker_token),
 ):
-    """worker 跑完任务后 POST 回来。"""
+    """worker 跑完任务后 POST 回来。
+
+    两件事：
+    1. push_result：放进 Redis 结果队列（手动派发的同步 await_result 仍能拿到）。
+    2. 即时落库：读 task-meta 补全关键词信息，直接写 pdd_search_runs + 回写词库。
+       这条路不依赖那个易被 celery 槽位/重启搞丢的 await-persist 任务，是落库
+       的主路径；await-persist 退化为兜底（幂等锁去重，谁先落谁算）。
+    """
     await push_result(result)
+    try:
+        meta = await get_task_meta(result.task_id)
+        if meta is not None:
+            from app.services.pdd_autobatch import persist_pdd_result
+            await persist_pdd_result(result, meta)
+    except Exception as exc:  # noqa: BLE001 — 落库失败不影响给 worker 回 ack
+        logger.warning(f"post_result 即时落库失败 task_id={result.task_id}: {exc}")
     return {"ok": True, "task_id": result.task_id}
 
 
