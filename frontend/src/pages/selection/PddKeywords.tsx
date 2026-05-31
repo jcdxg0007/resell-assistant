@@ -36,13 +36,12 @@ interface KeywordRow {
 }
 
 const MODE_OPTIONS = [
-  { value: 'fast', label: '快速（fast）' },
-  { value: 'list_deep', label: '列表深抓（list_deep）' },
-  { value: 'detail_smart', label: '详情智能（Phase2）' },
-  { value: 'detail_deep', label: '详情深抓（Phase2）' },
+  { value: 'fast', label: '快速（仅列表页）' },
+  { value: 'list_deep', label: '深度（多滚屏深扫）' },
 ];
+// 兼容旧数据：detail_smart/detail_deep 是早期占位（行为=快速），统一按“快速”显示
 const MODE_LABEL: Record<string, string> = {
-  fast: '快速', list_deep: '列表深抓', detail_smart: '详情智能', detail_deep: '详情深抓',
+  fast: '快速', list_deep: '深度', detail_smart: '快速', detail_deep: '快速',
 };
 
 const STATUS_META: Record<string, { color: string; label: string }> = {
