@@ -64,6 +64,48 @@ class DispatchBody(BaseModel):
     mode: str = Field("fast", description="fast / deep")
 
 
+async def _lookup_keyword(
+    db: AsyncSession, keyword_text: str
+) -> tuple[str | None, str | None]:
+    """按精确文本在词库里找该词，返回 (keyword_id, category_name)。
+
+    找不到（临时手搜、不在库里）→ (None, None)，不会新建关键词。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from app.models.selection import Keyword
+
+    row = (
+        await db.execute(
+            select(Keyword)
+            .where(Keyword.text == keyword_text)
+            .options(selectinload(Keyword.category))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if not row:
+        return None, None
+    cat_name = row.category.name if row.category else None
+    return str(row.id), cat_name
+
+
+async def _write_back_keyword(keyword_id: str | None, status: str) -> None:
+    """把一次 PDD 搜索结果回写到词库（上次跑时间 / 状态 / 累计次数）。
+
+    手动/紧急派发原先不回写词库，导致跑过的词在词库里仍显示「从未跑过」。
+    这里复用 autobatch 的回写逻辑，命中词库的词（keyword_id 非空）才回写；
+    临时手搜、不在库里的词（keyword_id=None）不处理、也不新建。
+    失败只记日志，绝不影响主流程。
+    """
+    if not keyword_id:
+        return
+    try:
+        from app.services.pdd_autobatch import _write_back_result
+        await _write_back_result(keyword_id, status, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001 — 回写失败不阻断采集
+        logger.warning(f"pdd keyword write-back failed (kid={keyword_id}): {exc}")
+
+
 async def _await_and_persist(
     task_id: str, keyword: str, mode: str, timeout_s: int,
     *, source: str = "manual", priority: int = _DISPATCH_PRIORITY,
@@ -88,6 +130,7 @@ async def _await_and_persist(
                     source=source, mode=mode, priority=priority,
                     keyword_id=keyword_id, category_name=category_name,
                 )
+                await _write_back_keyword(keyword_id, "timeout")
             return
         items = result.items or []
         prices = sorted(float(it["price"]) for it in items if it.get("price"))
@@ -104,6 +147,7 @@ async def _await_and_persist(
             keyword_id=keyword_id, category_name=category_name,
             priority=priority, error=result.error,
         )
+        await _write_back_keyword(keyword_id, bucket)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 — 后台任务异常只记日志
@@ -149,8 +193,13 @@ async def dispatch_search(
         timeout_s=task_timeout,
     )
     await enqueue_task(task)
+    # 命中词库的词，紧急搜完也要回写「上次跑/累计次数」到词库（否则一直显示"从未跑过"）。
+    kw_id, cat_name = await _lookup_keyword(db, body.keyword.strip())
     bg = asyncio.create_task(
-        _await_and_persist(task.task_id, body.keyword.strip(), mode, task_timeout + 60)
+        _await_and_persist(
+            task.task_id, body.keyword.strip(), mode, task_timeout + 60,
+            keyword_id=kw_id, category_name=cat_name,
+        )
     )
     _bg_tasks.add(bg)
     bg.add_done_callback(_bg_tasks.discard)
