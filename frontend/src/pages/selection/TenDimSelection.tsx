@@ -87,6 +87,11 @@ const arbDecisionColor: Record<string, string> = { strong: 'green', try: 'blue',
 
 const scoreColor = (s: number) => (s >= 75 ? '#52c41a' : s >= 55 ? '#1677ff' : s >= 40 ? '#faad14' : '#ff4d4f');
 
+// 模块级缓存：组件随路由切换会卸载，state 会丢；放模块级可跨页面切换存活
+// （只要不整页刷新就一直在），切回来已分析过的词直接还原、不再请求后端。
+const analysisMemo: Record<string, Analysis> = {};
+let lastSelectedMemo: string | null = null;
+
 const fmtTime = (iso: string | null | undefined) => {
   if (!iso) return '—';
   return new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -177,12 +182,21 @@ const TenDimSelection: React.FC = () => {
   const [filter, setFilter] = useState<'both' | 'all'>('both');
   const [search, setSearch] = useState('');
 
-  const [selected, setSelected] = useState<string | null>(null);
-  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  // 初值从模块级缓存恢复：切回本页时还原上次选中的词及其分析结果
+  const [selected, setSelected] = useState<string | null>(lastSelectedMemo);
+  const [analysis, setAnalysis] = useState<Analysis | null>(
+    lastSelectedMemo ? analysisMemo[lastSelectedMemo] ?? null : null,
+  );
   const [analyzing, setAnalyzing] = useState(false);
   const [sideView, setSideView] = useState<'xianyu' | 'pdd'>('xianyu');
-  // 前端内存缓存：已加载过的词点回来秒显、不再请求后端，避免“又重新分析”
-  const [analysisCache, setAnalysisCache] = useState<Record<string, Analysis>>({});
+  // 前端缓存：已加载过的词点回来秒显、不再请求后端，避免“又重新分析”
+  const [analysisCache, setAnalysisCache] = useState<Record<string, Analysis>>({ ...analysisMemo });
+
+  // 写缓存：同时落到 state（触发渲染）和模块级（跨页面存活）
+  const putCache = useCallback((kw: string, data: Analysis) => {
+    analysisMemo[kw] = data;
+    setAnalysisCache((p) => ({ ...p, [kw]: data }));
+  }, []);
   const [analyzingAll, setAnalyzingAll] = useState(false);
   const [allProgress, setAllProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -196,6 +210,7 @@ const TenDimSelection: React.FC = () => {
 
   const loadAnalysis = useCallback(async (kw: string) => {
     setSelected(kw);
+    lastSelectedMemo = kw;
     // 命中前端缓存：直接展示，不清空、不转圈、不再请求后端
     const hit = analysisCache[kw];
     if (hit) {
@@ -208,11 +223,11 @@ const TenDimSelection: React.FC = () => {
     try {
       const res = await api.get(`/selection/ten-dim/${encodeURIComponent(kw)}`);
       setAnalysis(res.data);
-      setAnalysisCache((p) => ({ ...p, [kw]: res.data }));
+      putCache(kw, res.data);
     } catch {
       message.error('分析失败');
     } finally { setAnalyzing(false); }
-  }, [analysisCache, message]);
+  }, [analysisCache, putCache, message]);
 
   const refreshAnalysis = useCallback(async () => {
     if (!selected) return;
@@ -220,13 +235,13 @@ const TenDimSelection: React.FC = () => {
     try {
       const res = await api.post(`/selection/ten-dim/${encodeURIComponent(selected)}/refresh`);
       setAnalysis(res.data);
-      setAnalysisCache((p) => ({ ...p, [selected]: res.data }));
+      putCache(selected, res.data);
       message.success('已重新分析');
       loadKeywords();
     } catch {
       message.error('重新分析失败');
     } finally { setAnalyzing(false); }
-  }, [selected, message, loadKeywords]);
+  }, [selected, putCache, message, loadKeywords]);
 
   // 全部分析：把当前列表里「未分析 / 待刷新」的词逐个跑一遍，预热缓存
   const analyzeAll = useCallback(async (targets: KeywordEntry[]) => {
@@ -239,7 +254,7 @@ const TenDimSelection: React.FC = () => {
       const kw = todo[i].keyword;
       try {
         const res = await api.post(`/selection/ten-dim/${encodeURIComponent(kw)}/refresh`);
-        setAnalysisCache((p) => ({ ...p, [kw]: res.data }));
+        putCache(kw, res.data);
         if (kw === selected) setAnalysis(res.data);
         ok += 1;
       } catch { fail += 1; }
@@ -249,7 +264,7 @@ const TenDimSelection: React.FC = () => {
     setAllProgress(null);
     message[fail ? 'warning' : 'success'](`全部分析完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`);
     loadKeywords();
-  }, [selected, message, loadKeywords]);
+  }, [selected, putCache, message, loadKeywords]);
 
   useEffect(() => { loadKeywords(); }, [loadKeywords]);
 
