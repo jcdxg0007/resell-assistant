@@ -754,8 +754,10 @@ async def main() -> int:
     client = BackendClient()
     try:
         # 启动时先上报一次，建立 worker_status
-        from pdd_app_worker.device_manager import healthy_serials
+        from pdd_app_worker.device_manager import ensure_adb_keyboard, healthy_serials
         devs = healthy_serials()
+        # 把 ADB Keyboard 钉为当前输入法（重启自愈，防中文输入广播打空导致任务失败）
+        ensure_adb_keyboard(devs)
         await client.send_heartbeat(devs, scheduler=_scheduler.snapshot())
         logger.info(f"initial heartbeat sent: devices={devs}")
 

@@ -63,3 +63,33 @@ def healthy_serials() -> list[str]:
     if _BOUND_SERIAL:
         return [s for s in serials if s == _BOUND_SERIAL]
     return serials
+
+
+# uiautomator2 自带的输入法，worker 输入中文靠它。
+ADB_KEYBOARD_IME = "com.github.uiautomator/.AdbKeyboard"
+
+
+def ensure_adb_keyboard(serials: list[str] | None = None) -> None:
+    """把 ADB Keyboard 设为各设备的当前输入法，让 worker 重启后自愈。
+
+    背景：部分国产 ROM 默认输入法是搜狗等第三方，uiautomator2 首次切换 IME
+    偶发不生效，导致 worker 打字时广播打空（AdbBroadcastError:
+    ADB_KEYBOARD_CLEAR_TEXT failed: None），整条搜索任务失败。启动时显式
+    enable + set 一次，把当前输入法钉死成 ADB Keyboard，后续 worker 在
+    _type_keyword 里切换就稳了。失败只记日志、不阻断启动。
+    """
+    targets = serials if serials is not None else healthy_serials()
+    for serial in targets:
+        try:
+            subprocess.run(
+                ["adb", "-s", serial, "shell", "ime", "enable", ADB_KEYBOARD_IME],
+                capture_output=True, text=True, timeout=10,
+            )
+            r = subprocess.run(
+                ["adb", "-s", serial, "shell", "ime", "set", ADB_KEYBOARD_IME],
+                capture_output=True, text=True, timeout=10,
+            )
+            msg = (r.stdout or r.stderr or "").strip()
+            logger.info(f"[{serial}] ADB Keyboard 已设为当前输入法: {msg}")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(f"[{serial}] 设置 ADB Keyboard 输入法失败（忽略，继续启动）: {exc}")
