@@ -181,6 +181,10 @@ const TenDimSelection: React.FC = () => {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [sideView, setSideView] = useState<'xianyu' | 'pdd'>('xianyu');
+  // 前端内存缓存：已加载过的词点回来秒显、不再请求后端，避免“又重新分析”
+  const [analysisCache, setAnalysisCache] = useState<Record<string, Analysis>>({});
+  const [analyzingAll, setAnalyzingAll] = useState(false);
+  const [allProgress, setAllProgress] = useState<{ done: number; total: number } | null>(null);
 
   const loadKeywords = useCallback(async () => {
     setKwLoading(true);
@@ -192,15 +196,23 @@ const TenDimSelection: React.FC = () => {
 
   const loadAnalysis = useCallback(async (kw: string) => {
     setSelected(kw);
+    // 命中前端缓存：直接展示，不清空、不转圈、不再请求后端
+    const hit = analysisCache[kw];
+    if (hit) {
+      setAnalysis(hit);
+      setAnalyzing(false);
+      return;
+    }
     setAnalyzing(true);
     setAnalysis(null);
     try {
       const res = await api.get(`/selection/ten-dim/${encodeURIComponent(kw)}`);
       setAnalysis(res.data);
+      setAnalysisCache((p) => ({ ...p, [kw]: res.data }));
     } catch {
       message.error('分析失败');
     } finally { setAnalyzing(false); }
-  }, [message]);
+  }, [analysisCache, message]);
 
   const refreshAnalysis = useCallback(async () => {
     if (!selected) return;
@@ -208,11 +220,35 @@ const TenDimSelection: React.FC = () => {
     try {
       const res = await api.post(`/selection/ten-dim/${encodeURIComponent(selected)}/refresh`);
       setAnalysis(res.data);
+      setAnalysisCache((p) => ({ ...p, [selected]: res.data }));
       message.success('已重新分析');
       loadKeywords();
     } catch {
       message.error('重新分析失败');
     } finally { setAnalyzing(false); }
+  }, [selected, message, loadKeywords]);
+
+  // 全部分析：把当前列表里「未分析 / 待刷新」的词逐个跑一遍，预热缓存
+  const analyzeAll = useCallback(async (targets: KeywordEntry[]) => {
+    const todo = targets.filter((k) => !k.cached || k.stale);
+    if (todo.length === 0) { message.info('当前列表的关键词都已是最新分析'); return; }
+    setAnalyzingAll(true);
+    setAllProgress({ done: 0, total: todo.length });
+    let ok = 0; let fail = 0;
+    for (let i = 0; i < todo.length; i++) {
+      const kw = todo[i].keyword;
+      try {
+        const res = await api.post(`/selection/ten-dim/${encodeURIComponent(kw)}/refresh`);
+        setAnalysisCache((p) => ({ ...p, [kw]: res.data }));
+        if (kw === selected) setAnalysis(res.data);
+        ok += 1;
+      } catch { fail += 1; }
+      setAllProgress({ done: i + 1, total: todo.length });
+    }
+    setAnalyzingAll(false);
+    setAllProgress(null);
+    message[fail ? 'warning' : 'success'](`全部分析完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`);
+    loadKeywords();
   }, [selected, message, loadKeywords]);
 
   useEffect(() => { loadKeywords(); }, [loadKeywords]);
@@ -294,7 +330,13 @@ const TenDimSelection: React.FC = () => {
               <Space>
                 {analysis?.scored_at && <Text type="secondary" style={{ fontSize: 12 }}>分析于 {fmtTime(analysis.scored_at)}</Text>}
                 <Button
-                  icon={<ThunderboltOutlined />} type="primary" disabled={!selected}
+                  icon={<ThunderboltOutlined />} disabled={visibleKeywords.length === 0 || analyzing}
+                  loading={analyzingAll} onClick={() => analyzeAll(visibleKeywords)}
+                >
+                  {analyzingAll && allProgress ? `分析中 ${allProgress.done}/${allProgress.total}` : '全部分析'}
+                </Button>
+                <Button
+                  icon={<ThunderboltOutlined />} type="primary" disabled={!selected || analyzingAll}
                   loading={analyzing} onClick={refreshAnalysis}
                 >
                   重新分析
