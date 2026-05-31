@@ -45,6 +45,7 @@ def _keyword_out(k: Keyword) -> dict[str, Any]:
         "text": k.text,
         "category_id": str(k.category_id),
         "category_name": k.category.name if k.category else None,
+        "category_slug": k.category.slug if k.category else None,
         "pdd_mode": k.pdd_mode,
         "pdd_safe": k.pdd_safe,
         "schedule_enabled": k.schedule_enabled,

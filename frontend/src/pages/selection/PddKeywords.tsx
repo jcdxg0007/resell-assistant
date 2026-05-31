@@ -21,6 +21,7 @@ interface KeywordRow {
   text: string;
   category_id: string;
   category_name: string | null;
+  category_slug: string | null;
   pdd_mode: string;
   pdd_safe: boolean;
   schedule_enabled: boolean;
@@ -199,7 +200,10 @@ const PddKeywords: React.FC = () => {
     { title: '分类', dataIndex: 'category_name', width: 120, render: (c: string | null) => c || '—' },
     {
       title: '模式', dataIndex: 'pdd_mode', width: 100,
-      render: (m: string) => <Tag>{MODE_LABEL[m] || m}</Tag>,
+      render: (m: string, r: KeywordRow) =>
+        r.category_slug === 'uncategorized'
+          ? <Tag color="volcano">紧急</Tag>
+          : <Tag>{MODE_LABEL[m] || m}</Tag>,
     },
     {
       title: (
