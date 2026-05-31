@@ -274,15 +274,14 @@ const MultiPlatformCompare: React.FC = () => {
   const searchXianyu = async (kw?: string) => { await api.post('/products/search', { keyword: (kw ?? keyword).trim(), platform: 'xianyu' }); };
   const searchPdd = async (kw: string) => { await api.post('/pdd-runs/dispatch', { keyword: kw, mode: 'fast' }); };
 
-  // 失败的词重回 PDD 队列：紧急插队重派，结果回来自动刷新
+  // 失败的词重回「待采集池」：删掉今日该词 PDD 记录，交给自动跑批按正常节奏重采
   const retryPdd = async (kw: string) => {
     try {
-      await searchPdd(kw);
-      message.success(`「${kw}」已重新派发到 PDD 队列`);
-      startAutoRefresh(kw);
-    } catch (err) {
-      const e = err as { response?: { status?: number } };
-      message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法重派' : '重试派发失败');
+      await api.post('/pdd-runs/requeue', { keyword: kw });
+      message.success(`「${kw}」已重回待采集池，将按正常节奏重采`);
+      fetchConsole();
+    } catch {
+      message.error('重回待采集池失败');
     }
   };
 

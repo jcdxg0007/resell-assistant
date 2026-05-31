@@ -444,6 +444,29 @@ async def clear_today_runs(
     return {"ok": True, "deleted": deleted}
 
 
+class RequeueBody(BaseModel):
+    keyword: str = Field(..., min_length=1, description="要重回待采集池的关键词")
+
+
+@router.post("/requeue", summary="把失败的词重回待采集池（删今日该词 PDD 记录，交给正常跑批重采）")
+async def requeue_keyword(
+    body: RequeueBody,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """删掉该词今天的 PDD 采集记录，使其重新落回「待采集池」。
+
+    不做紧急派发——词回到池子后，由自动跑批按正常节奏（活跃时段+随机间隔+配额）
+    重新消化，避免插队打乱节奏被识别为机器行为。
+    """
+    kw = body.keyword.strip()
+    if not kw:
+        raise HTTPException(status_code=400, detail="keyword 不能为空")
+    deleted = await clear_today(db, kw)
+    logger.info(f"requeue keyword='{kw}' deleted_runs={deleted}")
+    return {"ok": True, "keyword": kw, "deleted": deleted}
+
+
 @router.get("/", summary="任务历史流水（分页）")
 async def read_runs(
     status: str | None = Query(None, description="过滤状态：ok/empty/partial/failed/risk_blocked/timeout"),
