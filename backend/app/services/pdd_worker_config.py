@@ -161,9 +161,9 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
                 "起>止视为跨夜（如 22→2）。",
     },
     "auto_active_end_hour": {
-        "type": "int", "min": 0, "max": 23,
+        "type": "int", "min": 0, "max": 24,
         "label": "活跃时段止(点)", "group": "自动跑批",
-        "help": "几点停止自动跑批（按北京时间）。起==止视为全天。",
+        "help": "几点停止自动跑批（按北京时间）。起==止视为全天；填 24 表示到当天 23:59。",
     },
     "auto_interval_min_minutes": {
         "type": "int", "min": 5, "max": 720,
@@ -196,9 +196,9 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "help": "几点开始允许闲鱼自动采集（北京时间）。起>止视为跨夜。",
     },
     "xianyu_auto_active_end_hour": {
-        "type": "int", "min": 0, "max": 23,
+        "type": "int", "min": 0, "max": 24,
         "label": "闲鱼活跃时段止(点)", "group": "闲鱼自动",
-        "help": "几点停止闲鱼自动采集（北京时间）。起==止视为全天。",
+        "help": "几点停止闲鱼自动采集（北京时间）。起==止视为全天；填 24 表示到当天 23:59。",
     },
     "xianyu_auto_interval_min_minutes": {
         "type": "int", "min": 5, "max": 720,

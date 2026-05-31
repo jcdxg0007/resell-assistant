@@ -274,6 +274,18 @@ const MultiPlatformCompare: React.FC = () => {
   const searchXianyu = async (kw?: string) => { await api.post('/products/search', { keyword: (kw ?? keyword).trim(), platform: 'xianyu' }); };
   const searchPdd = async (kw: string) => { await api.post('/pdd-runs/dispatch', { keyword: kw, mode: 'fast' }); };
 
+  // 失败的词重回 PDD 队列：紧急插队重派，结果回来自动刷新
+  const retryPdd = async (kw: string) => {
+    try {
+      await searchPdd(kw);
+      message.success(`「${kw}」已重新派发到 PDD 队列`);
+      startAutoRefresh(kw);
+    } catch (err) {
+      const e = err as { response?: { status?: number } };
+      message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法重派' : '重试派发失败');
+    }
+  };
+
   const handleXianyu = async () => {
     if (!keyword.trim()) { message.warning('请输入搜索关键词'); return; }
     setSearchingXianyu(true);
@@ -595,7 +607,7 @@ const MultiPlatformCompare: React.FC = () => {
                   />
                   <Text type="secondary">~</Text>
                   <InputNumber
-                    size="small" min={0} max={23} value={auto.xianyu_auto_active_end_hour} style={{ width: 56 }}
+                    size="small" min={0} max={24} value={auto.xianyu_auto_active_end_hour} style={{ width: 56 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, xianyu_auto_active_end_hour: v ?? 0 } : p)}
                     onBlur={() => saveAuto({ xianyu_auto_active_end_hour: auto.xianyu_auto_active_end_hour })}
                   />
@@ -658,7 +670,7 @@ const MultiPlatformCompare: React.FC = () => {
                   />
                   <Text type="secondary">~</Text>
                   <InputNumber
-                    size="small" min={0} max={23} value={auto.auto_active_end_hour} style={{ width: 56 }}
+                    size="small" min={0} max={24} value={auto.auto_active_end_hour} style={{ width: 56 }}
                     onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
                     onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
                   />
@@ -768,6 +780,13 @@ const MultiPlatformCompare: React.FC = () => {
                             PDD {fmtHM(c.pdd.last_at)} · {c.pdd.items_count}件
                             {c.pdd.status !== 'ok' ? ` · ${PDD_STATUS_META[c.pdd.status]?.label || c.pdd.status}` : ''}
                           </Tag>
+                        )}
+                        {c.pdd && c.pdd.status !== 'ok' && (
+                          <Button
+                            size="small" type="link" icon={<ReloadOutlined />}
+                            style={{ padding: 0, height: 'auto', fontSize: 12 }}
+                            onClick={(e) => { e.stopPropagation(); retryPdd(c.keyword_text); }}
+                          >重回队列</Button>
                         )}
                       </Space>
                     </Space>
