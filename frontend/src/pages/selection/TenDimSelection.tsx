@@ -270,17 +270,23 @@ const TenDimSelection: React.FC = () => {
     } finally { setAnalyzing(false); }
   }, [selected, putCache, message, loadKeywords]);
 
-  // 全部分析：把当前列表里「未分析 / 待刷新」的词逐个跑一遍，预热缓存
+  // 全部分析：把当前列表的词全部灌进前端缓存，点任何词都即时显示。
+  //  - 前端已缓存且未过期 → 跳过（已经能秒显）
+  //  - 过期(stale) → 强制重算 refresh
+  //  - 其余 → GET 取一次（后端有缓存秒回、没有则算一次），灌入前端缓存
   const analyzeAll = useCallback(async (targets: KeywordEntry[]) => {
-    const todo = targets.filter((k) => !k.cached || k.stale);
-    if (todo.length === 0) { message.info('当前列表的关键词都已是最新分析'); return; }
+    const todo = targets.filter((k) => !analysisCache[k.keyword] || k.stale);
+    if (todo.length === 0) { message.info('当前列表已全部缓存到本地，点击即时显示'); return; }
     setAnalyzingAll(true);
     setAllProgress({ done: 0, total: todo.length });
     let ok = 0; let fail = 0;
     for (let i = 0; i < todo.length; i++) {
-      const kw = todo[i].keyword;
+      const k = todo[i];
+      const kw = k.keyword;
       try {
-        const res = await api.post(`/selection/ten-dim/${encodeURIComponent(kw)}/refresh`);
+        const res = k.stale
+          ? await api.post(`/selection/ten-dim/${encodeURIComponent(kw)}/refresh`)
+          : await api.get(`/selection/ten-dim/${encodeURIComponent(kw)}`);
         putCache(kw, res.data);
         if (kw === selected) setAnalysis(res.data);
         ok += 1;
@@ -289,9 +295,9 @@ const TenDimSelection: React.FC = () => {
     }
     setAnalyzingAll(false);
     setAllProgress(null);
-    message[fail ? 'warning' : 'success'](`全部分析完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`);
+    message[fail ? 'warning' : 'success'](`全部分析完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}，点击即时显示`);
     loadKeywords();
-  }, [selected, putCache, message, loadKeywords]);
+  }, [analysisCache, selected, putCache, message, loadKeywords]);
 
   useEffect(() => { loadKeywords(); }, [loadKeywords]);
 
