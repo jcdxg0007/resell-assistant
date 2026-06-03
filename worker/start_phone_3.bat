@@ -1,14 +1,9 @@
 @echo off
 REM ============================================================
 REM PDD worker 启动脚本 - 手机 3
-REM 下面三项改成第三台手机的真实值（adb devices 看序列号，要 device 状态）：
-REM   ADB_SERIAL / WORKER_NAME / BOUND_PDD_ACCOUNT
-REM
-REM 【重要·多号路由】BOUND_PDD_ACCOUNT 现在决定 backend 把哪些品类的任务
-REM 发给本机（词库管理页分配）。它必须等于 accounts 表里 platform='pdd_crawler'
-REM 的某个 account_name，且就是这台手机此刻真正登录的号。
-REM 现有可用号（截至 2026-06-03）：pdd_crawler_1876 / _2117 / _4310 / _5514
-REM （7315 已绑手机1）。换号同步跑 backend/scripts/pdd_account_swap.py
+REM 机器专属值（ADB_SERIAL + BOUND_PDD_ACCOUNT）放在 git 忽略的本地文件
+REM   phone_3.env.local.bat —— git pull 永不覆盖（roadmap §15.4）。
+REM 首次部署：复制 phone.env.example.bat 为 phone_3.env.local.bat 再填真实值。
 REM ============================================================
 cd /d C:\resell\worker
 
@@ -19,9 +14,14 @@ if not exist "%PYEXE%" set "PYEXE=C:\resell\.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 echo 使用解释器: %PYEXE%
 
-set ADB_SERIAL=<改成第三台手机序列号>
 set WORKER_NAME=phone-3
-set BOUND_PDD_ACCOUNT=<改成第三个PDD账号>
+REM 载入本机专属 serial + 采集号（不在 git 里）
+if not exist "%~dp0phone_3.env.local.bat" (
+  echo [错误] 缺少 phone_3.env.local.bat —— 请复制 phone.env.example.bat 改名并填真实值
+  pause
+  exit /b 1
+)
+call "%~dp0phone_3.env.local.bat"
 
 "%PYEXE%" -m pdd_app_worker.main
 pause

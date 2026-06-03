@@ -1,11 +1,9 @@
 @echo off
 REM ============================================================
 REM PDD worker 启动脚本 - 手机 1
-REM 双击运行即可。每台手机一个脚本，三项必须各不相同：
-REM   ADB_SERIAL         手机序列号（adb devices 看，要 device 状态）
-REM   WORKER_NAME        worker 唯一名（随便起，别重复）
-REM   BOUND_PDD_ACCOUNT  这台手机登录的 PDD 账号
-REM 其它配置（backend 地址 / token）共用 worker\.env
+REM 机器专属值（ADB_SERIAL + BOUND_PDD_ACCOUNT）放在 git 忽略的本地文件
+REM   phone_1.env.local.bat —— git pull 永不覆盖（roadmap §15.4）。
+REM 首次部署：复制 phone.env.example.bat 为 phone_1.env.local.bat 再填真实值。
 REM ============================================================
 cd /d C:\resell\worker
 
@@ -16,9 +14,14 @@ if not exist "%PYEXE%" set "PYEXE=C:\resell\.venv\Scripts\python.exe"
 if not exist "%PYEXE%" set "PYEXE=python"
 echo 使用解释器: %PYEXE%
 
-set ADB_SERIAL=PKT0220416005274
 set WORKER_NAME=phone-1
-set BOUND_PDD_ACCOUNT=pdd_crawler_7315
+REM 载入本机专属 serial + 采集号（不在 git 里）
+if not exist "%~dp0phone_1.env.local.bat" (
+  echo [错误] 缺少 phone_1.env.local.bat —— 请复制 phone.env.example.bat 改名并填真实值
+  pause
+  exit /b 1
+)
+call "%~dp0phone_1.env.local.bat"
 
 "%PYEXE%" -m pdd_app_worker.main
 pause

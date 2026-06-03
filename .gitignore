@@ -47,3 +47,11 @@ backups/
 data_samples/
 *.tar.gz
 *.sql.gz
+
+# worker 机器专属配置（serial/号），每台机一份，git pull 永不覆盖（roadmap §15.4）
+worker/*.env.local.bat
+# worker 运行时产生的调试 dump（别进 git）
+worker/dump_*.xml
+worker/dump_*.txt
+worker/hits.txt
+worker/tap_search_failed_*.xml
