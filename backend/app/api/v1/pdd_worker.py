@@ -57,13 +57,17 @@ def verify_worker_token(authorization: str | None = Header(None)) -> None:
 )
 async def poll_task(
     wait_s: int = Query(25, ge=1, le=60, description="最长阻塞秒数（不要 > 60，HTTP 超时）"),
+    account: str | None = Query(None, description="本 worker 绑定的采集号 BOUND_PDD_ACCOUNT；多号路由用"),
     _: None = Depends(verify_worker_token),
 ):
     """长轮询：有任务立刻返回，没任务阻塞最多 wait_s 秒。
 
+    account 给定 → 只取该号专属队列 + 默认队列（多号品类隔离，roadmap §15）；
+    为空（旧 worker / 未配号）→ 只取默认队列，行为不变。
+
     返回 ``{"task": null}`` 表示队列空了请重试。
     """
-    task = await pop_task(timeout_s=wait_s)
+    task = await pop_task(timeout_s=wait_s, account=account)
     if task is None:
         return {"task": None}
     return {"task": task.model_dump()}
@@ -110,16 +114,20 @@ async def post_heartbeat(
 
     兼容两种 body：
     - 旧：纯列表 ["serial1", ...]
-    - 新：{"devices": [...], "scheduler": {burst 快照}, "worker": "名字"}
-      scheduler 用于精确预估 ETA；worker 用于多 worker 的 per-worker 心跳 key。
+    - 新：{"devices": [...], "scheduler": {burst 快照}, "worker": "名字", "account": "号"}
+      scheduler 用于精确预估 ETA；worker 用于多 worker 的 per-worker 心跳 key；
+      account 用于多号路由（beat tick 据此知道哪些号在线，roadmap §15）。
     """
     if isinstance(body, list):
-        devices, scheduler, worker_name = body, None, None
+        devices, scheduler, worker_name, account = body, None, None, None
     else:
         devices = body.get("devices") or []
         scheduler = body.get("scheduler")
         worker_name = body.get("worker")
-    await record_worker_heartbeat(devices, scheduler=scheduler, worker_name=worker_name)
+        account = body.get("account")
+    await record_worker_heartbeat(
+        devices, scheduler=scheduler, worker_name=worker_name, account=account
+    )
     return {"ok": True}
 
 

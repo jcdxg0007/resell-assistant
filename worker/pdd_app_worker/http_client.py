@@ -23,6 +23,11 @@ WORKER_TOKEN = os.environ["WORKER_TOKEN"]
 POLL_WAIT_SECONDS = int(os.environ.get("POLL_WAIT_SECONDS", "25"))
 # 多 worker 场景每个进程必须有唯一 WORKER_NAME，后端按它分 per-worker 心跳 key。
 WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
+# 本 worker 绑定的采集号（account_name）。多号路由用：poll 带它 → 只取自己该吃的
+# 队列；心跳带它 → 后端知道这个号在线（roadmap §15）。为空/unknown 视为未配号，
+# 退回旧的默认队列行为。
+BOUND_PDD_ACCOUNT = os.environ.get("BOUND_PDD_ACCOUNT", "").strip()
+_ROUTE_ACCOUNT = BOUND_PDD_ACCOUNT if BOUND_PDD_ACCOUNT and BOUND_PDD_ACCOUNT != "unknown" else None
 
 API_PREFIX = "/api/v1/pdd-worker"
 
@@ -46,10 +51,10 @@ class BackendClient:
         backoff = 1.0
         while True:
             try:
-                r = await self._client.get(
-                    f"{API_PREFIX}/poll",
-                    params={"wait_s": POLL_WAIT_SECONDS},
-                )
+                params: dict[str, Any] = {"wait_s": POLL_WAIT_SECONDS}
+                if _ROUTE_ACCOUNT:
+                    params["account"] = _ROUTE_ACCOUNT
+                r = await self._client.get(f"{API_PREFIX}/poll", params=params)
                 if r.status_code == 401:
                     raise RuntimeError(
                         "401 from backend: WORKER_TOKEN 不匹配。"
@@ -105,6 +110,8 @@ class BackendClient:
         """
         try:
             payload: dict[str, Any] = {"devices": devices, "worker": WORKER_NAME}
+            if _ROUTE_ACCOUNT:
+                payload["account"] = _ROUTE_ACCOUNT
             if scheduler is not None:
                 payload["scheduler"] = scheduler
             r = await self._client.post(f"{API_PREFIX}/heartbeat", json=payload)

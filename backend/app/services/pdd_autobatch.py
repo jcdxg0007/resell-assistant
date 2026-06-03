@@ -19,7 +19,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
 from app.models.pdd_run import PddSearchRun
-from app.models.selection import Category, Keyword
+from app.models.selection import Category, Keyword, PddCategoryAccount
+from app.models.system import Account
 from app.services.pdd_app_queue import (
     PddAppResult, PddAppTask, acquire_persist_lock, await_result, enqueue_task,
     get_worker_status, scroll_screens_for, set_task_meta,
@@ -51,7 +52,8 @@ def price_stats(items: list[dict]) -> tuple[float | None, float | None]:
 
 
 async def select_cohesive_keywords(
-    db, count: int, category_slug: str | None = None
+    db, count: int, category_slug: str | None = None,
+    allowed_category_ids: list[str] | None = None,
 ) -> list[Keyword]:
     """挑 N 个词，遵循「burst 内同品类聚集 + burst 间品类轮换」。
 
@@ -60,8 +62,13 @@ async def select_cohesive_keywords(
        指定 category_slug 时跳过这步。
     2. 品类内按 pdd_last_searched_at ASC NULLS FIRST 取 N 个。
 
+    allowed_category_ids：多号路由时只在该号被分配的品类里挑（roadmap §15）。
+    传空列表 → 该号没分配任何品类 → 返回 []（未分配=不跑）。
+
     可跑词不足 N 个时只返回那几个（不跨品类硬凑，保持 session 主题纯净）。
     """
+    if allowed_category_ids is not None and len(allowed_category_ids) == 0:
+        return []  # 该号未分配任何品类 → 不跑
     if category_slug:
         cat = (await db.execute(
             select(Category).where(Category.slug == category_slug)
@@ -77,6 +84,11 @@ async def select_cohesive_keywords(
             .where(Keyword.is_active.is_(True))
             .where(Keyword.schedule_enabled.is_(True))
             .where(PDD_PLATFORM_FILTER)
+        )
+        if allowed_category_ids is not None:
+            cat_stmt = cat_stmt.where(Category.id.in_(allowed_category_ids))
+        cat_stmt = (
+            cat_stmt
             .group_by(Category.id)
             .order_by(
                 func.max(Keyword.pdd_last_searched_at).asc().nullsfirst(),
@@ -104,6 +116,32 @@ async def select_cohesive_keywords(
         .limit(count)
     )
     return list((await db.execute(kw_stmt)).scalars().all())
+
+
+async def load_account_assignments(db) -> dict[str, dict]:
+    """读「品类↔采集号」绑定，按号聚合（roadmap §15）。
+
+    :return: {account_id: {"account_name": str, "category_ids": [str, ...]}}
+             只含 platform='pdd_crawler' 的号。空 dict = 全库还没配过任何绑定
+             → dispatch 退化到旧的全局派发（不因漏配停采）。
+    """
+    stmt = (
+        select(
+            PddCategoryAccount.account_id,
+            PddCategoryAccount.category_id,
+            Account.account_name,
+        )
+        .join(Account, Account.id == PddCategoryAccount.account_id)
+        .where(Account.platform == "pdd_crawler")
+    )
+    rows = (await db.execute(stmt)).all()
+    out: dict[str, dict] = {}
+    for account_id, category_id, account_name in rows:
+        entry = out.setdefault(
+            str(account_id), {"account_name": account_name, "category_ids": []}
+        )
+        entry["category_ids"].append(str(category_id))
+    return out
 
 
 async def _today_run_count(db) -> int:
@@ -170,11 +208,17 @@ async def persist_pdd_result(result: PddAppResult, meta: dict) -> bool:
 async def dispatch_auto_batch(
     *, count: int, both_platforms: bool, priority: int = 1,
     category_slug: str | None = None,
+    account_name: str | None = None,
+    account_id: str | None = None,
+    allowed_category_ids: list[str] | None = None,
 ) -> list[dict]:
     """自动跑批的「派发」阶段：挑词 → 入队（普通优先级）→ 乐观写回 → 闲鱼错峰。
 
     不等结果（结果由 celery 每词一个 await-persist 任务异步落库），保证 beat
     tick 立即返回、不长时间占住 worker。受 daily_search_quota 限制。
+
+    多号路由（roadmap §15）：给定 account_name + allowed_category_ids 时，只在
+    该号被分配的品类里挑词，并入该号专属队列；为空 → 旧的全局派发到默认队列。
 
     :return: 每个已派词的描述 dict（task_id/keyword_id/.../timeout_s），供
              await-persist 任务消费。空 list = 没派（配额满 / 无可调度词）。
@@ -189,9 +233,12 @@ async def dispatch_auto_batch(
             return []
         count = min(count, remaining)
 
-        keywords = await select_cohesive_keywords(db, count, category_slug)
+        keywords = await select_cohesive_keywords(
+            db, count, category_slug, allowed_category_ids=allowed_category_ids
+        )
         if not keywords:
-            logger.info("auto_batch: 词库无可调度词，跳过")
+            who = f"号【{account_name}】" if account_name else ""
+            logger.info(f"auto_batch: {who}无可调度词，跳过")
             return []
 
         tc_lo = int(cfg.get("target_count_min") or 8)
@@ -217,10 +264,11 @@ async def dispatch_auto_batch(
                     "scroll_screens": eff_scroll,
                     "mode": worker_mode,
                 },
+                account_id=account_id,
                 priority=priority,
                 timeout_s=per_task_timeout,
             )
-            await enqueue_task(task)
+            await enqueue_task(task, account=account_name)
             await _mark_dispatched(str(k.id), now0)  # 乐观写回，防重复挑中
             desc = {
                 "task_id": task.task_id,
@@ -239,6 +287,7 @@ async def dispatch_auto_batch(
                 "mode": worker_mode,
                 "source": "auto",
                 "priority": priority,
+                "account_name": account_name,
             })
             descs.append(desc)
 
@@ -253,8 +302,9 @@ async def dispatch_auto_batch(
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"auto_batch: 闲鱼派发失败: {exc}")
 
+    who = f"号【{account_name}】" if account_name else ""
     logger.info(
-        f"auto_batch: 锁定品类【{cat_label}】派 {len(descs)} 词 "
+        f"auto_batch: {who}锁定品类【{cat_label}】派 {len(descs)} 词 "
         f"both={both_platforms} (今日 {today}/{quota})"
     )
     return descs

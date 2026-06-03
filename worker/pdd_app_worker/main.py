@@ -37,9 +37,10 @@ WORKER_NAME = os.environ.get("WORKER_NAME", "windows-home")
 # 多开时每个进程必须设不同的 ADB_SERIAL + WORKER_NAME + BOUND_PDD_ACCOUNT。
 ADB_SERIAL = os.environ.get("ADB_SERIAL", "").strip()
 
-# Phase 1 单设备阶段：这台 worker 上当前 PDD APP 登录的账号 account_name。
-# 仅作 audit/日志用途（worker 不切账号，PDD APP 实际登录的是谁就用谁）。
-# 换号时同步改这个值；为空就用 "unknown"。
+# 这台 worker 上当前 PDD APP 登录的账号 account_name。
+# 用途：(1) audit/日志（结果里 account_name）；(2) 多号路由——poll/心跳带它，
+# backend 只发"分配给本号品类"的自动跑批任务（roadmap §15，见 http_client）。
+# 换号时同步改这个值；为空就用 "unknown"（视为未配号，退回默认队列）。
 BOUND_PDD_ACCOUNT = os.environ.get("BOUND_PDD_ACCOUNT", "unknown")
 
 # ── Burst-mode 任务调度配置 ─────────────────────────────────────────────

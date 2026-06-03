@@ -22,7 +22,11 @@ from app.core.redis import redis_client
 logger = logging.getLogger(__name__)
 
 # Redis keys
-TASK_QUEUE_KEY = "pdd_app:task_q"          # 任务队列（FIFO）
+TASK_QUEUE_KEY = "pdd_app:task_q"          # 默认/未路由队列（FIFO，手动派发 & 旧 worker 走这里）
+# 多号路由（roadmap §15）：自动跑批按号入 per-account 队列 pdd_app:task_q:{account}。
+# worker poll 带自己的 account → BLPOP [自己的号队列, 默认队列]，只吃自己该吃的 +
+# 兼容手动派发的默认队列。未配 account 的旧 worker 只吃默认队列，行为不变。
+TASK_QUEUE_PREFIX = "pdd_app:task_q:"
 RESULT_KEY_PREFIX = "pdd_app:result:"      # 单任务结果（短 TTL）
 WORKER_HEARTBEAT_KEY = "pdd_app:worker:heartbeat"  # 旧版单 worker 心跳（向后兼容读）
 # 多 worker：每个 worker 一个 key（按 worker_name）。get_worker_status 聚合所有。
@@ -92,8 +96,17 @@ def scroll_screens_for(target_count: int) -> int:
     return max(2, min(n, 5))
 
 
-async def enqueue_task(task: PddAppTask) -> None:
+def task_queue_key(account: str | None) -> str:
+    """按号路由的队列 key。account 为空 → 默认队列（手动派发 / 旧 worker）。"""
+    acct = (account or "").strip()
+    return f"{TASK_QUEUE_PREFIX}{acct}" if acct else TASK_QUEUE_KEY
+
+
+async def enqueue_task(task: PddAppTask, account: str | None = None) -> None:
     """把任务推进 Redis 队列。worker 会 BLPOP 拉走。
+
+    account（account_name，如 pdd_crawler_7315）给定 → 入该号专属队列，只有绑
+    了这个号的 worker 才会取到；为空 → 入默认队列（手动派发 / 单号 / 旧 worker）。
 
     队列实现：
     - 普通任务（priority < EMERGENCY_PRIORITY_THRESHOLD）→ RPUSH 进队尾，FIFO
@@ -104,14 +117,15 @@ async def enqueue_task(task: PddAppTask) -> None:
     quiet（拟人化节流）。两层配合才能真正实现"插队 + 立即开干"。
     """
     payload = task.model_dump_json()
+    key = task_queue_key(account)
     is_emergency = task.priority >= EMERGENCY_PRIORITY_THRESHOLD
     if is_emergency:
-        await redis_client.lpush(TASK_QUEUE_KEY, payload)
+        await redis_client.lpush(key, payload)
     else:
-        await redis_client.rpush(TASK_QUEUE_KEY, payload)
+        await redis_client.rpush(key, payload)
     logger.info(
         f"pdd_app_queue: enqueued task_id={task.task_id} "
-        f"kind={task.kind} account={task.account_id} "
+        f"kind={task.kind} queue={key} account={task.account_id} "
         f"priority={task.priority}{' [EMERGENCY/jump-queue]' if is_emergency else ''}"
     )
 
@@ -138,13 +152,20 @@ async def await_result(task_id: str, timeout_s: int = 120) -> PddAppResult | Non
 
 # --- 供 backend HTTP bridge 调用（serve worker 端）---
 
-async def pop_task(timeout_s: int = 30) -> PddAppTask | None:
+async def pop_task(timeout_s: int = 30, account: str | None = None) -> PddAppTask | None:
     """worker poll endpoint 用：BLPOP 任务队列，最多阻塞 timeout_s 秒。
+
+    account（worker 的 BOUND_PDD_ACCOUNT）给定 → BLPOP [该号队列, 默认队列]：
+    先吃自己被分配品类的自动跑批任务，再兜底吃默认队列里的手动派发任务，
+    绝不会取到别的号的队列 → 品类画像隔离（roadmap §15）。
+    为空（旧 worker / 未配号）→ 只吃默认队列，行为与改造前一致。
 
     timeout_s 不宜过长（避免 HTTP 连接长时间挂着占 backend 资源）；
     worker 端会循环 poll。
     """
-    raw = await redis_client.blpop([TASK_QUEUE_KEY], timeout=timeout_s)
+    acct = (account or "").strip()
+    keys = [task_queue_key(acct), TASK_QUEUE_KEY] if acct else [TASK_QUEUE_KEY]
+    raw = await redis_client.blpop(keys, timeout=timeout_s)
     if raw is None:
         return None
     _, value = raw
@@ -203,6 +224,7 @@ async def record_worker_heartbeat(
     device_serials: list[str],
     scheduler: dict[str, Any] | None = None,
     worker_name: str | None = None,
+    account: str | None = None,
 ) -> None:
     """worker 定期上报"我活着，连了这些手机"。
 
@@ -219,25 +241,46 @@ async def record_worker_heartbeat(
         "devices": device_serials,
         "name": name or "default",
     }
+    acct = (account or "").strip()
+    if acct and acct != "unknown":
+        payload["account"] = acct  # 多号路由：beat tick 据此知道哪些号在线
     if scheduler is not None:
         payload["scheduler"] = scheduler
     key = f"{WORKER_HEARTBEAT_PREFIX}{name}" if name else WORKER_HEARTBEAT_KEY
     await redis_client.set(key, json.dumps(payload), ex=120)  # 2min 没心跳视为离线
 
 
+async def _all_queue_keys() -> list[str]:
+    """默认队列 + 所有 per-account 队列 key（聚合 depth / purge 用）。"""
+    keys = [TASK_QUEUE_KEY]
+    try:
+        async for k in redis_client.scan_iter(match=f"{TASK_QUEUE_PREFIX}*"):
+            keys.append(k if isinstance(k, str) else k.decode())
+    except Exception as exc:  # noqa: BLE001 — scan 失败退回只看默认队列
+        logger.warning(f"_all_queue_keys scan failed: {exc}")
+    return list(dict.fromkeys(keys))
+
+
 async def queue_depth() -> int:
-    """当前排队中（worker 还没 BLPOP 走）的任务数。"""
-    return int(await redis_client.llen(TASK_QUEUE_KEY) or 0)
+    """当前排队中（worker 还没 BLPOP 走）的任务数：默认 + 所有按号队列之和。"""
+    total = 0
+    for k in await _all_queue_keys():
+        total += int(await redis_client.llen(k) or 0)
+    return total
 
 
 async def purge_queue() -> int:
-    """清空任务队列里还没被 worker 拉走的任务。返回清掉的条数。
+    """清空所有队列（默认 + 所有按号队列）里还没被 worker 拉走的任务。返回清掉的条数。
 
     已被 worker BLPOP 走、正在跑的任务不受影响（"在跑的不打断"）。
     """
-    n = await queue_depth()
-    await redis_client.delete(TASK_QUEUE_KEY)
-    logger.info(f"pdd_app_queue: purged {n} queued task(s)")
+    keys = await _all_queue_keys()
+    n = 0
+    for k in keys:
+        n += int(await redis_client.llen(k) or 0)
+    if keys:
+        await redis_client.delete(*keys)
+    logger.info(f"pdd_app_queue: purged {n} queued task(s) across {len(keys)} queue(s)")
     return n
 
 
@@ -285,12 +328,18 @@ async def clear_batch_plan() -> None:
 AUTO_NEXT_TS_KEY = "pdd_app:auto_next_ts"
 
 
-async def set_auto_next_ts(ts: float) -> None:
-    await redis_client.set(AUTO_NEXT_TS_KEY, str(ts), ex=24 * 3600)
+def _auto_next_ts_key(account: str | None) -> str:
+    """多号错峰：每个号一条 next_ts，独立随机时刻 → 两号不会同一秒开搜。"""
+    acct = (account or "").strip()
+    return f"{AUTO_NEXT_TS_KEY}:{acct}" if acct else AUTO_NEXT_TS_KEY
 
 
-async def get_auto_next_ts() -> float | None:
-    raw = await redis_client.get(AUTO_NEXT_TS_KEY)
+async def set_auto_next_ts(ts: float, account: str | None = None) -> None:
+    await redis_client.set(_auto_next_ts_key(account), str(ts), ex=24 * 3600)
+
+
+async def get_auto_next_ts(account: str | None = None) -> float | None:
+    raw = await redis_client.get(_auto_next_ts_key(account))
     if not raw:
         return None
     try:
@@ -299,8 +348,8 @@ async def get_auto_next_ts() -> float | None:
         return None
 
 
-async def clear_auto_next_ts() -> None:
-    await redis_client.delete(AUTO_NEXT_TS_KEY)
+async def clear_auto_next_ts(account: str | None = None) -> None:
+    await redis_client.delete(_auto_next_ts_key(account))
 
 
 # 闲鱼全自动采集：与 PDD 独立的下一次派词时刻（闲鱼不走 worker 队列，
@@ -359,6 +408,7 @@ async def get_worker_status() -> dict[str, Any]:
         workers.append({
             "name": data.get("name") or "default",
             "devices": data.get("devices") or [],
+            "account": data.get("account"),
             "ts": data.get("ts"),
             "scheduler": data.get("scheduler"),
         })
@@ -366,6 +416,7 @@ async def get_worker_status() -> dict[str, Any]:
     if not workers:
         return {
             "online": False, "devices": [],
+            "accounts": [],
             "workers": [], "worker_count": 0, "device_count": 0,
         }
 
@@ -375,6 +426,13 @@ async def get_worker_status() -> dict[str, Any]:
         for d in w["devices"]:
             if d not in devices:
                 devices.append(d)
+
+    # 在线号并集（多号路由派发用；旧 worker 不上报 account → 不计入）
+    accounts: list[str] = []
+    for w in workers:
+        a = w.get("account")
+        if a and a not in accounts:
+            accounts.append(a)
 
     # 代表性 scheduler：挑"最就绪"的 worker（不在静默期、burst 剩得多 → ETA 最小）。
     # 单 worker 时就是它本身，ETA 行为与改造前完全一致。
@@ -387,6 +445,7 @@ async def get_worker_status() -> dict[str, Any]:
     return {
         "online": True,
         "devices": devices,
+        "accounts": accounts,
         "ts": rep.get("ts"),
         "scheduler": rep.get("scheduler"),
         "workers": workers,
