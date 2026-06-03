@@ -61,14 +61,17 @@ def _keyword_out(k: Keyword) -> dict[str, Any]:
 
 
 # ── PDD 采集号（accounts.platform='pdd_crawler'）────────────────
-@router.get("/accounts", summary="PDD 采集号列表（给品类分配用）")
+@router.get("/accounts", summary="PDD 采集号列表（给品类分配用，只列在用的号）")
 async def list_pdd_accounts(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
+    # 只列在用的号（is_active=true）——停用/备用号（如未绑机的 pdd_crawler_2117/
+    # _4310/_5514）不出现在分配下拉里。按 SOP 加手机绑号会置 is_active=true，自动复现。
     stmt = (
         select(Account)
         .where(Account.platform == "pdd_crawler")
+        .where(Account.is_active.is_(True))
         .order_by(Account.account_name)
     )
     rows = (await db.execute(stmt)).scalars().all()
