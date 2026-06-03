@@ -28,12 +28,16 @@ spec:
             - configMapRef:
                 name: resell-config
           resources:
+            # Playwright 无头 Chromium 抓取吃 CPU+内存：内存给到 3Gi 防 OOM、
+            # CPU 给 2 核避免浏览器抢不到 CPU 导致 page.goto 超时。
+            # 2026-06-03：线上曾被压到 1Gi/1核 → celery OOMKilled + 闲鱼抓取全超时，
+            # 调到下列值后闲鱼采集恢复正常。
             requests:
-              cpu: "250m"
-              memory: "512Mi"
+              cpu: "500m"
+              memory: "1Gi"
             limits:
-              cpu: "1000m"
-              memory: "2Gi"
+              cpu: "2"
+              memory: "3Gi"
           volumeMounts:
             - name: playwright-states
               mountPath: /app/playwright_states
