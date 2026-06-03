@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Table, Card, Input, Button, Space, Tag, Select, Switch,
-  Modal, Form, Popconfirm, App, Row, Col, Tooltip, Menu,
+  Modal, Form, Popconfirm, App, Row, Col, Tooltip, Menu, Alert,
 } from 'antd';
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EditOutlined, WarningOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
 
@@ -14,6 +14,14 @@ interface Category {
   name: string;
   slug: string;
   keyword_count: number;
+  account_ids: string[];
+}
+
+interface PddAccount {
+  id: string;
+  account_name: string;
+  bound_device_serial: string | null;
+  is_active: boolean;
 }
 
 interface KeywordRow {
@@ -61,6 +69,8 @@ const fmtTime = (iso: string | null) => {
 const PddKeywords: React.FC = () => {
   const { message } = App.useApp();
   const [categories, setCategories] = useState<Category[]>([]);
+  const [accounts, setAccounts] = useState<PddAccount[]>([]);
+  const [savingAssign, setSavingAssign] = useState(false);
   const [rows, setRows] = useState<KeywordRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -88,6 +98,30 @@ const PddKeywords: React.FC = () => {
     } catch { /* ignore */ }
   }, []);
 
+  const fetchAccounts = useCallback(async () => {
+    try {
+      const res = await api.get('/pdd-keywords/accounts');
+      setAccounts(res.data || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  // 把某品类整组覆盖分配给一批采集号（空 = 未分配 = 不采集）
+  const assignAccounts = async (catId: string, accountIds: string[]) => {
+    setSavingAssign(true);
+    setCategories((prev) => prev.map((c) => (c.id === catId ? { ...c, account_ids: accountIds } : c)));
+    try {
+      await api.put(`/pdd-keywords/categories/${catId}/accounts`, { account_ids: accountIds });
+      message.success('采集号分配已保存');
+    } catch {
+      message.error('保存分配失败');
+      fetchCategories();
+    }
+    setSavingAssign(false);
+  };
+
+  const acctLabel = (a: PddAccount) =>
+    a.bound_device_serial ? `${a.account_name}（${a.bound_device_serial}）` : a.account_name;
+
   const fetchKeywords = useCallback(async (p = page) => {
     setLoading(true);
     try {
@@ -101,7 +135,7 @@ const PddKeywords: React.FC = () => {
     setLoading(false);
   }, [catFilter, q, safeFilter, page, message]);
 
-  useEffect(() => { fetchCategories(); }, [fetchCategories]);
+  useEffect(() => { fetchCategories(); fetchAccounts(); }, [fetchCategories, fetchAccounts]);
   useEffect(() => { fetchKeywords(1); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [catFilter, safeFilter]);
 
   // 行内快速切换（安全词 / 调度）
@@ -267,6 +301,8 @@ const PddKeywords: React.FC = () => {
     },
   ];
 
+  const selectedCat = catFilter ? categories.find((c) => c.id === catFilter) : undefined;
+
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Row justify="space-between" align="middle">
@@ -295,8 +331,17 @@ const PddKeywords: React.FC = () => {
                   key: c.id,
                   label: (
                     <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                      <span>{c.name}</span>
-                      <Text type="secondary" style={{ fontSize: 12 }}>{c.keyword_count}</Text>
+                      <span>
+                        {c.account_ids.length === 0 && (
+                          <Tooltip title="未分配采集号 → 不采集">
+                            <WarningOutlined style={{ color: '#faad14', marginInlineEnd: 4 }} />
+                          </Tooltip>
+                        )}
+                        {c.name}
+                      </span>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {c.account_ids.length > 0 ? `${c.account_ids.length}号 · ` : ''}{c.keyword_count}
+                      </Text>
                     </Space>
                   ),
                 })),
@@ -307,6 +352,41 @@ const PddKeywords: React.FC = () => {
 
         {/* 右：关键词 */}
         <Col xs={24} sm={16} md={18} lg={19}>
+          {selectedCat && (
+            <Card size="small" style={{ marginBottom: 12 }} styles={{ body: { padding: 12 } }}>
+              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <Space size={6} wrap>
+                  <Text strong>「{selectedCat.name}」分配给采集号</Text>
+                  <Tooltip title="分配给 1 个号=该号独占；分配给多个号=共用（如生活类）。未分配 = 不采集。每个词每天只会被一个号跑，多号共用时自动错峰、不重复。">
+                    <Text type="secondary" style={{ fontSize: 12 }}>（多选；共用品类可选多个号）</Text>
+                  </Tooltip>
+                </Space>
+                <Select
+                  mode="multiple"
+                  allowClear
+                  style={{ width: '100%' }}
+                  placeholder="选择负责该品类的采集号（留空 = 不采集）"
+                  loading={savingAssign}
+                  value={selectedCat.account_ids}
+                  onChange={(ids) => assignAccounts(selectedCat.id, ids)}
+                  options={accounts.map((a) => ({
+                    value: a.id,
+                    label: a.is_active ? acctLabel(a) : `${acctLabel(a)} · 停用`,
+                  }))}
+                  notFoundContent={accounts.length === 0 ? '没有 pdd_crawler 采集号' : undefined}
+                />
+                {selectedCat.account_ids.length === 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    icon={<WarningOutlined />}
+                    banner
+                    message="该品类未分配任何采集号 —— 不会被任何号自动采集"
+                  />
+                )}
+              </Space>
+            </Card>
+          )}
           <Card styles={{ body: { padding: 12 } }}>
             <Space wrap style={{ marginBottom: 12 }}>
               <Select

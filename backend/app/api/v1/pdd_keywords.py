@@ -27,8 +27,8 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
-from app.models.selection import Category, Keyword
-from app.models.system import User
+from app.models.selection import Category, Keyword, PddCategoryAccount
+from app.models.system import Account, User
 
 router = APIRouter()
 
@@ -60,8 +60,31 @@ def _keyword_out(k: Keyword) -> dict[str, Any]:
     }
 
 
+# ── PDD 采集号（accounts.platform='pdd_crawler'）────────────────
+@router.get("/accounts", summary="PDD 采集号列表（给品类分配用）")
+async def list_pdd_accounts(
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(Account)
+        .where(Account.platform == "pdd_crawler")
+        .order_by(Account.account_name)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": str(a.id),
+            "account_name": a.account_name,
+            "bound_device_serial": a.bound_device_serial,
+            "is_active": a.is_active,
+        }
+        for a in rows
+    ]
+
+
 # ── 分类 ──────────────────────────────────────────────────────
-@router.get("/categories", summary="分类列表（含 PDD 词数）")
+@router.get("/categories", summary="分类列表（含 PDD 词数 + 分配的采集号）")
 async def list_categories(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
@@ -73,6 +96,17 @@ async def list_categories(
         .order_by(Category.display_order, Category.name)
     )
     rows = (await db.execute(stmt)).all()
+
+    # 一次查出所有品类的号绑定，避免 N+1
+    assign_rows = (
+        await db.execute(
+            select(PddCategoryAccount.category_id, PddCategoryAccount.account_id)
+        )
+    ).all()
+    by_cat: dict[str, list[str]] = {}
+    for cat_id, acct_id in assign_rows:
+        by_cat.setdefault(str(cat_id), []).append(str(acct_id))
+
     return [
         {
             "id": str(c.id),
@@ -80,9 +114,57 @@ async def list_categories(
             "slug": c.slug,
             "is_active": c.is_active,
             "keyword_count": cnt,
+            "account_ids": by_cat.get(str(c.id), []),
         }
         for c, cnt in rows
     ]
+
+
+class CategoryAccountsBody(BaseModel):
+    account_ids: list[str] = Field(
+        default_factory=list,
+        description="该品类分配给哪些采集号（accounts.id）。空 = 未分配 = 不采集。",
+    )
+
+
+@router.put("/categories/{cat_id}/accounts", summary="设置品类分配的采集号（整组覆盖）")
+async def set_category_accounts(
+    cat_id: str,
+    body: CategoryAccountsBody,
+    db: AsyncSession = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    cat = (await db.execute(select(Category).where(Category.id == cat_id))).scalar_one_or_none()
+    if cat is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="分类不存在")
+
+    wanted = list(dict.fromkeys(body.account_ids))  # 去重保序
+    if wanted:
+        valid = (
+            await db.execute(
+                select(Account.id).where(
+                    Account.id.in_(wanted), Account.platform == "pdd_crawler"
+                )
+            )
+        ).scalars().all()
+        valid_set = {str(v) for v in valid}
+        bad = [a for a in wanted if a not in valid_set]
+        if bad:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"以下不是有效的 PDD 采集号：{bad}",
+            )
+
+    # 整组覆盖：先删旧绑定，再插新的
+    await db.execute(
+        PddCategoryAccount.__table__.delete().where(
+            PddCategoryAccount.category_id == cat_id
+        )
+    )
+    for acct_id in wanted:
+        db.add(PddCategoryAccount(category_id=cat_id, account_id=acct_id))
+    await db.commit()
+    return {"ok": True, "category_id": cat_id, "account_ids": wanted}
 
 
 class CategoryCreate(BaseModel):

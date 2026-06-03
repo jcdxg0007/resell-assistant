@@ -37,6 +37,33 @@ class Category(Base, UUIDMixin, TimestampMixin):
     )
 
 
+class PddCategoryAccount(Base, UUIDMixin, TimestampMixin):
+    """品类 ↔ PDD 采集号 多对多绑定（防双号画像趋同，roadmap §15）。
+
+    一个品类分配给 1 个号=独占、多个号=共用（如「生活类」）。
+    未出现在本表的品类 = 未分配 = 不跑（必须显式分配才采集）。
+    account 指向 accounts 表里 platform='pdd_crawler' 的行。
+    """
+    __tablename__ = "pdd_category_account"
+
+    category_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("selection_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    account_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("category_id", "account_id", name="uq_pdd_cat_account"),
+    )
+
+
 class Keyword(Base, UUIDMixin, TimestampMixin):
     """A search keyword under a category, e.g. 'action4' under '相机配件'."""
     __tablename__ = "selection_keywords"
