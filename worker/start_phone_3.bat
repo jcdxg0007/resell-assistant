@@ -2,6 +2,13 @@
 REM ============================================================
 REM PDD worker 启动脚本 - 手机 3
 REM 下面三项改成第三台手机的真实值（adb devices 看序列号，要 device 状态）：
+REM   ADB_SERIAL / WORKER_NAME / BOUND_PDD_ACCOUNT
+REM
+REM 【重要·多号路由】BOUND_PDD_ACCOUNT 现在决定 backend 把哪些品类的任务
+REM 发给本机（词库管理页分配）。它必须等于 accounts 表里 platform='pdd_crawler'
+REM 的某个 account_name，且就是这台手机此刻真正登录的号。
+REM 现有可用号（截至 2026-06-03）：pdd_crawler_1876 / _2117 / _4310 / _5514
+REM （7315 已绑手机1）。换号同步跑 backend/scripts/pdd_account_swap.py
 REM ============================================================
 cd /d C:\resell\worker
 

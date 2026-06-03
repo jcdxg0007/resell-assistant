@@ -420,6 +420,8 @@ async def read_console(
     data["worker"] = await get_worker_status()
     data["paused"] = await is_collection_paused()
     data["queued"] = await queue_depth()
+    from app.services.pdd_autobatch import get_routing_status
+    data["routing"] = await get_routing_status(db)
     return data
 
 

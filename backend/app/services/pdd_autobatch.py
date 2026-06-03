@@ -12,7 +12,7 @@ import asyncio
 import logging
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
@@ -142,6 +142,59 @@ async def load_account_assignments(db) -> dict[str, dict]:
         )
         entry["category_ids"].append(str(category_id))
     return out
+
+
+async def get_routing_status(db) -> dict:
+    """多号路由状态面板（roadmap §15，控制台 Phase 3）。
+
+    给每个 pdd_crawler 号一行：在线？队列里堆了几个？被分配几个品类？下次自己
+    随机派词的时刻？用来肉眼确认双号确实在【各采各的品类 + 错峰】跑。
+
+    :return: {"enabled": bool, "accounts": [ {account_name, is_active,
+              bound_device_serial, online, queue_depth, assigned_category_count,
+              next_auto_at}, ... ]}
+              enabled=False 表示全库还没配任何绑定（走旧全局派发）。
+    """
+    from datetime import datetime as _dt
+    from app.services.pdd_app_queue import (
+        account_queue_depth, get_auto_next_ts, get_worker_status,
+    )
+
+    _CN_TZ = timezone(timedelta(hours=8))
+
+    accounts = (await db.execute(
+        select(Account)
+        .where(Account.platform == "pdd_crawler")
+        .order_by(Account.account_name)
+    )).scalars().all()
+
+    # 每个号被分配的品类数
+    assign_counts: dict[str, int] = {}
+    rows = (await db.execute(
+        select(PddCategoryAccount.account_id, func.count(PddCategoryAccount.category_id))
+        .group_by(PddCategoryAccount.account_id)
+    )).all()
+    for acct_id, cnt in rows:
+        assign_counts[str(acct_id)] = int(cnt)
+
+    online = set((await get_worker_status()).get("accounts") or [])
+
+    out: list[dict] = []
+    for a in accounts:
+        ts = await get_auto_next_ts(account=a.account_name)
+        out.append({
+            "account_name": a.account_name,
+            "is_active": a.is_active,
+            "bound_device_serial": a.bound_device_serial,
+            "online": a.account_name in online,
+            "queue_depth": await account_queue_depth(a.account_name),
+            "assigned_category_count": assign_counts.get(str(a.id), 0),
+            "next_auto_at": (
+                _dt.fromtimestamp(ts, tz=_CN_TZ).isoformat() if ts else None
+            ),
+        })
+
+    return {"enabled": bool(assign_counts), "accounts": out}
 
 
 async def _today_run_count(db) -> int:

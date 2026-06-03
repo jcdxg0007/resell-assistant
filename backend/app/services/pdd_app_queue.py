@@ -269,6 +269,11 @@ async def queue_depth() -> int:
     return total
 
 
+async def account_queue_depth(account: str | None) -> int:
+    """某个号专属队列的排队数（account 为空 → 默认队列）。多号路由面板用。"""
+    return int(await redis_client.llen(task_queue_key(account)) or 0)
+
+
 async def purge_queue() -> int:
     """清空所有队列（默认 + 所有按号队列）里还没被 worker 拉走的任务。返回清掉的条数。
 

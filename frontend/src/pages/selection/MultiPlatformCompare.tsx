@@ -62,9 +62,21 @@ interface Console {
   pending: PendingKw[];
   collected: CollectedKw[];
   recent_risk: RiskItem[];
-  worker: { online: boolean; devices?: string[]; worker_count?: number; device_count?: number };
+  worker: { online: boolean; devices?: string[]; worker_count?: number; device_count?: number; accounts?: string[] };
   paused?: boolean;
   queued?: number;
+  routing?: {
+    enabled: boolean;
+    accounts: Array<{
+      account_name: string;
+      is_active: boolean;
+      bound_device_serial: string | null;
+      online: boolean;
+      queue_depth: number;
+      assigned_category_count: number;
+      next_auto_at: string | null;
+    }>;
+  };
 }
 
 interface AutoConfig {
@@ -512,6 +524,42 @@ const MultiPlatformCompare: React.FC = () => {
           </Space>
         </Col>
       </Row>
+
+      {/* 多号路由状态：每个号 在线/队列/分配品类数/下次派词时刻（roadmap §15） */}
+      {cons?.routing?.enabled && (cons.routing.accounts?.length ?? 0) > 0 && (
+        <Card size="small" title="多号路由状态" styles={{ body: { padding: 8 } }}>
+          <Row gutter={[8, 8]}>
+            {cons.routing.accounts.map((a) => (
+              <Col key={a.account_name} xs={24} sm={12} md={8} lg={6}>
+                <Card size="small" styles={{ body: { padding: 8 } }}>
+                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                    <Badge
+                      status={a.online ? 'success' : 'default'}
+                      text={<Text strong style={{ fontSize: 13 }}>{a.account_name}</Text>}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {a.online ? '在线' : '离线'}
+                      {a.bound_device_serial ? ` · ${a.bound_device_serial}` : ' · 未绑机'}
+                      {!a.is_active && ' · 停用'}
+                    </Text>
+                    <Space size={6} wrap>
+                      <Tag color={a.assigned_category_count > 0 ? 'blue' : 'default'}>
+                        分配 {a.assigned_category_count} 品类
+                      </Tag>
+                      <Tag color={a.queue_depth > 0 ? 'gold' : 'default'}>队列 {a.queue_depth}</Tag>
+                    </Space>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      下次派词：{a.next_auto_at
+                        ? new Date(a.next_auto_at).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+                        : '—'}
+                    </Text>
+                  </Space>
+                </Card>
+              </Col>
+            ))}
+          </Row>
+        </Card>
+      )}
 
       {/* 搜索 */}
       <Card styles={{ body: { padding: 12 } }}>
