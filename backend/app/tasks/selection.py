@@ -735,6 +735,9 @@ def instant_search(keyword: str, platform: str = "xianyu", source: str = "manual
             f"Instant search cache hit for '{keyword}' @ {platform} — "
             f"returning cached result (age={cached.get('_cache_age_seconds')}s)"
         )
+        # 缓存命中也算一次用户发起的搜索任务，照样落「任务记录」（否则 5min 内
+        # 复搜的词永远不出现在记录里）。失败 swallow。
+        _persist_xianyu_run_if_needed(keyword, platform, source, cached)
         return cached
 
     # PDD / 1688 小号: check out the least-recently-used account that
@@ -797,19 +800,24 @@ def instant_search(keyword: str, platform: str = "xianyu", source: str = "manual
         raise
     _cache_store_instant_search(keyword, platform, result)
     # 闲鱼任务记录落库（与 PDD pdd_search_runs 对称，给「任务记录」抽屉用）。
-    # 只记真实执行的这次（cache 命中已在上面提前 return，不重复记）。失败 swallow。
-    if platform == "xianyu":
-        try:
-            from app.services.xianyu_search_run import persist_xianyu_run
-            st, items_n, saved_n, risk, err = _classify_xianyu_result(result)
-            run_async(persist_xianyu_run(
-                status=st, keyword_text=keyword, source=source,
-                items_count=items_n, saved_count=saved_n,
-                risk_signals=risk if isinstance(risk, list) else None, error=err,
-            ))
-        except Exception as e:  # noqa: BLE001 — 记录失败不影响采集
-            logger.warning(f"persist_xianyu_run skipped for '{keyword}': {e}")
+    _persist_xianyu_run_if_needed(keyword, platform, source, result)
     return result
+
+
+def _persist_xianyu_run_if_needed(keyword: str, platform: str, source: str, result: dict) -> None:
+    """platform=='xianyu' 时把这次搜索落 xianyu_search_runs。失败只记日志。"""
+    if platform != "xianyu":
+        return
+    try:
+        from app.services.xianyu_search_run import persist_xianyu_run
+        st, items_n, saved_n, risk, err = _classify_xianyu_result(result)
+        run_async(persist_xianyu_run(
+            status=st, keyword_text=keyword, source=source,
+            items_count=items_n, saved_count=saved_n,
+            risk_signals=risk if isinstance(risk, list) else None, error=err,
+        ))
+    except Exception as e:  # noqa: BLE001 — 记录失败不影响采集
+        logger.warning(f"persist_xianyu_run skipped for '{keyword}': {e}")
 
 
 # ─────────────────────────────── instant_search result cache ──
