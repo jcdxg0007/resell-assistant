@@ -70,7 +70,7 @@ async def dispatch_xianyu_batch(
         offset = 0
         for k in kw_rows:
             try:
-                instant_search.apply_async(args=(k.text, "xianyu"), countdown=offset)
+                instant_search.apply_async(args=(k.text, "xianyu", "lib"), countdown=offset)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"xianyu dispatch failed (kw='{k.text}'): {exc}")
                 continue

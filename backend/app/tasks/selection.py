@@ -674,8 +674,34 @@ def source_stock_check():
     # TODO: Implement source platform stock checking
 
 
+def _classify_xianyu_result(result: dict) -> tuple[str, int, int | None, list | None, str | None]:
+    """从 instant_search 返回的 dict 推导闲鱼任务记录字段。
+
+    返回 (status, items_count, saved_count, risk_signals, error)。
+    - 有 items / active_listings / saved_products>0 → ok
+    - 跑通但没货 → empty
+    - error 里含 risk/验证/captcha → risk_blocked，否则 failed
+    """
+    if not isinstance(result, dict):
+        return "failed", 0, None, None, "non_dict_result"
+    active = int(result.get("active_listings") or 0)
+    saved = result.get("saved_products")
+    saved_n = int(saved) if isinstance(saved, (int, float)) else None
+    items = result.get("items") or []
+    items_n = active or (len(items) if isinstance(items, list) else 0) or (saved_n or 0)
+    err = result.get("error")
+    risk = result.get("risk_signals") or None
+    if items_n > 0:
+        return "ok", items_n, saved_n, risk, None
+    if err:
+        low = str(err).lower()
+        is_risk = any(k in low for k in ("risk", "captcha", "验证", "登录", "block"))
+        return ("risk_blocked" if is_risk else "failed"), 0, saved_n, risk, str(err)[:2000]
+    return "empty", 0, saved_n, risk, None
+
+
 @celery_app.task(name="app.tasks.selection.instant_search")
-def instant_search(keyword: str, platform: str = "xianyu"):
+def instant_search(keyword: str, platform: str = "xianyu", source: str = "manual"):
     """User-triggered instant search on the primary platform.
 
     P4 fan-out: xianyu (primary, guest) + pdd (crawler 小号 cookies) +
@@ -770,6 +796,19 @@ def instant_search(keyword: str, platform: str = "xianyu"):
         )
         raise
     _cache_store_instant_search(keyword, platform, result)
+    # 闲鱼任务记录落库（与 PDD pdd_search_runs 对称，给「任务记录」抽屉用）。
+    # 只记真实执行的这次（cache 命中已在上面提前 return，不重复记）。失败 swallow。
+    if platform == "xianyu":
+        try:
+            from app.services.xianyu_search_run import persist_xianyu_run
+            st, items_n, saved_n, risk, err = _classify_xianyu_result(result)
+            run_async(persist_xianyu_run(
+                status=st, keyword_text=keyword, source=source,
+                items_count=items_n, saved_count=saved_n,
+                risk_signals=risk if isinstance(risk, list) else None, error=err,
+            ))
+        except Exception as e:  # noqa: BLE001 — 记录失败不影响采集
+            logger.warning(f"persist_xianyu_run skipped for '{keyword}': {e}")
     return result
 
 

@@ -350,7 +350,7 @@ async def dispatch_auto_batch(
                 from app.tasks.selection import instant_search
                 xy_offset = 0
                 for d in descs:
-                    instant_search.apply_async(args=(d["keyword_text"], "xianyu"), countdown=xy_offset)
+                    instant_search.apply_async(args=(d["keyword_text"], "xianyu", "lib"), countdown=xy_offset)
                     xy_offset += random.randint(70, 110)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"auto_batch: 闲鱼派发失败: {exc}")

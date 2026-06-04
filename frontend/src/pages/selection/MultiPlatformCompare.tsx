@@ -110,9 +110,10 @@ const PDD_SOURCE_META: Record<string, { color: string; label: string }> = {
   manual: { color: 'cyan', label: '手动' },
   emergency: { color: 'volcano', label: '紧急' },
 };
-// 任务记录行（来自 GET /pdd-runs/）
+// 任务记录行（来自 GET /pdd-runs/，PDD + 闲鱼合并）
 interface TaskRun {
   id: string;
+  platform: string;
   task_id: string | null;
   source: string;
   keyword_text: string;
@@ -189,15 +190,17 @@ const MultiPlatformCompare: React.FC = () => {
   const [taskLogPage, setTaskLogPage] = useState(1);
   const [taskLogStatus, setTaskLogStatus] = useState<string | undefined>(undefined);
   const [taskLogSource, setTaskLogSource] = useState<string | undefined>(undefined);
+  const [taskLogPlatform, setTaskLogPlatform] = useState<string | undefined>(undefined);
   const TASK_LOG_PAGE_SIZE = 20;
 
-  const fetchTaskLog = useCallback(async (p = 1, statusF?: string, sourceF?: string) => {
+  const fetchTaskLog = useCallback(async (p = 1, statusF?: string, sourceF?: string, platformF?: string) => {
     setTaskLogLoading(true);
     try {
       const res = await api.get('/pdd-runs/', {
         params: {
           status: statusF || undefined,
           source: sourceF || undefined,
+          platform: platformF || undefined,
           limit: TASK_LOG_PAGE_SIZE,
           offset: (p - 1) * TASK_LOG_PAGE_SIZE,
         },
@@ -213,7 +216,7 @@ const MultiPlatformCompare: React.FC = () => {
 
   const openTaskLog = () => {
     setTaskLogOpen(true);
-    fetchTaskLog(1, taskLogStatus, taskLogSource);
+    fetchTaskLog(1, taskLogStatus, taskLogSource, taskLogPlatform);
   };
 
   // 全自动跑批配置
@@ -981,7 +984,7 @@ const MultiPlatformCompare: React.FC = () => {
           <Button
             size="small"
             icon={<ReloadOutlined />}
-            onClick={() => fetchTaskLog(taskLogPage, taskLogStatus, taskLogSource)}
+            onClick={() => fetchTaskLog(taskLogPage, taskLogStatus, taskLogSource, taskLogPlatform)}
           >刷新</Button>
         }
       >
@@ -990,16 +993,25 @@ const MultiPlatformCompare: React.FC = () => {
             type="info"
             showIcon
             banner
-            message="目前记录关键词搜索任务（自动/批量/手动/紧急），时间为任务完成落库时刻。随机浏览 / 查快递 暂未单独记录，待后续完整版加入。"
+            message="记录关键词搜索任务（PDD + 闲鱼，含自动/批量/手动/紧急），时间为任务完成落库时刻。随机浏览 / 查快递 暂未单独记录，待后续完整版加入。"
           />
           <Space wrap size="small">
+            <Select
+              allowClear
+              size="small"
+              style={{ width: 120 }}
+              placeholder="按平台"
+              value={taskLogPlatform}
+              onChange={(v) => { setTaskLogPlatform(v); fetchTaskLog(1, taskLogStatus, taskLogSource, v); }}
+              options={[{ value: 'pdd', label: 'PDD' }, { value: 'xianyu', label: '闲鱼' }]}
+            />
             <Select
               allowClear
               size="small"
               style={{ width: 130 }}
               placeholder="按状态"
               value={taskLogStatus}
-              onChange={(v) => { setTaskLogStatus(v); fetchTaskLog(1, v, taskLogSource); }}
+              onChange={(v) => { setTaskLogStatus(v); fetchTaskLog(1, v, taskLogSource, taskLogPlatform); }}
               options={Object.entries(PDD_STATUS_META).map(([k, v]) => ({ value: k, label: v.label }))}
             />
             <Select
@@ -1008,7 +1020,7 @@ const MultiPlatformCompare: React.FC = () => {
               style={{ width: 130 }}
               placeholder="按来源"
               value={taskLogSource}
-              onChange={(v) => { setTaskLogSource(v); fetchTaskLog(1, taskLogStatus, v); }}
+              onChange={(v) => { setTaskLogSource(v); fetchTaskLog(1, taskLogStatus, v, taskLogPlatform); }}
               options={Object.entries(PDD_SOURCE_META).map(([k, v]) => ({ value: k, label: v.label }))}
             />
           </Space>
@@ -1023,10 +1035,16 @@ const MultiPlatformCompare: React.FC = () => {
               pageSize: TASK_LOG_PAGE_SIZE,
               size: 'small',
               showSizeChanger: false,
-              onChange: (p) => fetchTaskLog(p, taskLogStatus, taskLogSource),
+              onChange: (p) => fetchTaskLog(p, taskLogStatus, taskLogSource, taskLogPlatform),
             }}
             columns={[
               { title: '时间', dataIndex: 'created_at', width: 110, render: (v: string | null) => fmtTime(v) },
+              {
+                title: '平台', dataIndex: 'platform', width: 60,
+                render: (v: string) => (v === 'xianyu'
+                  ? <Tag color="orange">闲鱼</Tag>
+                  : <Tag color="red">PDD</Tag>),
+              },
               { title: '关键词', dataIndex: 'keyword_text', ellipsis: true },
               { title: '品类', dataIndex: 'category_name', width: 90, render: (v: string | null) => v || '—' },
               {

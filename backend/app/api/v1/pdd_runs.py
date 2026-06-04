@@ -356,7 +356,7 @@ async def batch_start(
             xy_ids: list[str] = []
             for kw in xy_batch:
                 try:
-                    instant_search.apply_async(args=(kw["text"], "xianyu"), countdown=xy_offset)
+                    instant_search.apply_async(args=(kw["text"], "xianyu", "batch"), countdown=xy_offset)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(f"batch xianyu dispatch failed (kw='{kw['text']}'): {exc}")
                     continue
@@ -469,17 +469,46 @@ async def requeue_keyword(
     return {"ok": True, "keyword": kw, "deleted": deleted}
 
 
-@router.get("/", summary="任务历史流水（分页）")
+@router.get("/", summary="任务历史流水（分页，PDD + 闲鱼合并）")
 async def read_runs(
     status: str | None = Query(None, description="过滤状态：ok/empty/partial/failed/risk_blocked/timeout"),
-    source: str | None = Query(None, description="过滤来源：lib/selection/manual/emergency"),
+    source: str | None = Query(None, description="过滤来源：lib/selection/batch/manual/emergency"),
     keyword: str | None = Query(None, description="关键词模糊匹配"),
+    platform: str | None = Query(None, description="平台：pdd / xianyu / 留空=全部合并"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return await list_runs(
-        db, status=status, source=source, keyword=keyword,
-        limit=limit, offset=offset,
-    )
+    """任务记录：PDD（pdd_search_runs）+ 闲鱼（xianyu_search_runs）按时间倒序合并。
+
+    platform=pdd / xianyu 只看单平台；留空=两边合并。合并分页用"各取前
+    offset+limit 条 → 归并排序 → 切片"，对前几页（页大小 20）足够精确。
+    """
+    from app.services.xianyu_search_run import count_xianyu_runs, list_xianyu_runs
+
+    plat = (platform or "").strip().lower()
+
+    if plat == "pdd":
+        return await list_runs(
+            db, status=status, source=source, keyword=keyword,
+            limit=limit, offset=offset,
+        )
+    if plat == "xianyu":
+        total = await count_xianyu_runs(db, status=status, source=source, keyword=keyword)
+        rows = await list_xianyu_runs(
+            db, status=status, source=source, keyword=keyword, limit=offset + limit,
+        )
+        return {"total": total, "items": rows[offset:offset + limit]}
+
+    # 合并：各取前 offset+limit 条，归并按 created_at 倒序，再切片
+    fetch_n = offset + limit
+    pdd = await list_runs(db, status=status, source=source, keyword=keyword, limit=fetch_n, offset=0)
+    xy_rows = await list_xianyu_runs(db, status=status, source=source, keyword=keyword, limit=fetch_n)
+    xy_total = await count_xianyu_runs(db, status=status, source=source, keyword=keyword)
+    merged = list(pdd["items"]) + list(xy_rows)
+    merged.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return {
+        "total": int(pdd["total"]) + int(xy_total),
+        "items": merged[offset:offset + limit],
+    }

@@ -84,6 +84,7 @@ async def persist_search_run(
 def _row_to_dict(r: PddSearchRun) -> dict[str, Any]:
     return {
         "id": str(r.id),
+        "platform": "pdd",
         "task_id": r.task_id,
         "source": r.source,
         "keyword_id": str(r.keyword_id) if r.keyword_id else None,
