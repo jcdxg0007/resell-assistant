@@ -22,6 +22,7 @@ interface PddAccount {
   account_name: string;
   bound_device_serial: string | null;
   is_active: boolean;
+  online: boolean;
 }
 
 interface KeywordRow {
@@ -136,6 +137,11 @@ const PddKeywords: React.FC = () => {
   }, [catFilter, q, safeFilter, page, message]);
 
   useEffect(() => { fetchCategories(); fetchAccounts(); }, [fetchCategories, fetchAccounts]);
+  // 每 20s 刷新采集号在线状态：手机掉线后自动从下拉消失，重连后自动复现。
+  useEffect(() => {
+    const t = setInterval(fetchAccounts, 20000);
+    return () => clearInterval(t);
+  }, [fetchAccounts]);
   useEffect(() => { fetchKeywords(1); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [catFilter, safeFilter]);
 
   // 行内快速切换（安全词 / 调度）
@@ -369,11 +375,19 @@ const PddKeywords: React.FC = () => {
                   loading={savingAssign}
                   value={selectedCat.account_ids}
                   onChange={(ids) => assignAccounts(selectedCat.id, ids)}
-                  options={accounts.map((a) => ({
-                    value: a.id,
-                    label: a.is_active ? acctLabel(a) : `${acctLabel(a)} · 停用`,
-                  }))}
-                  notFoundContent={accounts.length === 0 ? '没有 pdd_crawler 采集号' : undefined}
+                  options={accounts
+                    .filter((a) => a.online || selectedCat.account_ids.includes(a.id))
+                    .map((a) => ({
+                      value: a.id,
+                      label: !a.is_active
+                        ? `${acctLabel(a)} · 停用`
+                        : a.online
+                          ? acctLabel(a)
+                          : `${acctLabel(a)} · 离线`,
+                    }))}
+                  notFoundContent={
+                    accounts.length === 0 ? '没有 pdd_crawler 采集号' : '没有在线采集号（手机未连接）'
+                  }
                 />
                 {selectedCat.account_ids.length === 0 && (
                   <Alert

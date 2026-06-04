@@ -1020,3 +1020,13 @@ set BOUND_PDD_ACCOUNT=pdd_crawler_<尾号>
 - 去词库管理页把品类分配给新号（共用类勾多个、独占类单选）。未分配的品类不会被它采。
 
 **换号（旧号风控/封号）**：手机上换登新号 → 改 `phone_N.env.local.bat` 的 `BOUND_PDD_ACCOUNT` → DB 里把新号绑到该 serial（同第 3 步，旧号会被解绑/quarantine）→ 重启 `start_phone_N.bat`。
+
+### 15.7 「分配采集号」下拉的可见性规则（2026-06-04 增补）
+
+词库管理页给品类选号的下拉，只列**当下能真正干活的号**，避免误把品类分配给跑不起来的号：
+
+- **后端 `GET /pdd-keywords/accounts`**：只返回 `is_active=true` 的 `pdd_crawler` 号（停用/备用号——如未绑机的 `_2117`/`_4310`/`_5514`——不返回）。每条附 `online` 字段：该号是否在 worker 心跳里（`get_worker_status().accounts`，心跳 120s TTL，手机掉线/拔机后自动过期 → `online=false`）。
+- **前端下拉**：每 20s 拉一次 `/accounts` 刷新在线状态。可选项 = **在线号**；手机没连上的号自动从列表消失，重连后（心跳恢复）自动复现，无需手动刷新页面。
+- **已分配但当前离线的号**：仍作为 chip 显示（标注「· 离线」）以免裸 UUID，且不影响 DB 里已有绑定——离线只是不能再被新选，已配的路由关系不变（手机一回来就继续按原分配跑）。
+- **复现路径**：按 §15.6 给新手机绑号（DB 置 `is_active=true`）+ worker 上报心跳，该号即自动出现在下拉里。无需改代码。
+- 实现：`backend/app/api/v1/pdd_keywords.py::list_pdd_accounts`、`frontend/src/pages/selection/PddKeywords.tsx`（接口加 `online` + 20s 轮询 + 选项按 `online||已选` 过滤）。

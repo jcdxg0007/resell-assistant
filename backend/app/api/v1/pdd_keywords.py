@@ -29,6 +29,7 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.selection import Category, Keyword, PddCategoryAccount
 from app.models.system import Account, User
+from app.services.pdd_app_queue import get_worker_status
 
 router = APIRouter()
 
@@ -75,12 +76,21 @@ async def list_pdd_accounts(
         .order_by(Account.account_name)
     )
     rows = (await db.execute(stmt)).scalars().all()
+    # 在线判定：worker 心跳里上报的 account（120s TTL，掉线/拔机后自动过期）。
+    # 前端据此把离线号从「分配采集号」下拉里隐藏，重连后自动复现。
+    online_accounts: set[str] = set()
+    try:
+        status_info = await get_worker_status()
+        online_accounts = {a for a in (status_info.get("accounts") or []) if a}
+    except Exception:  # noqa: BLE001 — Redis 异常时退化为「全部视为在线」，不挡分配
+        online_accounts = {a.account_name for a in rows}
     return [
         {
             "id": str(a.id),
             "account_name": a.account_name,
             "bound_device_serial": a.bound_device_serial,
             "is_active": a.is_active,
+            "online": a.account_name in online_accounts,
         }
         for a in rows
     ]
