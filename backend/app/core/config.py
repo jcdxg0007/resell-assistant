@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     #
     # Format: 'qgshort:KEY:PWD' (青果短效), resolved by proxy_service.
     # Empty string disables proxying (dangerous in production).
-    SELECTION_CRAWLER_PROXY_URL: str = "qgshort:P1E3U5SR:D32321B9D336"
+    SELECTION_CRAWLER_PROXY_URL: str = "qgshort:S5NVQC4A:3AA4CD8F25C2"
 
     # Hard cap per platform for crawler searches within a rolling hour.
     # Redis-backed; shared across Celery workers. Tune down if a platform
