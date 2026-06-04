@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Typography, Table, Card, Input, InputNumber, Button, Space, Tag, Row, Col,
-  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Switch, Segmented, Image,
+  App, Alert, Badge, Drawer, Tooltip, List, Popconfirm, Switch, Segmented, Image, Select,
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
-  PlayCircleOutlined, PauseCircleOutlined,
+  PlayCircleOutlined, PauseCircleOutlined, ProfileOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -102,6 +102,29 @@ const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
   risk_blocked: { color: 'volcano', label: '风控' },
   timeout: { color: 'orange', label: '超时' },
 };
+// 任务来源中文映射（pdd_search_runs.source）
+const PDD_SOURCE_META: Record<string, { color: string; label: string }> = {
+  lib: { color: 'blue', label: '自动轮播' },
+  batch: { color: 'geekblue', label: '批量' },
+  selection: { color: 'purple', label: '选品' },
+  manual: { color: 'cyan', label: '手动' },
+  emergency: { color: 'volcano', label: '紧急' },
+};
+// 任务记录行（来自 GET /pdd-runs/）
+interface TaskRun {
+  id: string;
+  task_id: string | null;
+  source: string;
+  keyword_text: string;
+  category_name: string | null;
+  mode: string | null;
+  status: string;
+  items_count: number;
+  account_name: string | null;
+  device_serial: string | null;
+  elapsed_ms: number | null;
+  created_at: string | null;
+}
 const fmtTime = (iso: string | null) => {
   if (!iso) return '—';
   return new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -157,6 +180,41 @@ const MultiPlatformCompare: React.FC = () => {
 
   // 采集节奏控制窗口
   const [rhythmOpen, setRhythmOpen] = useState(false);
+
+  // 任务记录抽屉（派发过的搜索任务流水）
+  const [taskLogOpen, setTaskLogOpen] = useState(false);
+  const [taskLogRows, setTaskLogRows] = useState<TaskRun[]>([]);
+  const [taskLogTotal, setTaskLogTotal] = useState(0);
+  const [taskLogLoading, setTaskLogLoading] = useState(false);
+  const [taskLogPage, setTaskLogPage] = useState(1);
+  const [taskLogStatus, setTaskLogStatus] = useState<string | undefined>(undefined);
+  const [taskLogSource, setTaskLogSource] = useState<string | undefined>(undefined);
+  const TASK_LOG_PAGE_SIZE = 20;
+
+  const fetchTaskLog = useCallback(async (p = 1, statusF?: string, sourceF?: string) => {
+    setTaskLogLoading(true);
+    try {
+      const res = await api.get('/pdd-runs/', {
+        params: {
+          status: statusF || undefined,
+          source: sourceF || undefined,
+          limit: TASK_LOG_PAGE_SIZE,
+          offset: (p - 1) * TASK_LOG_PAGE_SIZE,
+        },
+      });
+      setTaskLogRows(res.data.items || []);
+      setTaskLogTotal(res.data.total || 0);
+      setTaskLogPage(p);
+    } catch {
+      message.error('加载任务记录失败');
+    }
+    setTaskLogLoading(false);
+  }, [message]);
+
+  const openTaskLog = () => {
+    setTaskLogOpen(true);
+    fetchTaskLog(1, taskLogStatus, taskLogSource);
+  };
 
   // 全自动跑批配置
   const [auto, setAuto] = useState<AutoConfig | null>(null);
@@ -519,6 +577,7 @@ const MultiPlatformCompare: React.FC = () => {
                 ? `PDD Worker 在线 ${worker.worker_count ?? 1}台/${worker.device_count ?? worker.devices?.length ?? 0}机${worker.devices?.length ? `（${worker.devices.join(', ')}）` : ''}`
                 : 'PDD Worker 离线'}
             />
+            <Button icon={<ProfileOutlined />} onClick={openTaskLog}>任务记录</Button>
             <Button icon={<ControlOutlined />} onClick={() => setRhythmOpen(true)}>采集节奏</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshAll}>刷新</Button>
           </Space>
@@ -909,6 +968,94 @@ const MultiPlatformCompare: React.FC = () => {
       {/* 采集节奏控制窗口 */}
       <Drawer title="PDD 采集节奏控制" width={560} open={rhythmOpen} onClose={() => setRhythmOpen(false)} destroyOnHidden>
         <PddRhythmConfig embedded />
+      </Drawer>
+
+      {/* 任务记录：派发过的搜索任务流水 */}
+      <Drawer
+        title="任务记录"
+        width={820}
+        open={taskLogOpen}
+        onClose={() => setTaskLogOpen(false)}
+        destroyOnHidden
+        extra={
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            onClick={() => fetchTaskLog(taskLogPage, taskLogStatus, taskLogSource)}
+          >刷新</Button>
+        }
+      >
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            banner
+            message="目前记录关键词搜索任务（自动/批量/手动/紧急），时间为任务完成落库时刻。随机浏览 / 查快递 暂未单独记录，待后续完整版加入。"
+          />
+          <Space wrap size="small">
+            <Select
+              allowClear
+              size="small"
+              style={{ width: 130 }}
+              placeholder="按状态"
+              value={taskLogStatus}
+              onChange={(v) => { setTaskLogStatus(v); fetchTaskLog(1, v, taskLogSource); }}
+              options={Object.entries(PDD_STATUS_META).map(([k, v]) => ({ value: k, label: v.label }))}
+            />
+            <Select
+              allowClear
+              size="small"
+              style={{ width: 130 }}
+              placeholder="按来源"
+              value={taskLogSource}
+              onChange={(v) => { setTaskLogSource(v); fetchTaskLog(1, taskLogStatus, v); }}
+              options={Object.entries(PDD_SOURCE_META).map(([k, v]) => ({ value: k, label: v.label }))}
+            />
+          </Space>
+          <Table<TaskRun>
+            size="small"
+            rowKey="id"
+            loading={taskLogLoading}
+            dataSource={taskLogRows}
+            pagination={{
+              current: taskLogPage,
+              total: taskLogTotal,
+              pageSize: TASK_LOG_PAGE_SIZE,
+              size: 'small',
+              showSizeChanger: false,
+              onChange: (p) => fetchTaskLog(p, taskLogStatus, taskLogSource),
+            }}
+            columns={[
+              { title: '时间', dataIndex: 'created_at', width: 110, render: (v: string | null) => fmtTime(v) },
+              { title: '关键词', dataIndex: 'keyword_text', ellipsis: true },
+              { title: '品类', dataIndex: 'category_name', width: 90, render: (v: string | null) => v || '—' },
+              {
+                title: '采集号', dataIndex: 'account_name', width: 130, ellipsis: true,
+                render: (v: string | null) => v || '—',
+              },
+              {
+                title: '来源', dataIndex: 'source', width: 80,
+                render: (v: string) => {
+                  const m = PDD_SOURCE_META[v] || { color: 'default', label: v };
+                  return <Tag color={m.color}>{m.label}</Tag>;
+                },
+              },
+              { title: '模式', dataIndex: 'mode', width: 60, render: (v: string | null) => (v === 'deep' ? '深度' : v === 'fast' ? '快速' : (v || '—')) },
+              {
+                title: '状态', dataIndex: 'status', width: 80,
+                render: (v: string) => {
+                  const m = PDD_STATUS_META[v] || { color: 'default', label: v };
+                  return <Tag color={m.color}>{m.label}</Tag>;
+                },
+              },
+              { title: '商品', dataIndex: 'items_count', width: 56, align: 'right' as const },
+              {
+                title: '耗时', dataIndex: 'elapsed_ms', width: 70, align: 'right' as const,
+                render: (v: number | null) => (v == null ? '—' : `${(v / 1000).toFixed(1)}s`),
+              },
+            ]}
+          />
+        </Space>
       </Drawer>
     </Space>
   );
