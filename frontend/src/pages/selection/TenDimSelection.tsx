@@ -179,7 +179,7 @@ const SideTable: React.FC<{
   platform: 'xianyu' | 'pdd';
   pinnedSet: Set<string>;
   pinBusy: string | null;
-  onTogglePin: (productId: string, pinned: boolean) => void;
+  onTogglePin: (item: SideItem, pinned: boolean) => void;
 }> = ({ side, platform, pinnedSet, pinBusy, onTogglePin }) => {
   if (!side || !side.items?.length) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`暂无${platform === 'xianyu' ? '闲鱼' : 'PDD'}样本`} />;
@@ -244,18 +244,22 @@ const SideTable: React.FC<{
     {
       title: '收藏', width: 56, align: 'center',
       render: (_: unknown, r: SideItem) => {
-        // 只有闲鱼商品有真实 product_id 可 Pin；PDD 端是快照无商品行
-        if (platform !== 'xianyu' || !r.product_id) {
-          return <Tooltip title="PDD 端为快照，暂不支持收藏"><PushpinOutlined style={{ color: '#d9d9d9' }} /></Tooltip>;
+        // 闲鱼=真实商品行(product_id 为 uuid)；PDD=快照(product_id 为 pdd:<指纹>)，
+        // 收藏时把快照冻结存库，两者都可 Pin。
+        if (!r.product_id) {
+          return <Tooltip title="缺少商品标识，无法收藏"><PushpinOutlined style={{ color: '#d9d9d9' }} /></Tooltip>;
         }
         const pinned = pinnedSet.has(r.product_id);
+        const tip = platform === 'xianyu'
+          ? (pinned ? '取消收藏' : '收藏(Pin，永不进每日清库)')
+          : (pinned ? '取消收藏' : '收藏(冻结当前 PDD 快照，跨日保留)');
         return (
-          <Tooltip title={pinned ? '取消收藏' : '收藏(Pin，永不进每日清库)'}>
+          <Tooltip title={tip}>
             <Button
               type="text" size="small"
               loading={pinBusy === r.product_id}
               icon={pinned ? <PushpinFilled style={{ color: '#fa8c16' }} /> : <PushpinOutlined />}
-              onClick={() => onTogglePin(r.product_id as string, pinned)}
+              onClick={() => onTogglePin(r, pinned)}
             />
           </Tooltip>
         );
@@ -320,17 +324,32 @@ const TenDimSelection: React.FC = () => {
     } catch { /* 静默 */ } finally { setPinnedLoading(false); }
   }, []);
 
-  const togglePin = useCallback(async (productId: string, pinned: boolean) => {
+  const togglePin = useCallback(async (item: SideItem, pinned: boolean) => {
+    const productId = item.product_id;
+    if (!productId) return;
     setPinBusy(productId);
     try {
-      if (pinned) await api.delete(`/selection/products/${productId}/pin`);
-      else await api.post(`/selection/products/${productId}/pin`);
+      if (productId.startsWith('pdd:')) {
+        // PDD 快照：收藏=冻结存库，取消=按指纹删
+        if (pinned) await api.delete(`/selection/pdd-pin/${encodeURIComponent(productId)}`);
+        else await api.post('/selection/pdd-pin', {
+          keyword: selected,
+          title: item.title,
+          price: item.price,
+          sales: item.sales,
+          badges: item.badges,
+          image_url: item.image_url,
+        });
+      } else {
+        if (pinned) await api.delete(`/selection/products/${productId}/pin`);
+        else await api.post(`/selection/products/${productId}/pin`);
+      }
       message.success(pinned ? '已取消收藏' : '已收藏');
       await loadPinned();
     } catch {
       message.error('操作失败');
     } finally { setPinBusy(null); }
-  }, [loadPinned, message]);
+  }, [selected, loadPinned, message]);
 
   const deleteSelectedPinned = useCallback(async () => {
     if (pinSelected.length === 0) return;
@@ -638,7 +657,7 @@ const TenDimSelection: React.FC = () => {
               rowKey="product_id"
               loading={pinnedLoading}
               dataSource={pinnedRows}
-              locale={{ emptyText: '还没有收藏。在上方闲鱼端列表点「收藏」按钮即可保留商品，每日清库不会清掉它们。' }}
+              locale={{ emptyText: '还没有收藏。在上方闲鱼/PDD 列表点「收藏」按钮即可保留商品(PDD 为定格快照)，每日清库不会清掉它们。' }}
               pagination={{ pageSize: 8, size: 'small', showSizeChanger: false, hideOnSinglePage: true }}
               rowSelection={{
                 selectedRowKeys: pinSelected,
@@ -652,9 +671,10 @@ const TenDimSelection: React.FC = () => {
                       {r.image_url && (
                         <Image src={r.image_url} alt="" width={32} height={32} style={{ objectFit: 'cover', borderRadius: 4 }} preview={{ mask: false }} />
                       )}
+                      <Tag color={r.source_platform === 'pdd' ? 'red' : 'cyan'}>{r.source_platform === 'pdd' ? 'PDD' : '闲鱼'}</Tag>
                       {r.source_url
-                        ? <a href={r.source_url} target="_blank" rel="noreferrer" style={{ maxWidth: 240, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t || '—'}</a>
-                        : <Text ellipsis style={{ maxWidth: 240 }}>{t || '—'}</Text>}
+                        ? <a href={r.source_url} target="_blank" rel="noreferrer" style={{ maxWidth: 210, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t || '—'}</a>
+                        : <Text ellipsis style={{ maxWidth: 210 }}>{t || '—'}</Text>}
                     </Space>
                   ),
                 },

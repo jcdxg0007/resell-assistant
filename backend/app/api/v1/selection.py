@@ -11,6 +11,7 @@ from app.models.product import Product, ProductScore, Platform
 from app.models.xianyu import XianyuMarketData
 from app.models.selection import SelectionAnalysis
 from app.models.pdd_run import PddSearchRun
+from app.models.pdd_pin import PddPin
 from app.models.system import User
 from app.schemas.product import ScoreRequest
 from app.services.selection.scoring import (
@@ -19,6 +20,7 @@ from app.services.selection.scoring import (
 )
 from app.services.selection.pricing import smart_pricing
 from app.services.selection import ten_dim_scoring
+from app.services.selection.ten_dim_scoring import pdd_fingerprint
 from app.services.pdd_search_run import keyword_items, _cn_day_start
 
 router = APIRouter()
@@ -138,7 +140,84 @@ async def unpin_product(
     return {"ok": True, "product_id": product_id}
 
 
-@router.get("/pinned", summary="已 Pin 收藏的商品列表")
+def _pdd_pin_to_dict(p: PddPin) -> dict:
+    """PDD 快照收藏统一成和闲鱼 Pin 一样的结构（前端同一张表渲染）。
+
+    PDD 无跳转链接/卖家：source_url 给空串、seller_name 给 None；item_wants 借位
+    放 sales（前端「想要」列对 PDD 即销量）。product_id 用 pdd:<fingerprint>，
+    与 score_pdd_side 生成的一致，收藏开关能对上。
+    """
+    return {
+        "product_id": f"pdd:{p.fingerprint}",
+        "title": p.title,
+        "price": p.price,
+        "source_platform": "pdd",
+        "category": p.keyword,
+        "item_wants": p.sales or 0,
+        "badges": p.badges or [],
+        "seller_name": None,
+        "source_url": "",
+        "image_url": p.image_url,
+        "pinned_at": p.pinned_at.isoformat() if p.pinned_at else None,
+    }
+
+
+class PddPinBody(BaseModel):
+    keyword: str | None = None
+    title: str
+    price: float | None = None
+    sales: int | None = None
+    badges: list[str] | None = None
+    image_url: str | None = None
+
+
+@router.post("/pdd-pin", summary="收藏一条 PDD 采集快照（冻结保存，跨日保留）")
+async def pin_pdd_snapshot(
+    body: PddPinBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fp = pdd_fingerprint(body.keyword, body.title)
+    now = datetime.now(timezone.utc)
+    existing = (await db.execute(
+        select(PddPin).where(PddPin.fingerprint == fp)
+    )).scalar_one_or_none()
+    if existing:
+        existing.keyword = body.keyword
+        existing.title = body.title
+        existing.price = body.price
+        existing.sales = body.sales
+        existing.badges = body.badges
+        existing.image_url = body.image_url
+        existing.pinned_at = now
+    else:
+        db.add(PddPin(
+            fingerprint=fp,
+            keyword=body.keyword,
+            title=body.title,
+            price=body.price,
+            sales=body.sales,
+            badges=body.badges,
+            image_url=body.image_url,
+            pinned_at=now,
+        ))
+    await db.commit()
+    return {"ok": True, "product_id": f"pdd:{fp}", "pinned_at": now.isoformat()}
+
+
+@router.delete("/pdd-pin/{fingerprint}", summary="取消 PDD 快照收藏")
+async def unpin_pdd_snapshot(
+    fingerprint: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fp = fingerprint[4:] if fingerprint.startswith("pdd:") else fingerprint
+    await db.execute(delete(PddPin).where(PddPin.fingerprint == fp))
+    await db.commit()
+    return {"ok": True, "product_id": f"pdd:{fp}"}
+
+
+@router.get("/pinned", summary="已 Pin 收藏的商品列表（闲鱼真实商品 + PDD 快照）")
 async def list_pinned(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -148,7 +227,13 @@ async def list_pinned(
         .where(Product.pinned_at.isnot(None))
         .order_by(Product.pinned_at.desc())
     )).scalars().all()
-    return {"total": len(rows), "items": [_pinned_to_dict(p) for p in rows]}
+    pdd_rows = (await db.execute(
+        select(PddPin).order_by(PddPin.pinned_at.desc())
+    )).scalars().all()
+    items = [_pinned_to_dict(p) for p in rows] + [_pdd_pin_to_dict(p) for p in pdd_rows]
+    # 两端合并后按收藏时间倒序统一排
+    items.sort(key=lambda x: x.get("pinned_at") or "", reverse=True)
+    return {"total": len(items), "items": items}
 
 
 class PinnedDeleteBody(BaseModel):
@@ -163,9 +248,18 @@ async def delete_pinned(
 ):
     if not body.product_ids:
         return {"ok": True, "deleted": 0}
-    res = await db.execute(delete(Product).where(Product.id.in_(body.product_ids)))
+    # pdd:<fp> 走 pdd_pins，其余是闲鱼 Product.id
+    pdd_fps = [pid[4:] for pid in body.product_ids if pid.startswith("pdd:")]
+    xy_ids = [pid for pid in body.product_ids if not pid.startswith("pdd:")]
+    deleted = 0
+    if xy_ids:
+        res = await db.execute(delete(Product).where(Product.id.in_(xy_ids)))
+        deleted += res.rowcount or 0
+    if pdd_fps:
+        res = await db.execute(delete(PddPin).where(PddPin.fingerprint.in_(pdd_fps)))
+        deleted += res.rowcount or 0
     await db.commit()
-    return {"ok": True, "deleted": res.rowcount or 0}
+    return {"ok": True, "deleted": deleted}
 
 
 @router.get("/xianyu/raw", summary="闲鱼采集原始挂牌（不依赖打分，多平台比价页用）")

@@ -16,6 +16,7 @@ from app.models.selection import (
 from app.models.pdd_run import PddSearchRun
 from app.models.xianyu_run import XianyuSearchRun
 from app.models.logistics_run import LogisticsRun
+from app.models.pdd_pin import PddPin
 
 __all__ = [
     "Product", "PriceSnapshot", "ProductMatch", "ProductScore", "ProductImage",
@@ -32,4 +33,5 @@ __all__ = [
     "PddSearchRun",
     "XianyuSearchRun",
     "LogisticsRun",
+    "PddPin",
 ]

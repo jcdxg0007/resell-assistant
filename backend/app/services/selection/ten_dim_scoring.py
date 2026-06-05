@@ -14,9 +14,20 @@
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
 from typing import Any
+
+
+def pdd_fingerprint(keyword: str | None, title: str | None) -> str:
+    """PDD 快照的稳定指纹：sha1(keyword|title)[:32]。
+
+    PDD 端商品无稳定 id，用「关键词+标题」做内容指纹，给前端当 product_id
+    （pdd:<fp>）做收藏开关，也给后端 pdd_pins 去重/匹配。
+    """
+    raw = f"{(keyword or '').strip()}|{(title or '').strip()}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:32]
 
 from app.services.selection.data_cleaning import (
     PriceStats, clean_keyword_sample, tokenize_keyword, calculate_relevance,
@@ -382,6 +393,7 @@ def score_pdd_side(keyword: str, items: list[dict[str, Any]]) -> dict[str, Any]:
 
         total = round(sum(d["score"] for d in dims), 1)
         ranked.append({
+            "product_id": f"pdd:{pdd_fingerprint(keyword, cp.title)}",
             "title": cp.title,
             "price": cp.price,
             "sales": sales,
