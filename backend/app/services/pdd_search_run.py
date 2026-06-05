@@ -190,13 +190,17 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
             "category_name": r.category_name,
         }
 
-    # ── 今日 闲鱼 采集（按 category=关键词聚合 today 入库商品）──
+    # ── 今日 闲鱼 采集（按 category=关键词聚合 today 采到的商品）──
+    # 口径对齐「采集结果」列表（/selection/xianyu/raw）：按 last_crawled_at(今日采到)
+    # + is_active，而非 created_at(今日新建)。否则往日已入库、今日又爬到的商品会被
+    # 漏算，导致 badge「N件」< 结果列表「共 M」对不上（见 2026-06-05 反馈）。
     from app.models.product import Product
     xy_rows = (await db.execute(
-        select(Product.category, func.count(), func.max(Product.created_at))
+        select(Product.category, func.count(), func.max(Product.last_crawled_at))
         .where(Product.source_platform == "xianyu")
         .where(Product.category.isnot(None))
-        .where(Product.created_at >= day_start)
+        .where(Product.is_active.is_(True))
+        .where(Product.last_crawled_at >= day_start)
         .group_by(Product.category)
     )).all()
     xianyu_map: dict[str, dict[str, Any]] = {}  # text -> {count, last_at, ts}
