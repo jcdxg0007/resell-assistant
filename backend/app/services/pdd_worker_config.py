@@ -60,6 +60,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "xianyu_auto_interval_min_minutes": 40,
     "xianyu_auto_interval_max_minutes": 120,
     "xianyu_auto_batch_count": 3,
+    # ── 数据清理（backend celery beat 读）──
+    "pdd_runs_retention_days": 30,  # PDD 采集流水保留天数，每日 03:10 删更早的
 }
 
 # 每个参数的类型 / 范围 / 中文标签 / 分组 / 说明。
@@ -240,6 +242,13 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "label": "闲鱼每波派词数", "group": "闲鱼自动",
         "help": "每次闲鱼自动派几个词。闲鱼有自己的合规闸(≥60s/40h)，会自动错峰。",
     },
+    "pdd_runs_retention_days": {
+        "type": "int", "min": 1, "max": 365,
+        "label": "PDD流水保留天数", "group": "数据清理",
+        "help": "PDD 采集流水(pdd_search_runs，也是「任务记录」数据源)保留天数。"
+                "每日 03:10 物理删掉更早的流水，保留最近 N 天任务历史又给表封顶。"
+                "收藏的 PDD 快照在独立表，不受影响。",
+    },
 }
 
 
@@ -340,5 +349,5 @@ def specs_for_frontend() -> dict[str, Any]:
     return {
         "params": PARAM_SPECS,
         "defaults": DEFAULT_RUNTIME_CONFIG,
-        "groups": ["节奏", "阵发", "配额", "采集量", "拟人行为", "自动跑批", "闲鱼自动"],
+        "groups": ["节奏", "阵发", "配额", "采集量", "拟人行为", "自动跑批", "闲鱼自动", "数据清理"],
     }

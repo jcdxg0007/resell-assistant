@@ -172,22 +172,32 @@ async def _daily_purge_collected():
         }
 
 
-# PDD 流水保留天数：pdd_search_runs 同时是「任务记录」的数据源，物理删它会连任务
-# 历史一起删，所以按「保留窗口」删而非按逻辑日删——保住最近 N 天任务历史，又给表
-# 封顶。收藏的 PDD 快照在独立的 pdd_pins 表，不受影响。改这个数即可调保留时长。
+# PDD 流水保留天数的回落默认值。实际值走运行时配置 pdd_runs_retention_days
+# （前端「数据清理」可改 → SystemConfig），读不到时才用这个常量。
+# pdd_search_runs 同时是「任务记录」的数据源，物理删它会连任务历史一起删，所以按
+# 「保留窗口」删而非按逻辑日删——保住最近 N 天任务历史，又给表封顶。收藏的 PDD
+# 快照在独立的 pdd_pins 表，不受影响。
 PDD_RUNS_RETENTION_DAYS = 30
 
 
 @celery_app.task(name="app.tasks.compliance.purge_pdd_search_runs")
 def purge_pdd_search_runs():
-    """每日物理清理过期 PDD 采集流水（保留最近 PDD_RUNS_RETENTION_DAYS 天）。"""
+    """每日物理清理过期 PDD 采集流水（保留天数由运行时配置 pdd_runs_retention_days 决定）。"""
     logger.info("compliance: starting purge_pdd_search_runs")
     return run_async(_purge_pdd_search_runs())
 
 
 async def _purge_pdd_search_runs():
-    cutoff = datetime.now(timezone.utc) - timedelta(days=PDD_RUNS_RETENTION_DAYS)
     async with AsyncSessionLocal() as db:
+        # 保留天数走运行时配置（前端可改），读不到/异常则回落到常量默认。
+        try:
+            from app.services.pdd_worker_config import get_runtime_config
+            cfg = await get_runtime_config(db)
+            retention = int(cfg.get("pdd_runs_retention_days") or PDD_RUNS_RETENTION_DAYS)
+        except Exception:
+            retention = PDD_RUNS_RETENTION_DAYS
+        retention = max(1, retention)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention)
         result = await db.execute(
             text("DELETE FROM pdd_search_runs WHERE created_at < :cutoff"),
             {"cutoff": cutoff},
@@ -196,11 +206,11 @@ async def _purge_pdd_search_runs():
         deleted = result.rowcount or 0
         logger.info(
             f"compliance: purge_pdd_search_runs deleted {deleted} rows "
-            f"older than {cutoff.isoformat()} (retention={PDD_RUNS_RETENTION_DAYS}d)"
+            f"older than {cutoff.isoformat()} (retention={retention}d)"
         )
         return {
             "purged_at": datetime.now(timezone.utc).isoformat(),
             "cutoff": cutoff.isoformat(),
-            "retention_days": PDD_RUNS_RETENTION_DAYS,
+            "retention_days": retention,
             "deleted": deleted,
         }

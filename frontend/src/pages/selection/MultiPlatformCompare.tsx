@@ -95,6 +95,7 @@ interface AutoConfig {
   logistics_browse_enabled: boolean;
   logistics_browse_prob: number;
   logistics_quiet_prob: number;
+  pdd_runs_retention_days: number;
 }
 
 const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
@@ -258,6 +259,7 @@ const MultiPlatformCompare: React.FC = () => {
         logistics_browse_enabled: !!c.logistics_browse_enabled,
         logistics_browse_prob: c.logistics_browse_prob ?? 0.25,
         logistics_quiet_prob: c.logistics_quiet_prob ?? 0.35,
+        pdd_runs_retention_days: c.pdd_runs_retention_days ?? 30,
       });
     } catch { /* 静默 */ }
   }, []);
@@ -873,6 +875,18 @@ const MultiPlatformCompare: React.FC = () => {
                       />
                     </>
                   )}
+                </Space>
+                <div style={{ borderTop: '1px dashed #f0f0f0', margin: '2px 0' }} />
+                <Space size={8} wrap>
+                  <Tooltip title="PDD 采集流水(也是「任务记录」数据源)保留天数。每日 03:10 物理删掉更早的流水，保留最近 N 天任务历史又给表封顶。收藏的 PDD 快照在独立表，不受影响。">
+                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>流水保留</Text>
+                  </Tooltip>
+                  <InputNumber
+                    size="small" min={1} max={365} value={auto.pdd_runs_retention_days} style={{ width: 80 }}
+                    addonAfter="天"
+                    onChange={(v) => setAuto((p) => p ? { ...p, pdd_runs_retention_days: v ?? 30 } : p)}
+                    onBlur={() => saveAuto({ pdd_runs_retention_days: auto.pdd_runs_retention_days })}
+                  />
                 </Space>
               </Space>
             ) : <Text type="secondary">加载中…</Text>}
