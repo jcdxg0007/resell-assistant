@@ -40,6 +40,9 @@ interface SideItem {
   item_wants?: number;
   sales?: number;
   badges?: string[];
+  source_url?: string | null;
+  seller_name?: string | null;
+  published_at?: string | null;
   relevance: number;
   risk_tags: string[];
   total_score: number;
@@ -137,6 +140,18 @@ const fmtTime = (iso: string | null | undefined) => {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 };
 
+// 发布时间：今天/昨天/N天前，更早显示日期（与多平台比价页一致）
+const fmtPublished = (iso?: string | null): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 30) return `${days}天前`;
+  return d.toLocaleDateString('zh-CN');
+};
+
 // ── 维度条 ─────────────────────────────────────────────────────
 const DimensionBars: React.FC<{ dims: Dimension[] }> = ({ dims }) => (
   <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -185,7 +200,9 @@ const SideTable: React.FC<{
               preview={{ mask: false }}
             />
           )}
-          <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>
+          {r.source_url
+            ? <a href={r.source_url} target="_blank" rel="noreferrer" style={{ maxWidth: 220, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>{t || '—'}</a>
+            : <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>}
           {(r.risk_tags || []).includes('suspicious_low') && <Tag color="volcano">极低价</Tag>}
         </Space>
       ),
@@ -195,6 +212,26 @@ const SideTable: React.FC<{
       title: heatTitle, width: 70,
       render: (_: unknown, r: SideItem) => <Text type="secondary">{platform === 'xianyu' ? (r.item_wants ?? 0) : (r.sales ?? 0)}</Text>,
     },
+    ...(platform === 'xianyu'
+      ? [
+          {
+            title: '卖家', dataIndex: 'seller_name', width: 96, ellipsis: true,
+            render: (v?: string | null) => v ? <Text type="secondary" ellipsis>{v}</Text> : <Text type="secondary">—</Text>,
+          },
+          {
+            title: '发布', dataIndex: 'published_at', width: 76,
+            sorter: (a: SideItem, b: SideItem) => (new Date(a.published_at || 0).getTime()) - (new Date(b.published_at || 0).getTime()),
+            render: (v?: string | null) => <Text type="secondary">{fmtPublished(v)}</Text>,
+          },
+        ]
+      : [
+          {
+            title: '标签', dataIndex: 'badges', width: 180,
+            render: (b?: string[]) => (b && b.length)
+              ? <Space size={4} wrap>{b.slice(0, 3).map((x, i) => <Tag key={i}>{x}</Tag>)}</Space>
+              : <Text type="secondary">—</Text>,
+          },
+        ]) as ColumnsType<SideItem>,
     {
       title: '得分', dataIndex: 'total_score', width: 78, defaultSortOrder: 'descend',
       sorter: (a, b) => a.total_score - b.total_score,
