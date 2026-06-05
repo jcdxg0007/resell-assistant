@@ -92,6 +92,8 @@ interface AutoConfig {
   xianyu_auto_interval_min_minutes: number;
   xianyu_auto_interval_max_minutes: number;
   xianyu_auto_batch_count: number;
+  logistics_browse_enabled: boolean;
+  logistics_browse_prob: number;
 }
 
 const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
@@ -240,6 +242,8 @@ const MultiPlatformCompare: React.FC = () => {
         xianyu_auto_interval_min_minutes: c.xianyu_auto_interval_min_minutes ?? 40,
         xianyu_auto_interval_max_minutes: c.xianyu_auto_interval_max_minutes ?? 120,
         xianyu_auto_batch_count: c.xianyu_auto_batch_count ?? 3,
+        logistics_browse_enabled: !!c.logistics_browse_enabled,
+        logistics_browse_prob: c.logistics_browse_prob ?? 0.25,
       });
     } catch { /* 静默 */ }
   }, []);
@@ -809,6 +813,26 @@ const MultiPlatformCompare: React.FC = () => {
                     onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
                     onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
                   />
+                </Space>
+                <div style={{ borderTop: '1px dashed #f0f0f0', margin: '2px 0' }} />
+                <Space size={8}>
+                  <Tooltip title="开启后每个 burst 结束按概率去「我的订单→查看物流」逛一下；每日首次会确认该号有真实订单，没有则当日冷却。仅对有真实购买记录的号有意义。">
+                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>查物流</Text>
+                  </Tooltip>
+                  <Switch
+                    size="small" checked={auto.logistics_browse_enabled} loading={savingAuto}
+                    onChange={(v) => saveAuto({ logistics_browse_enabled: v })}
+                  />
+                  {auto.logistics_browse_enabled && (
+                    <>
+                      <Text type="secondary" style={{ fontSize: 12 }}>概率</Text>
+                      <InputNumber
+                        size="small" min={0} max={1} step={0.05} value={auto.logistics_browse_prob} style={{ width: 72 }}
+                        onChange={(v) => setAuto((p) => p ? { ...p, logistics_browse_prob: v ?? 0.25 } : p)}
+                        onBlur={() => saveAuto({ logistics_browse_prob: auto.logistics_browse_prob })}
+                      />
+                    </>
+                  )}
                 </Space>
               </Space>
             ) : <Text type="secondary">加载中…</Text>}

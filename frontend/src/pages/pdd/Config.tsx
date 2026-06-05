@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Card, Form, InputNumber, Slider, Button, Space, Typography,
-  Divider, Row, Col, Alert, Tooltip, App,
+  Divider, Row, Col, Alert, Tooltip, App, Switch,
 } from 'antd';
 import { SaveOutlined, ReloadOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import api from '../../services/api';
@@ -9,9 +9,9 @@ import api from '../../services/api';
 const { Title, Paragraph } = Typography;
 
 interface ParamSpec {
-  type: 'int' | 'float';
-  min: number;
-  max: number;
+  type: 'int' | 'float' | 'bool';
+  min?: number;
+  max?: number;
   step?: number;
   label: string;
   group: string;
@@ -21,7 +21,7 @@ interface ParamSpec {
 }
 interface Specs {
   params: Record<string, ParamSpec>;
-  defaults: Record<string, number>;
+  defaults: Record<string, number | boolean>;
   groups: string[];
 }
 
@@ -41,7 +41,7 @@ const PddConfig: React.FC<Props> = ({ embedded = false }) => {
   const { message } = App.useApp();
   const [form] = Form.useForm();
   const [specs, setSpecs] = useState<Specs | null>(null);
-  const [baseline, setBaseline] = useState<Record<string, number>>({});
+  const [baseline, setBaseline] = useState<Record<string, number | boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -63,8 +63,8 @@ const PddConfig: React.FC<Props> = ({ embedded = false }) => {
 
   useEffect(() => { load(); }, [load]);
 
-  const onFinish = async (values: Record<string, number>) => {
-    const patch: Record<string, number> = {};
+  const onFinish = async (values: Record<string, number | boolean>) => {
+    const patch: Record<string, number | boolean> = {};
     Object.keys(values).forEach((k) => {
       if (values[k] !== baseline[k]) patch[k] = values[k];
     });
@@ -93,13 +93,16 @@ const PddConfig: React.FC<Props> = ({ embedded = false }) => {
   };
 
   const renderControl = (key: string, spec: ParamSpec) => {
+    if (spec.type === 'bool') {
+      return <Switch checkedChildren="开" unCheckedChildren="关" />;
+    }
     if (key === 'humanize_pace') {
       return (
         <Slider
           min={spec.min}
           max={spec.max}
           step={spec.step || 0.05}
-          marks={{ [spec.min]: `${spec.min}`, 0.7: '0.7', [spec.max]: `${spec.max}` }}
+          marks={{ [spec.min as number]: `${spec.min}`, 0.7: '0.7', [spec.max as number]: `${spec.max}` }}
           tooltip={{ formatter: (v) => `${v}` }}
         />
       );
@@ -118,6 +121,7 @@ const PddConfig: React.FC<Props> = ({ embedded = false }) => {
     <Form.Item
       key={key}
       name={key}
+      valuePropName={spec.type === 'bool' ? 'checked' : 'value'}
       label={
         <Space size={4}>
           {spec.label}
@@ -126,7 +130,7 @@ const PddConfig: React.FC<Props> = ({ embedded = false }) => {
           </Tooltip>
         </Space>
       }
-      extra={`范围 ${spec.min} ~ ${spec.max}`}
+      extra={spec.type === 'bool' ? undefined : `范围 ${spec.min} ~ ${spec.max}`}
     >
       {renderControl(key, spec)}
     </Form.Item>

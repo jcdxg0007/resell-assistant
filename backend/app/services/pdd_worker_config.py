@@ -41,6 +41,9 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "humanize_pace": 1.0,
     "target_count_min": 8,
     "target_count_max": 20,
+    # ── 「查物流」拟人行为（worker 读，roadmap §11.4）──
+    "logistics_browse_enabled": False,
+    "logistics_browse_prob": 0.25,
     # ── PDD 全自动跑批（backend celery beat 读，worker 不用）──
     "auto_batch_enabled": False,
     "auto_both_platforms": False,  # 已弃用：闲鱼有独立自动开关，默认关避免双跑
@@ -142,6 +145,18 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "label": "单词商品量上限", "group": "采集量",
         "pair_min": "target_count_min",
         "help": "每次采集一个关键词的目标商品数上限。",
+    },
+    "logistics_browse_enabled": {
+        "type": "bool",
+        "label": "查物流拟人行为", "group": "拟人行为",
+        "help": "开启后，每个 burst 结束时按概率去「我的订单→查看物流」逛一下，"
+                "提升行为多样性。每日首次触发会先确认该号有真实订单：有则当日继续"
+                "随机查，没有则当日冷却不再尝试。⚠ 仅对有真实购买记录的号有意义。",
+    },
+    "logistics_browse_prob": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "查物流触发概率", "group": "拟人行为",
+        "help": "每个 burst 结束时触发查物流的概率（0~1）。建议 0.2~0.3，太高反而异常。",
     },
     "auto_batch_enabled": {
         "type": "bool",
@@ -317,5 +332,5 @@ def specs_for_frontend() -> dict[str, Any]:
     return {
         "params": PARAM_SPECS,
         "defaults": DEFAULT_RUNTIME_CONFIG,
-        "groups": ["节奏", "阵发", "配额", "采集量", "自动跑批", "闲鱼自动"],
+        "groups": ["节奏", "阵发", "配额", "采集量", "拟人行为", "自动跑批", "闲鱼自动"],
     }

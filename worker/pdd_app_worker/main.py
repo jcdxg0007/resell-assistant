@@ -403,6 +403,26 @@ def apply_remote_config(cfg: dict[str, Any]) -> list[str]:
         if key == "humanize_pace":
             from pdd_app_worker import pdd_app_client
             pdd_app_client.set_humanize_pace(val)
+
+    # 「查物流」拟人行为开关/概率：状态在 pdd_app_client 里维护，这里直接透传。
+    if "logistics_browse_enabled" in cfg or "logistics_browse_prob" in cfg:
+        from pdd_app_worker import pdd_app_client
+        enabled = bool(cfg.get("logistics_browse_enabled",
+                               pdd_app_client._LOGISTICS_BROWSE_ENABLED))
+        prob_raw = cfg.get("logistics_browse_prob")
+        prob = None
+        if prob_raw is not None:
+            try:
+                prob = float(prob_raw)
+            except (TypeError, ValueError):
+                prob = None
+        old_en = pdd_app_client._LOGISTICS_BROWSE_ENABLED
+        old_pr = pdd_app_client._LOGISTICS_BROWSE_PROB
+        pdd_app_client.set_logistics_browse(enabled, prob)
+        if pdd_app_client._LOGISTICS_BROWSE_ENABLED != old_en:
+            changes.append(f"LOGISTICS_BROWSE_ENABLED {old_en}→{pdd_app_client._LOGISTICS_BROWSE_ENABLED}")
+        if prob is not None and pdd_app_client._LOGISTICS_BROWSE_PROB != old_pr:
+            changes.append(f"LOGISTICS_BROWSE_PROB {old_pr}→{pdd_app_client._LOGISTICS_BROWSE_PROB}")
     return changes
 
 
@@ -589,6 +609,13 @@ async def _handle_search(
         cli.set_cleanup_mode("soft")  # 临时；search 跑完后用真实结果覆盖
         search_result = await cli.search(keyword, **search_kwargs)
         burst_continues = _scheduler.mark_search_done()
+        # burst 结束 + 本次搜索没被风控/没报错时，按概率查物流（roadmap §11.4）。
+        # 必须在 __aexit__（退 PDD）之前、PDD 仍前台时做；best-effort 不影响主流程。
+        if not burst_continues and not search_result.error:
+            try:
+                await cli.maybe_browse_logistics()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"maybe_browse_logistics swallowed: {exc}")
         cli.set_cleanup_mode("soft" if burst_continues else "exit")
     # __aexit__ 已用最新的 cleanup_mode 跑完 _post_task_cleanup
 

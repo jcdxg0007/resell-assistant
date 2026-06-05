@@ -139,6 +139,36 @@ def set_humanize_pace(value: float) -> None:
     _HUMANIZE_PACE = max(0.3, min(1.0, float(value)))
 
 
+# ─── 「查物流」拟人行为（roadmap §11.4）──────────────────────────────
+# burst 结束时按概率去「我的订单 → 查看物流」逛一下，提升行为多样性。
+# 每日首次触发会顺带确认该号有无真实订单：有则当日继续随机查，没有则当日
+# 冷却不再尝试（订单页空反而是异常信号）。开关 + 概率由 backend runtime-config
+# 热更新（main.apply_remote_config → set_logistics_browse）。默认关闭。
+_LOGISTICS_BROWSE_ENABLED = False
+_LOGISTICS_BROWSE_PROB = 0.25
+# 每日探测/冷却状态（一个 worker 进程 = 一个采集号，模块级单例即可）。
+# state: "unknown"（今日还没探测）/ "has_orders"（确认有单，继续随机查）/
+#        "cooldown"（今日订单页空，当日不再尝试）。跨天自动重置。
+_logistics_day_key: str | None = None
+_logistics_state = "unknown"
+
+
+def set_logistics_browse(enabled: bool, prob: float | None = None) -> None:
+    """热更新「查物流」开关与触发概率（被 main.apply_remote_config 调用）。"""
+    global _LOGISTICS_BROWSE_ENABLED, _LOGISTICS_BROWSE_PROB
+    _LOGISTICS_BROWSE_ENABLED = bool(enabled)
+    if prob is not None:
+        try:
+            _LOGISTICS_BROWSE_PROB = max(0.0, min(1.0, float(prob)))
+        except (TypeError, ValueError):
+            pass
+
+
+def _cn_today_key() -> str:
+    """东八区当天 yyyy-mm-dd，作为每日探测/冷却的 day key。"""
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
+
+
 async def _sleep_jitter(base: float, jitter: float = 0.4, pace: bool = True) -> None:
     """带抖动的 sleep —— base ± jitter*base 范围内随机。
 
@@ -693,6 +723,144 @@ class PddAppClient:
                     await _sleep_jitter(0.6)
             except Exception:
                 continue
+
+    async def _click_any(self, xpaths: list[str], timeout: float = 2.0) -> bool:
+        """按顺序尝试一组 xpath，点中任意一个即返回 True（多 selector 兜底抗改版）。"""
+        for xp in xpaths:
+            try:
+                if await self._human_click(xp, timeout=timeout):
+                    logger.debug(f"[{self.serial}] _click_any hit: {xp}")
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def maybe_browse_logistics(self) -> None:
+        """burst 结束时按概率查订单/物流（roadmap §11.4），best-effort 不抛。
+
+        每日首次触发顺带确认该号有无真实订单：有→当日继续随机查；订单页空→
+        当日冷却不再尝试（空订单页反而是异常信号）。导航失败保持 unknown 下次再试。
+        """
+        global _logistics_day_key, _logistics_state
+        if not _LOGISTICS_BROWSE_ENABLED:
+            return
+        today = _cn_today_key()
+        if today != _logistics_day_key:
+            _logistics_day_key = today
+            _logistics_state = "unknown"
+            logger.info(f"[{self.serial}] logistics: 新的一天，重置查物流探测状态")
+        if _logistics_state == "cooldown":
+            return
+        if random.random() >= _LOGISTICS_BROWSE_PROB:
+            return
+        logger.info(f"[{self.serial}] logistics: 触发查物流 (state={_logistics_state})")
+        try:
+            result = await self._browse_logistics_once()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[{self.serial}] logistics: 查物流异常(swallow): {exc}")
+            return
+        if result is True:
+            _logistics_state = "has_orders"
+            logger.info(f"[{self.serial}] logistics: 已查物流，确认有真实订单")
+        elif result is False:
+            _logistics_state = "cooldown"
+            logger.info(f"[{self.serial}] logistics: 订单页为空 → 今日冷却，不再尝试")
+        # None：没到订单页（导航失败），保持 unknown，下次再试
+
+    async def _browse_logistics_once(self) -> bool | None:
+        """进 个人中心 → 我的订单 →（有单则）查看物流 → 停留滑动 → 返回。
+
+        返回 True=有单已浏览 / False=订单页为空 / None=没到订单页（导航失败）。
+        ⚠ selector 为初稿，需真机 uiautomator2 inspect 校准（PDD 这些页会改版）。
+        """
+        # 1) 进底部「个人中心」tab
+        if not await self._click_any([
+            '//*[@content-desc="个人中心"]',
+            '//android.widget.TextView[@text="个人中心"]',
+            '//*[@text="个人中心"][@clickable="true"]',
+            '//*[@text="个人中心"]',
+        ], timeout=2.0):
+            logger.info(f"[{self.serial}] logistics: 没找到「个人中心」tab，放弃")
+            return None
+        await _sleep_jitter(1.3, jitter=0.3)
+
+        # 2) 进「我的订单 / 查看全部」
+        if not await self._click_any([
+            '//*[@text="我的订单"]',
+            '//*[@content-desc="我的订单"]',
+            '//*[@text="查看全部"]',
+            '//*[@text="全部订单"]',
+        ], timeout=2.5):
+            logger.info(f"[{self.serial}] logistics: 没找到「我的订单」入口，放弃")
+            return None
+        await _sleep_jitter(1.8, jitter=0.3, pace=False)  # 订单页联网加载，别压缩
+
+        # 3) 判断有无订单
+        def _detect() -> str:
+            d = self._d
+            for xp in (
+                '//*[contains(@text,"还没有相关订单")]',
+                '//*[contains(@text,"暂无订单")]',
+                '//*[contains(@text,"还没有订单")]',
+                '//*[contains(@text,"空空如也")]',
+                '//*[contains(@text,"你还没有")]',
+            ):
+                try:
+                    if d.xpath(xp).exists:
+                        return "empty"
+                except Exception:
+                    continue
+            for xp in (
+                '//*[@text="查看物流"]',
+                '//*[@text="确认收货"]',
+                '//*[@text="评价"]',
+                '//*[@text="再次购买"]',
+                '//*[@text="申请售后"]',
+            ):
+                try:
+                    if d.xpath(xp).exists:
+                        return "has"
+                except Exception:
+                    continue
+            return "unknown"
+
+        state = await asyncio.to_thread(_detect)
+        if state == "empty":
+            return False
+        if state == "unknown":
+            logger.info(f"[{self.serial}] logistics: 订单页状态识别不出，放弃(不冷却)")
+            return None
+
+        # 4) 有订单：点「查看物流」逛一下（点不到就停在订单列表滑两下）
+        viewed = await self._click_any(['//*[@text="查看物流"]'], timeout=2.0)
+        if viewed:
+            await _sleep_jitter(2.0, jitter=0.4)  # 看物流停留 ~1.5-3s
+
+        try:
+            def _scroll():
+                w, h = self._d.window_size()
+                for _ in range(random.randint(1, 2)):
+                    _humanize_swipe_path(
+                        self._d,
+                        (w // 2, int(h * 0.70)),
+                        (w // 2, int(h * 0.38)),
+                        duration_s=random.uniform(0.30, 0.60),
+                    )
+                    time.sleep(_pace_uniform(0.6, 1.2))
+            await asyncio.to_thread(_scroll)
+        except Exception:
+            pass
+
+        # 5) 退回去（back 两三次），让 cleanup 的 home press 收尾
+        try:
+            def _back():
+                for _ in range(random.randint(2, 3)):
+                    self._d.press("back")
+                    time.sleep(0.5)
+            await asyncio.to_thread(_back)
+        except Exception:
+            pass
+        return True
 
     async def _idle_browse_warmup(self, mode: str = "standard") -> None:
         """前置摸鱼：开 APP 后假装看下推荐流再去搜。三档强度可选：
