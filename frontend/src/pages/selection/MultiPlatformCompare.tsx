@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
-  PlayCircleOutlined, PauseCircleOutlined, ProfileOutlined,
+  PlayCircleOutlined, PauseCircleOutlined, ProfileOutlined, DownOutlined, UpOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -194,6 +194,8 @@ const MultiPlatformCompare: React.FC = () => {
 
   // 采集节奏控制窗口
   const [rhythmOpen, setRhythmOpen] = useState(false);
+  // 多号路由状态卡片：默认折叠，点右上角 PDD Worker 指示器展开/收起
+  const [routingOpen, setRoutingOpen] = useState(false);
 
   // 任务记录抽屉（派发过的搜索任务流水）
   const [taskLogOpen, setTaskLogOpen] = useState(false);
@@ -590,12 +592,28 @@ const MultiPlatformCompare: React.FC = () => {
         <Col><Title level={4} style={{ margin: 0 }}>多平台比价</Title></Col>
         <Col>
           <Space>
-            <Badge
-              status={worker?.online ? 'success' : 'error'}
-              text={worker?.online
-                ? `PDD Worker 在线 ${worker.worker_count ?? 1}台/${worker.device_count ?? worker.devices?.length ?? 0}机${worker.devices?.length ? `（${worker.devices.join(', ')}）` : ''}`
-                : 'PDD Worker 离线'}
-            />
+            {(() => {
+              const hasRouting = !!cons?.routing?.enabled && (cons.routing.accounts?.length ?? 0) > 0;
+              const badge = (
+                <Badge
+                  status={worker?.online ? 'success' : 'error'}
+                  text={worker?.online
+                    ? `PDD Worker 在线 ${worker.worker_count ?? 1}台/${worker.device_count ?? worker.devices?.length ?? 0}机${worker.devices?.length ? `（${worker.devices.join(', ')}）` : ''}`
+                    : 'PDD Worker 离线'}
+                />
+              );
+              if (!hasRouting) return badge;
+              return (
+                <a
+                  onClick={() => setRoutingOpen((v) => !v)}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'inherit' }}
+                  title={routingOpen ? '收起多号路由状态' : '展开多号路由状态'}
+                >
+                  {badge}
+                  {routingOpen ? <UpOutlined style={{ fontSize: 10 }} /> : <DownOutlined style={{ fontSize: 10 }} />}
+                </a>
+              );
+            })()}
             <Button icon={<ProfileOutlined />} onClick={openTaskLog}>任务记录</Button>
             <Button icon={<ControlOutlined />} onClick={() => setRhythmOpen(true)}>采集节奏</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshAll}>刷新</Button>
@@ -603,8 +621,8 @@ const MultiPlatformCompare: React.FC = () => {
         </Col>
       </Row>
 
-      {/* 多号路由状态：每个号 在线/队列/分配品类数/下次派词时刻（roadmap §15） */}
-      {cons?.routing?.enabled && (cons.routing.accounts?.length ?? 0) > 0 && (
+      {/* 多号路由状态：默认折叠，点右上角 PDD Worker 指示器展开/收起（roadmap §15） */}
+      {routingOpen && cons?.routing?.enabled && (cons.routing.accounts?.length ?? 0) > 0 && (
         <Card size="small" title="多号路由状态" styles={{ body: { padding: 8 } }}>
           <Row gutter={[8, 8]}>
             {cons.routing.accounts.map((a) => (
