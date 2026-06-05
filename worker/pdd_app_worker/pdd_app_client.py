@@ -767,31 +767,63 @@ class PddAppClient:
             logger.info(f"[{self.serial}] logistics: 订单页为空 → 今日冷却，不再尝试")
         # None：没到订单页（导航失败），保持 unknown，下次再试
 
+    async def _on_profile_page(self) -> bool:
+        """是否在「个人中心」页：以「我的订单 / 查看全部」是否存在判定。"""
+        def _check() -> bool:
+            d = self._d
+            for xp in ('//*[@text="我的订单"]', '//*[@text="查看全部"]', '//*[@text="商品收藏"]'):
+                try:
+                    if d.xpath(xp).exists:
+                        return True
+                except Exception:
+                    continue
+            return False
+        return await asyncio.to_thread(_check)
+
+    async def _go_profile_tab(self) -> bool:
+        """进底部「个人中心」tab（最右）。PDD 底部导航是自定义渲染、非选中 tab 的
+        文字节点常拿不到，所以 xpath 找不到就按坐标点最右下角那个 tab 兜底。
+        进去后用 _on_profile_page 自校验。"""
+        # 先试文字/desc
+        if await self._click_any([
+            '//*[@text="个人中心"]',
+            '//*[@content-desc="个人中心"]',
+            '//*[contains(@content-desc,"个人中心")]',
+        ], timeout=1.5):
+            await _sleep_jitter(1.2, jitter=0.3)
+            if await self._on_profile_page():
+                return True
+        # 坐标兜底：底部 5 个 tab，「个人中心」是第 5 个 → 中心 x≈0.90w，y≈0.965h
+        try:
+            def _tap_corner():
+                w, h = self._d.window_size()
+                self._d.click(int(w * 0.90), int(h * 0.965))
+            await asyncio.to_thread(_tap_corner)
+            await _sleep_jitter(1.3, jitter=0.3)
+        except Exception:
+            pass
+        return await self._on_profile_page()
+
     async def _browse_logistics_once(self) -> bool | None:
         """进 个人中心 → 我的订单 →（有单则）查看物流 → 停留滑动 → 返回。
 
         返回 True=有单已浏览 / False=订单页为空 / None=没到订单页（导航失败）。
-        ⚠ selector 为初稿，需真机 uiautomator2 inspect 校准（PDD 这些页会改版）。
+        selector 已按 2026-06-05 真机截图校准（底部导航坐标兜底 + 查看全部入口）。
         """
-        # 1) 进底部「个人中心」tab
-        if not await self._click_any([
-            '//*[@content-desc="个人中心"]',
-            '//android.widget.TextView[@text="个人中心"]',
-            '//*[@text="个人中心"][@clickable="true"]',
-            '//*[@text="个人中心"]',
-        ], timeout=2.0):
-            logger.info(f"[{self.serial}] logistics: 没找到「个人中心」tab，放弃")
+        # 1) 进底部「个人中心」tab（含坐标兜底 + 自校验）
+        if not await self._go_profile_tab():
+            logger.info(f"[{self.serial}] logistics: 没进到「个人中心」页，放弃")
             return None
-        await _sleep_jitter(1.3, jitter=0.3)
+        await _sleep_jitter(1.0, jitter=0.3)
 
-        # 2) 进「我的订单 / 查看全部」
+        # 2) 进订单列表：优先点「查看全部」(右上角→全部订单页)，兜底「我的订单」
         if not await self._click_any([
-            '//*[@text="我的订单"]',
-            '//*[@content-desc="我的订单"]',
             '//*[@text="查看全部"]',
+            '//*[@text="我的订单"]',
+            '//*[@content-desc="查看全部"]',
             '//*[@text="全部订单"]',
         ], timeout=2.5):
-            logger.info(f"[{self.serial}] logistics: 没找到「我的订单」入口，放弃")
+            logger.info(f"[{self.serial}] logistics: 没找到「查看全部/我的订单」入口，放弃")
             return None
         await _sleep_jitter(1.8, jitter=0.3, pace=False)  # 订单页联网加载，别压缩
 
@@ -810,10 +842,12 @@ class PddAppClient:
                         return "empty"
                 except Exception:
                     continue
+            # 注意：不能用「评价」判有单——它同时是订单页顶部 tab，空号也恒在。
+            # 只认真实订单卡上的操作按钮。
             for xp in (
                 '//*[@text="查看物流"]',
                 '//*[@text="确认收货"]',
-                '//*[@text="评价"]',
+                '//*[@text="申请退款"]',
                 '//*[@text="再次购买"]',
                 '//*[@text="申请售后"]',
             ):
