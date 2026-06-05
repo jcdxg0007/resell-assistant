@@ -816,14 +816,19 @@ class PddAppClient:
             return None
         await _sleep_jitter(1.0, jitter=0.3)
 
-        # 2) 进订单列表：优先点「查看全部」(右上角→全部订单页)，兜底「我的订单」
+        # 2) 进订单列表。「查看全部/我的订单」标题在 PDD 上也是自定义渲染、文字
+        #    节点常拿不到，所以优先点个人中心页那排状态入口「待收货/待发货」——
+        #    它们是稳定文字节点，且直达带「查看物流」的订单列表（你正好有待收货单）。
+        #    最后才兜底「查看全部/我的订单」标题。
         if not await self._click_any([
+            '//*[@text="待收货"]',
+            '//*[@text="待发货"]',
+            '//*[@content-desc="待收货"]',
             '//*[@text="查看全部"]',
             '//*[@text="我的订单"]',
-            '//*[@content-desc="查看全部"]',
             '//*[@text="全部订单"]',
         ], timeout=2.5):
-            logger.info(f"[{self.serial}] logistics: 没找到「查看全部/我的订单」入口，放弃")
+            logger.info(f"[{self.serial}] logistics: 没找到订单入口(待收货/查看全部/我的订单)，放弃")
             return None
         await _sleep_jitter(1.8, jitter=0.3, pace=False)  # 订单页联网加载，别压缩
 
