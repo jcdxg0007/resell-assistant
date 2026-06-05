@@ -200,3 +200,88 @@ async def extract_price_async(
 ) -> tuple[float | None, dict[str, Any]]:
     """``extract_price_from_image`` 的 async 包装。CPU-bound 工作放到线程。"""
     return await asyncio.to_thread(extract_price_from_image, image_bgr, region)
+
+
+def _norm_text(s: str) -> str:
+    """去掉所有空白，便于做包含匹配（OCR 偶尔在字间塞空格）。"""
+    return "".join((s or "").split())
+
+
+def locate_texts(
+    image_bgr: Any,
+    targets: list[str],
+    region: tuple[int, int, int, int] | None = None,
+    min_confidence: float = 0.4,
+) -> list[tuple[str, int, int, float, str]]:
+    """全屏（或指定 region）OCR，返回命中 ``targets`` 文字的元素中心坐标。
+
+    给 UI 自动化兜底用：PDD 把「个人中心 / 待收货 / 查看物流」等用 Canvas 自绘，
+    ``dump_hierarchy`` 抓不到文字节点、xpath 点不到。这里 OCR 全屏认字，按命中
+    文字的 bbox 中心返回坐标，调用方拿去 ``d.click(x, y)``。
+
+    :param image_bgr: numpy BGR 全屏截图（``d.screenshot(format='opencv')``）
+    :param targets: 目标文字列表，做双向包含匹配（OCR 文本 ⊇ target 或 target ⊇ OCR 文本）
+    :param region: (x1,y1,x2,y2) 像素裁剪窗口；缩小范围更快更准。None=全屏
+    :param min_confidence: 置信阈值
+    :return: ``[(命中的 target, cx, cy, conf, 原始 OCR 文本), ...]`` 按 conf 降序；
+             坐标已换算回**全屏绝对像素**（region 偏移已加回）
+    """
+    try:
+        h, w = image_bgr.shape[:2]
+    except AttributeError:
+        return []
+
+    ox, oy = 0, 0
+    crop = image_bgr
+    if region:
+        x1, y1, x2, y2 = region
+        x1 = max(0, min(int(x1), w)); y1 = max(0, min(int(y1), h))
+        x2 = max(0, min(int(x2), w)); y2 = max(0, min(int(y2), h))
+        if x2 <= x1 or y2 <= y1:
+            return []
+        crop = image_bgr[y1:y2, x1:x2]
+        ox, oy = x1, y1
+    if getattr(crop, "size", 0) == 0:
+        return []
+
+    try:
+        reader = _get_reader()
+    except Exception as exc:
+        logger.debug(f"locate_texts: reader init failed: {exc!r}")
+        return []
+    try:
+        results = reader.readtext(crop, detail=1, paragraph=False)
+    except Exception as exc:
+        logger.debug(f"locate_texts: readtext failed: {exc!r}")
+        return []
+
+    norm_targets = [(_norm_text(t), t) for t in targets if _norm_text(t)]
+    hits: list[tuple[str, int, int, float, str]] = []
+    for bbox, text, conf in results:
+        if conf < min_confidence:
+            continue
+        norm = _norm_text(text)
+        if not norm:
+            continue
+        for nt, orig in norm_targets:
+            if nt in norm or norm in nt:
+                xs = [p[0] for p in bbox]
+                ys = [p[1] for p in bbox]
+                cx = int(ox + sum(xs) / len(xs))
+                cy = int(oy + sum(ys) / len(ys))
+                hits.append((orig, cx, cy, float(conf), text.strip()))
+                break
+    hits.sort(key=lambda hh: -hh[3])
+    return hits
+
+
+async def locate_texts_async(
+    image_bgr: Any,
+    targets: list[str],
+    region: tuple[int, int, int, int] | None = None,
+    min_confidence: float = 0.4,
+) -> list[tuple[str, int, int, float, str]]:
+    """``locate_texts`` 的 async 包装。"""
+    return await asyncio.to_thread(
+        locate_texts, image_bgr, targets, region, min_confidence
+    )

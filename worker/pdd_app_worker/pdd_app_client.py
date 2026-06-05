@@ -735,6 +735,80 @@ class PddAppClient:
                 continue
         return False
 
+    async def _ocr_find(
+        self,
+        targets: list[str],
+        region_ratio: tuple[float, float, float, float] | None = None,
+        min_conf: float = 0.4,
+    ) -> tuple[str, int, int, float, str] | None:
+        """截屏 → OCR 找 targets 文字 → 返回最高分命中 (target, cx, cy, conf, raw)。
+
+        PDD 把「个人中心/待收货/查看物流」等用 Canvas 自绘，xpath 抓不到，
+        靠 OCR 认字 + bbox 中心坐标兜底。region_ratio=(rx1,ry1,rx2,ry2) 按屏幕
+        比例裁剪，缩小范围更快更准（如底部导航传 (0.5,0.85,1,1)）。
+        """
+        def _run():
+            try:
+                img = self._d.screenshot(format="opencv")
+            except Exception as exc:
+                logger.debug(f"[{self.serial}] ocr screenshot failed: {exc!r}")
+                return None
+            if img is None:
+                return None
+            region = None
+            if region_ratio:
+                try:
+                    h, w = img.shape[:2]
+                    a, b, c, e = region_ratio
+                    region = (int(w * a), int(h * b), int(w * c), int(h * e))
+                except Exception:
+                    region = None
+            from pdd_app_worker import ocr as ocr_module
+            hits = ocr_module.locate_texts(img, targets, region=region, min_confidence=min_conf)
+            return hits[0] if hits else None
+
+        return await asyncio.to_thread(_run)
+
+    async def _ocr_tap(
+        self,
+        targets: list[str],
+        region_ratio: tuple[float, float, float, float] | None = None,
+        min_conf: float = 0.4,
+        jitter_px: int = 10,
+    ) -> bool:
+        """OCR 找到 targets 文字就点它中心（带坐标抖动）。命中返回 True。"""
+        hit = await self._ocr_find(targets, region_ratio=region_ratio, min_conf=min_conf)
+        if not hit:
+            return False
+        _t, cx, cy, conf, raw = hit
+
+        def _click():
+            jx = cx + random.randint(-jitter_px, jitter_px)
+            jy = cy + random.randint(-jitter_px, jitter_px)
+            self._d.click(jx, jy)
+
+        await asyncio.to_thread(_click)
+        logger.info(f"[{self.serial}] OCR 命中 '{raw}'(conf={conf:.2f}) → 点 ({cx},{cy})")
+        return True
+
+    async def _tap_text(
+        self,
+        targets: list[str],
+        region_ratio: tuple[float, float, float, float] | None = None,
+        xpath_first: bool = True,
+        xpath_timeout: float = 1.0,
+        min_conf: float = 0.4,
+    ) -> bool:
+        """点文字：先快速试 xpath（便宜），抓不到再 OCR 认字按坐标点（PDD 自绘兜底）。"""
+        if xpath_first:
+            xpaths: list[str] = []
+            for t in targets:
+                xpaths.append(f'//*[@text="{t}"]')
+                xpaths.append(f'//*[@content-desc="{t}"]')
+            if await self._click_any(xpaths, timeout=xpath_timeout):
+                return True
+        return await self._ocr_tap(targets, region_ratio=region_ratio, min_conf=min_conf)
+
     async def maybe_browse_logistics(self) -> None:
         """burst 结束时按概率查订单/物流（roadmap §11.4），best-effort 不抛。
 
@@ -768,8 +842,8 @@ class PddAppClient:
         # None：没到订单页（导航失败），保持 unknown，下次再试
 
     async def _on_profile_page(self) -> bool:
-        """是否在「个人中心」页：以「我的订单 / 查看全部」是否存在判定。"""
-        def _check() -> bool:
+        """是否在「个人中心」页：先 xpath，再 OCR 认「我的订单/查看全部/商品收藏」。"""
+        def _check_xpath() -> bool:
             d = self._d
             for xp in ('//*[@text="我的订单"]', '//*[@text="查看全部"]', '//*[@text="商品收藏"]'):
                 try:
@@ -778,22 +852,31 @@ class PddAppClient:
                 except Exception:
                     continue
             return False
-        return await asyncio.to_thread(_check)
+        if await asyncio.to_thread(_check_xpath):
+            return True
+        # PDD 自绘 → OCR 兜底
+        hit = await self._ocr_find(["我的订单", "查看全部", "商品收藏", "收货地址", "多多钱包"])
+        return hit is not None
 
     async def _go_profile_tab(self) -> bool:
-        """进底部「个人中心」tab（最右）。PDD 底部导航是自定义渲染、非选中 tab 的
-        文字节点常拿不到，所以 xpath 找不到就按坐标点最右下角那个 tab 兜底。
-        进去后用 _on_profile_page 自校验。"""
-        # 先试文字/desc
+        """进底部「个人中心」tab（最右）。PDD 底部导航是自定义渲染、文字节点常拿
+        不到，依次尝试：xpath → OCR 认字点坐标 → 最右下角坐标硬兜底。进去后用
+        _on_profile_page 自校验，确认真到了个人中心页。"""
+        # 1) xpath 快速试
         if await self._click_any([
             '//*[@text="个人中心"]',
             '//*[@content-desc="个人中心"]',
             '//*[contains(@content-desc,"个人中心")]',
-        ], timeout=1.5):
+        ], timeout=1.2):
             await _sleep_jitter(1.2, jitter=0.3)
             if await self._on_profile_page():
                 return True
-        # 坐标兜底：底部 5 个 tab，「个人中心」是第 5 个 → 中心 x≈0.90w，y≈0.965h
+        # 2) OCR 在底部导航区认「个人中心」(只扫底部 15%、右半屏，又快又准)
+        if await self._ocr_tap(["个人中心", "我的"], region_ratio=(0.5, 0.85, 1.0, 1.0)):
+            await _sleep_jitter(1.3, jitter=0.3)
+            if await self._on_profile_page():
+                return True
+        # 3) 坐标硬兜底：底部 5 个 tab，「个人中心」是第 5 个 → 中心 x≈0.90w，y≈0.965h
         try:
             def _tap_corner():
                 w, h = self._d.window_size()
@@ -816,18 +899,14 @@ class PddAppClient:
             return None
         await _sleep_jitter(1.0, jitter=0.3)
 
-        # 2) 进订单列表。「查看全部/我的订单」标题在 PDD 上也是自定义渲染、文字
-        #    节点常拿不到，所以优先点个人中心页那排状态入口「待收货/待发货」——
-        #    它们是稳定文字节点，且直达带「查看物流」的订单列表（你正好有待收货单）。
-        #    最后才兜底「查看全部/我的订单」标题。
-        if not await self._click_any([
-            '//*[@text="待收货"]',
-            '//*[@text="待发货"]',
-            '//*[@content-desc="待收货"]',
-            '//*[@text="查看全部"]',
-            '//*[@text="我的订单"]',
-            '//*[@text="全部订单"]',
-        ], timeout=2.5):
+        # 2) 进订单列表。标题/状态入口在 PDD 上也是自定义渲染，xpath 常抓不到，
+        #    _tap_text 会 xpath 不中就 OCR 认字点坐标。优先点状态入口「待收货/
+        #    待发货」(直达带「查看物流」的订单列表)，兜底「查看全部/我的订单」。
+        #    OCR 扫上半屏即可（这些都在个人中心页上半部）。
+        if not await self._tap_text(
+            ["待收货", "待发货", "查看全部", "我的订单", "全部订单"],
+            region_ratio=(0.0, 0.0, 1.0, 0.6),
+        ):
             logger.info(f"[{self.serial}] logistics: 没找到订单入口(待收货/查看全部/我的订单)，放弃")
             return None
         await _sleep_jitter(1.8, jitter=0.3, pace=False)  # 订单页联网加载，别压缩
@@ -864,14 +943,27 @@ class PddAppClient:
             return "unknown"
 
         state = await asyncio.to_thread(_detect)
+        # xpath 抓不到（PDD 自绘）→ OCR 兜底判有无订单
+        if state == "unknown":
+            empty_hit = await self._ocr_find(
+                ["还没有相关订单", "暂无订单", "还没有订单", "空空如也", "你还没有"]
+            )
+            if empty_hit:
+                state = "empty"
+            else:
+                has_hit = await self._ocr_find(
+                    ["查看物流", "确认收货", "申请退款", "再次购买", "申请售后"]
+                )
+                if has_hit:
+                    state = "has"
         if state == "empty":
             return False
         if state == "unknown":
             logger.info(f"[{self.serial}] logistics: 订单页状态识别不出，放弃(不冷却)")
             return None
 
-        # 4) 有订单：点「查看物流」逛一下（点不到就停在订单列表滑两下）
-        viewed = await self._click_any(['//*[@text="查看物流"]'], timeout=2.0)
+        # 4) 有订单：点「查看物流」逛一下（xpath→OCR 兜底；点不到就停在订单列表滑两下）
+        viewed = await self._tap_text(["查看物流"], region_ratio=(0.0, 0.2, 1.0, 1.0))
         if viewed:
             await _sleep_jitter(2.0, jitter=0.4)  # 看物流停留 ~1.5-3s
 
