@@ -33,6 +33,7 @@ jobs:
   build-backend:
     runs-on: ubuntu-latest
     needs: changes
+    timeout-minutes: 40
     if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -55,12 +56,11 @@ jobs:
           push: true
           # provenance:false → 不生成 attestation manifest（对 ACR 推送/作为 cache 源更干净）。
           provenance: false
-          # 双 cache 源：GHA + ACR 里的 :latest 镜像。GHA 缓存被淘汰时仍能复用 ACR
-          # 已有层（按指令匹配、摘要不变 → 已在 ACR → 不再跨境重推），只推改动的代码层。
-          cache-from: |
-            type=gha
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/backend:latest
-          cache-to: type=gha,mode=max
+          # 只用 ACR 的 :latest 做 cache 源 + inline cache：不再往 GHA 缓存上传整套层
+          # （playwright/chromium 几个 G，跨境上传常卡在 "exporting to image/cache"）。
+          # 未变更层按摘要复用 ACR 已有层，只推改动的代码层。
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/backend:latest
+          cache-to: type=inline
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/backend:latest
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/backend:${{ github.sha }}
@@ -68,6 +68,7 @@ jobs:
   build-frontend:
     runs-on: ubuntu-latest
     needs: changes
+    timeout-minutes: 40
     if: needs.changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -89,10 +90,9 @@ jobs:
           file: ./frontend/Dockerfile
           push: true
           provenance: false
-          cache-from: |
-            type=gha
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/frontend:latest
-          cache-to: type=gha,mode=max
+          # 同后端：弃用 GHA 缓存，只用 ACR :latest + inline，避免导出阶段卡死。
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/frontend:latest
+          cache-to: type=inline
           tags: |
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/frontend:latest
             ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/frontend:${{ github.sha }}
