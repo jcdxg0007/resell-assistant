@@ -27,10 +27,19 @@ logger = logging.getLogger(__name__)
 _CN_TZ = timezone(timedelta(hours=8))
 _PDD_KW_FILTER = text("selection_keywords.target_platforms::jsonb @> '[\"pdd\"]'::jsonb")
 
+# 「逻辑日」从凌晨 3 点开始，与每日真清库(daily_purge_collected, crontab 03:00)对齐。
+# 此前日界是 0 点：0 点一翻天，显示/去重窗口立刻把昨天的数据滤掉，但真正的物理清库
+# 要等到 3 点才跑 —— 于是 0–3 点之间出现「数据看着没了、其实还在库」的假清库空窗。
+# 把日界挪到 3 点后，显示窗口和真清库同刻滚动，假清库消除；去重仍是「每个逻辑日一次」。
+_CN_DAY_RESET_HOUR = 3
+
 
 def _cn_day_start() -> datetime:
     now_cn = datetime.now(_CN_TZ)
-    return now_cn.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = now_cn.replace(hour=_CN_DAY_RESET_HOUR, minute=0, second=0, microsecond=0)
+    if now_cn < start:  # 0–3 点之间，仍归属「昨天 3 点」开始的逻辑日
+        start -= timedelta(days=1)
+    return start
 
 
 async def persist_search_run(
