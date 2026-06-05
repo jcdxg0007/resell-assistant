@@ -119,11 +119,15 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.compliance.daily_purge_collected",
         "schedule": crontab(minute=0, hour=3),
     },
-    # PDD 流水保留 N 天：03:10 删过期 pdd_search_runs（错峰避开 03:00 闲鱼清库）。
-    # 见 compliance.purge_pdd_search_runs / PDD_RUNS_RETENTION_DAYS。
+    # PDD/闲鱼 流水保留 N 天：03:10/03:12 删过期 *_search_runs（错峰避开 03:00 闲鱼
+    # 商品清库）。保留天数走运行时配置 pdd_runs_retention_days / xianyu_runs_retention_days。
     "purge-pdd-search-runs": {
         "task": "app.tasks.compliance.purge_pdd_search_runs",
         "schedule": crontab(minute=10, hour=3),
+    },
+    "purge-xianyu-search-runs": {
+        "task": "app.tasks.compliance.purge_xianyu_search_runs",
+        "schedule": crontab(minute=12, hour=3),
     },
 
     # === PDD 全自动跑批 ===

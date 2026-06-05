@@ -62,6 +62,7 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "xianyu_auto_batch_count": 3,
     # ── 数据清理（backend celery beat 读）──
     "pdd_runs_retention_days": 30,  # PDD 采集流水保留天数，每日 03:10 删更早的
+    "xianyu_runs_retention_days": 30,  # 闲鱼采集流水保留天数，每日 03:12 删更早的
 }
 
 # 每个参数的类型 / 范围 / 中文标签 / 分组 / 说明。
@@ -248,6 +249,13 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "help": "PDD 采集流水(pdd_search_runs，也是「任务记录」数据源)保留天数。"
                 "每日 03:10 物理删掉更早的流水，保留最近 N 天任务历史又给表封顶。"
                 "收藏的 PDD 快照在独立表，不受影响。",
+    },
+    "xianyu_runs_retention_days": {
+        "type": "int", "min": 1, "max": 365,
+        "label": "闲鱼流水保留天数", "group": "数据清理",
+        "help": "闲鱼采集流水(xianyu_search_runs，也是「任务记录」数据源)保留天数。"
+                "每日 03:12 物理删掉更早的流水，保留最近 N 天任务历史又给表封顶。"
+                "闲鱼收藏的商品另存，不受影响。",
     },
 }
 
