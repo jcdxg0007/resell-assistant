@@ -94,6 +94,7 @@ interface AutoConfig {
   xianyu_auto_batch_count: number;
   logistics_browse_enabled: boolean;
   logistics_browse_prob: number;
+  logistics_quiet_prob: number;
 }
 
 const PDD_STATUS_META: Record<string, { color: string; label: string }> = {
@@ -244,6 +245,7 @@ const MultiPlatformCompare: React.FC = () => {
         xianyu_auto_batch_count: c.xianyu_auto_batch_count ?? 3,
         logistics_browse_enabled: !!c.logistics_browse_enabled,
         logistics_browse_prob: c.logistics_browse_prob ?? 0.25,
+        logistics_quiet_prob: c.logistics_quiet_prob ?? 0.35,
       });
     } catch { /* 静默 */ }
   }, []);
@@ -815,8 +817,8 @@ const MultiPlatformCompare: React.FC = () => {
                   />
                 </Space>
                 <div style={{ borderTop: '1px dashed #f0f0f0', margin: '2px 0' }} />
-                <Space size={8}>
-                  <Tooltip title="开启后每个 burst 结束按概率去「我的订单→查看物流」逛一下；每日首次会确认该号有真实订单，没有则当日冷却。仅对有真实购买记录的号有意义。">
+                <Space size={8} wrap>
+                  <Tooltip title="总开关。开启后按两条独立概率去「我的订单→查看物流」逛一下：①burst 结尾 ②两波搜索之间的静默期中段。每日首次会确认该号有真实订单，没有则当日冷却。仅对有真实购买记录的号有意义。">
                     <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>查物流</Text>
                   </Tooltip>
                   <Switch
@@ -825,11 +827,21 @@ const MultiPlatformCompare: React.FC = () => {
                   />
                   {auto.logistics_browse_enabled && (
                     <>
-                      <Text type="secondary" style={{ fontSize: 12 }}>概率</Text>
+                      <Tooltip title="每个 burst（一波搜索）结束时触发查物流的概率，0=关闭这条触发">
+                        <Text type="secondary" style={{ fontSize: 12 }}>结尾概率</Text>
+                      </Tooltip>
                       <InputNumber
-                        size="small" min={0} max={1} step={0.05} value={auto.logistics_browse_prob} style={{ width: 72 }}
+                        size="small" min={0} max={1} step={0.05} value={auto.logistics_browse_prob} style={{ width: 68 }}
                         onChange={(v) => setAuto((p) => p ? { ...p, logistics_browse_prob: v ?? 0.25 } : p)}
                         onBlur={() => saveAuto({ logistics_browse_prob: auto.logistics_browse_prob })}
+                      />
+                      <Tooltip title="两波搜索之间的静默期（5-30min）中段触发查物流的概率，0=关闭这条触发。更像真人空闲时看眼快递">
+                        <Text type="secondary" style={{ fontSize: 12 }}>静默概率</Text>
+                      </Tooltip>
+                      <InputNumber
+                        size="small" min={0} max={1} step={0.05} value={auto.logistics_quiet_prob} style={{ width: 68 }}
+                        onChange={(v) => setAuto((p) => p ? { ...p, logistics_quiet_prob: v ?? 0.35 } : p)}
+                        onBlur={() => saveAuto({ logistics_quiet_prob: auto.logistics_quiet_prob })}
                       />
                     </>
                   )}

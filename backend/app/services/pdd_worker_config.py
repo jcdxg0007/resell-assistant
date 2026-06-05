@@ -43,7 +43,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "target_count_max": 20,
     # ── 「查物流」拟人行为（worker 读，roadmap §11.4）──
     "logistics_browse_enabled": False,
-    "logistics_browse_prob": 0.25,
+    "logistics_browse_prob": 0.25,   # A：每个 burst 结尾触发概率
+    "logistics_quiet_prob": 0.35,    # B：inter-burst 静默期中段触发概率
     # ── PDD 全自动跑批（backend celery beat 读，worker 不用）──
     "auto_batch_enabled": False,
     "auto_both_platforms": False,  # 已弃用：闲鱼有独立自动开关，默认关避免双跑
@@ -149,14 +150,21 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     "logistics_browse_enabled": {
         "type": "bool",
         "label": "查物流拟人行为", "group": "拟人行为",
-        "help": "开启后，每个 burst 结束时按概率去「我的订单→查看物流」逛一下，"
+        "help": "总开关。开启后会按下面两个概率去「我的订单→查看物流」逛一下，"
                 "提升行为多样性。每日首次触发会先确认该号有真实订单：有则当日继续"
                 "随机查，没有则当日冷却不再尝试。⚠ 仅对有真实购买记录的号有意义。",
     },
     "logistics_browse_prob": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.05,
-        "label": "查物流触发概率", "group": "拟人行为",
-        "help": "每个 burst 结束时触发查物流的概率（0~1）。建议 0.2~0.3，太高反而异常。",
+        "label": "查物流概率·burst 结尾", "group": "拟人行为",
+        "help": "每个 burst（一波搜索）结束时触发查物流的概率（0~1）。"
+                "0=关闭这条触发。建议 0.2~0.3，太高反而异常。",
+    },
+    "logistics_quiet_prob": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "查物流概率·静默期", "group": "拟人行为",
+        "help": "两波搜索之间的静默期（5-30min）中段触发查物流的概率（0~1）。"
+                "0=关闭这条触发。更像真人空闲时点亮手机看眼快递，建议 0.3~0.4。",
     },
     "auto_batch_enabled": {
         "type": "bool",

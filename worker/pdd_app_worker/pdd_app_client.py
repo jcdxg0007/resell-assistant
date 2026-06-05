@@ -145,7 +145,8 @@ def set_humanize_pace(value: float) -> None:
 # 冷却不再尝试（订单页空反而是异常信号）。开关 + 概率由 backend runtime-config
 # 热更新（main.apply_remote_config → set_logistics_browse）。默认关闭。
 _LOGISTICS_BROWSE_ENABLED = False
-_LOGISTICS_BROWSE_PROB = 0.25
+_LOGISTICS_BROWSE_PROB = 0.25   # A：每个 burst 结尾触发概率
+_LOGISTICS_QUIET_PROB = 0.35    # B：inter-burst 静默期中段触发概率
 # 每日探测/冷却状态（一个 worker 进程 = 一个采集号，模块级单例即可）。
 # state: "unknown"（今日还没探测）/ "has_orders"（确认有单，继续随机查）/
 #        "cooldown"（今日订单页空，当日不再尝试）。跨天自动重置。
@@ -153,13 +154,26 @@ _logistics_day_key: str | None = None
 _logistics_state = "unknown"
 
 
-def set_logistics_browse(enabled: bool, prob: float | None = None) -> None:
-    """热更新「查物流」开关与触发概率（被 main.apply_remote_config 调用）。"""
-    global _LOGISTICS_BROWSE_ENABLED, _LOGISTICS_BROWSE_PROB
+def set_logistics_browse(
+    enabled: bool,
+    prob: float | None = None,
+    quiet_prob: float | None = None,
+) -> None:
+    """热更新「查物流」总开关 + 两条触发概率（被 main.apply_remote_config 调用）。
+
+    :param prob: A —— 每个 burst 结尾触发概率
+    :param quiet_prob: B —— inter-burst 静默期中段触发概率
+    """
+    global _LOGISTICS_BROWSE_ENABLED, _LOGISTICS_BROWSE_PROB, _LOGISTICS_QUIET_PROB
     _LOGISTICS_BROWSE_ENABLED = bool(enabled)
     if prob is not None:
         try:
             _LOGISTICS_BROWSE_PROB = max(0.0, min(1.0, float(prob)))
+        except (TypeError, ValueError):
+            pass
+    if quiet_prob is not None:
+        try:
+            _LOGISTICS_QUIET_PROB = max(0.0, min(1.0, float(quiet_prob)))
         except (TypeError, ValueError):
             pass
 
@@ -169,12 +183,15 @@ def _cn_today_key() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
 
 
-def should_browse_logistics(serial: str = "") -> bool:
-    """廉价决策：现在该不该查物流？（不碰设备，供静默期 B 先判断再决定开不开 PDD）
+def should_browse_logistics(serial: str = "", prob: float | None = None) -> bool:
+    """廉价决策：现在该不该查物流？（不碰设备，供 A/B 两个触发点先判断再决定开不开 PDD）
 
     门控顺序：总开关 → 跨天重置探测状态 → 当日冷却 → 概率掷骰。返回 True 表示
     应该执行一次 browse_logistics_now()。命中概率这一步会"消耗"本次机会，所以
     调用方拿到 True 后应当真正去执行（别再调一次本函数）。
+
+    :param prob: 本触发点的概率；None 时用 A（burst 结尾）默认概率 _LOGISTICS_BROWSE_PROB。
+                 静默期 B 应显式传 _LOGISTICS_QUIET_PROB。
     """
     global _logistics_day_key, _logistics_state
     if not _LOGISTICS_BROWSE_ENABLED:
@@ -186,7 +203,8 @@ def should_browse_logistics(serial: str = "") -> bool:
         logger.info(f"[{serial}] logistics: 新的一天，重置查物流探测状态")
     if _logistics_state == "cooldown":
         return False
-    return random.random() < _LOGISTICS_BROWSE_PROB
+    p = _LOGISTICS_BROWSE_PROB if prob is None else prob
+    return random.random() < p
 
 
 async def _sleep_jitter(base: float, jitter: float = 0.4, pace: bool = True) -> None:

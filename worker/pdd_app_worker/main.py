@@ -395,7 +395,8 @@ async def _quiet_logistics_break() -> None:
     from pdd_app_worker.device_manager import healthy_serials
     from pdd_app_worker.pdd_app_client import PddAppClient
 
-    if not _pac.should_browse_logistics():
+    # 用静默期(B)专属概率门控，与 burst 结尾(A)的概率独立
+    if not _pac.should_browse_logistics(prob=_pac._LOGISTICS_QUIET_PROB):
         return
     devices = healthy_serials()
     if not devices:
@@ -466,24 +467,33 @@ def apply_remote_config(cfg: dict[str, Any]) -> list[str]:
             pdd_app_client.set_humanize_pace(val)
 
     # 「查物流」拟人行为开关/概率：状态在 pdd_app_client 里维护，这里直接透传。
-    if "logistics_browse_enabled" in cfg or "logistics_browse_prob" in cfg:
+    # 两条独立概率：logistics_browse_prob(A=burst 结尾) / logistics_quiet_prob(B=静默期)。
+    if any(k in cfg for k in ("logistics_browse_enabled", "logistics_browse_prob",
+                              "logistics_quiet_prob")):
         from pdd_app_worker import pdd_app_client
+
+        def _as_float(v):
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
         enabled = bool(cfg.get("logistics_browse_enabled",
                                pdd_app_client._LOGISTICS_BROWSE_ENABLED))
-        prob_raw = cfg.get("logistics_browse_prob")
-        prob = None
-        if prob_raw is not None:
-            try:
-                prob = float(prob_raw)
-            except (TypeError, ValueError):
-                prob = None
+        prob = _as_float(cfg.get("logistics_browse_prob"))
+        quiet_prob = _as_float(cfg.get("logistics_quiet_prob"))
         old_en = pdd_app_client._LOGISTICS_BROWSE_ENABLED
         old_pr = pdd_app_client._LOGISTICS_BROWSE_PROB
-        pdd_app_client.set_logistics_browse(enabled, prob)
+        old_qpr = pdd_app_client._LOGISTICS_QUIET_PROB
+        pdd_app_client.set_logistics_browse(enabled, prob, quiet_prob)
         if pdd_app_client._LOGISTICS_BROWSE_ENABLED != old_en:
             changes.append(f"LOGISTICS_BROWSE_ENABLED {old_en}→{pdd_app_client._LOGISTICS_BROWSE_ENABLED}")
         if prob is not None and pdd_app_client._LOGISTICS_BROWSE_PROB != old_pr:
             changes.append(f"LOGISTICS_BROWSE_PROB {old_pr}→{pdd_app_client._LOGISTICS_BROWSE_PROB}")
+        if quiet_prob is not None and pdd_app_client._LOGISTICS_QUIET_PROB != old_qpr:
+            changes.append(f"LOGISTICS_QUIET_PROB {old_qpr}→{pdd_app_client._LOGISTICS_QUIET_PROB}")
     return changes
 
 
@@ -670,9 +680,15 @@ async def _handle_search(
         cli.set_cleanup_mode("soft")  # 临时；search 跑完后用真实结果覆盖
         search_result = await cli.search(keyword, **search_kwargs)
         burst_continues = _scheduler.mark_search_done()
-        # 查物流已从"burst 结尾"(A)挪到 inter-burst 静默期中段触发(B 方案，见
-        # _quiet_logistics_break + BurstScheduler._quiet_sleep_with_break)，更像
-        # 真人"两波搜索之间点亮手机看眼快递"，这里不再做。
+        # 查物流触发点 A：burst 结束（burst_continues=False）且本次搜索没报错/
+        # 没被风控时，在退 PDD 前按 burst-结尾概率(logistics_browse_prob)查一次。
+        # 另有触发点 B（静默期中段，见 _quiet_logistics_break），两者共用每日探测/
+        # 冷却状态、各自独立概率。best-effort 不影响主流程。
+        if not burst_continues and not search_result.error:
+            try:
+                await cli.maybe_browse_logistics()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"maybe_browse_logistics swallowed: {exc}")
         cli.set_cleanup_mode("soft" if burst_continues else "exit")
     # __aexit__ 已用最新的 cleanup_mode 跑完 _post_task_cleanup
 
