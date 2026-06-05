@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -99,6 +100,42 @@ async def post_result(
     except Exception as exc:  # noqa: BLE001 — 落库失败不影响给 worker 回 ack
         logger.warning(f"post_result 即时落库失败 task_id={result.task_id}: {exc}")
     return {"ok": True, "task_id": result.task_id}
+
+
+class LogisticsRunReport(BaseModel):
+    """worker 上报一次「查快递」拟人动作（roadmap §11.4）。"""
+    trigger: str           # A = burst 结尾 / B = inter-burst 静默期
+    status: str            # viewed / empty / nav_failed
+    account_name: str | None = None
+    device_serial: str | None = None
+    elapsed_ms: int | None = None
+    note: str | None = None
+
+
+@router.post(
+    "/logistics",
+    summary="worker 上报查快递事件",
+    response_model=None,
+)
+async def post_logistics(
+    report: LogisticsRunReport,
+    _: None = Depends(verify_worker_token),
+):
+    """查快递不是派发任务、无 task_id，单独一个轻量上报口落到 logistics_runs，
+    供「任务记录」合并展示。落库失败不影响 worker（这里也只返回 ok）。"""
+    try:
+        from app.services.logistics_run import persist_logistics_run
+        await persist_logistics_run(
+            trigger=report.trigger,
+            status=report.status,
+            account_name=report.account_name,
+            device_serial=report.device_serial,
+            elapsed_ms=report.elapsed_ms,
+            note=report.note,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"post_logistics 落库失败: {exc}")
+    return {"ok": True}
 
 
 @router.post(

@@ -113,6 +113,16 @@ const PDD_SOURCE_META: Record<string, { color: string; label: string }> = {
   manual: { color: 'cyan', label: '手动' },
   emergency: { color: 'volcano', label: '紧急' },
 };
+// 查快递（logistics_runs）状态/触发点中文映射
+const LOGI_STATUS_META: Record<string, { color: string; label: string }> = {
+  viewed: { color: 'success', label: '已查物流' },
+  empty: { color: 'default', label: '订单页空' },
+  nav_failed: { color: 'error', label: '未进订单页' },
+};
+const LOGI_TRIGGER_META: Record<string, { color: string; label: string }> = {
+  A: { color: 'blue', label: '结尾' },
+  B: { color: 'geekblue', label: '静默' },
+};
 // 任务记录行（来自 GET /pdd-runs/，PDD + 闲鱼合并）
 interface TaskRun {
   id: string;
@@ -1029,7 +1039,7 @@ const MultiPlatformCompare: React.FC = () => {
             type="info"
             showIcon
             banner
-            message="记录关键词搜索任务（PDD + 闲鱼，含自动/批量/手动/紧急），时间为任务完成落库时刻。随机浏览 / 查快递 暂未单独记录，待后续完整版加入。"
+            message="记录关键词搜索任务（PDD + 闲鱼，含自动/批量/手动/紧急）+ 查快递拟人动作（burst 结尾 A / 静默期 B），时间为落库时刻。随机首页浏览暂未单独记录。"
           />
           <Space wrap size="small">
             <Select
@@ -1039,7 +1049,7 @@ const MultiPlatformCompare: React.FC = () => {
               placeholder="按平台"
               value={taskLogPlatform}
               onChange={(v) => { setTaskLogPlatform(v); fetchTaskLog(1, taskLogStatus, taskLogSource, v); }}
-              options={[{ value: 'pdd', label: 'PDD' }, { value: 'xianyu', label: '闲鱼' }]}
+                options={[{ value: 'pdd', label: 'PDD' }, { value: 'xianyu', label: '闲鱼' }, { value: 'logistics', label: '查快递' }]}
             />
             <Select
               allowClear
@@ -1080,7 +1090,9 @@ const MultiPlatformCompare: React.FC = () => {
                 title: '平台', dataIndex: 'platform', width: 60,
                 render: (v: string) => (v === 'xianyu'
                   ? <Tag color="orange">闲鱼</Tag>
-                  : <Tag color="red">PDD</Tag>),
+                  : v === 'logistics'
+                    ? <Tag color="blue">查快递</Tag>
+                    : <Tag color="red">PDD</Tag>),
               },
               { title: '关键词', dataIndex: 'keyword_text', width: 170, ellipsis: true },
               { title: '品类', dataIndex: 'category_name', width: 90, render: (v: string | null) => v || '—' },
@@ -1090,16 +1102,20 @@ const MultiPlatformCompare: React.FC = () => {
               },
               {
                 title: '来源', dataIndex: 'source', width: 80,
-                render: (v: string) => {
-                  const m = PDD_SOURCE_META[v] || { color: 'default', label: v };
+                render: (v: string, record: TaskRun) => {
+                  const m = record.platform === 'logistics'
+                    ? (LOGI_TRIGGER_META[v] || { color: 'default', label: v })
+                    : (PDD_SOURCE_META[v] || { color: 'default', label: v });
                   return <Tag color={m.color}>{m.label}</Tag>;
                 },
               },
               { title: '模式', dataIndex: 'mode', width: 60, render: (v: string | null) => (v === 'deep' ? '深度' : v === 'fast' ? '快速' : (v || '—')) },
               {
                 title: '状态', dataIndex: 'status', width: 80,
-                render: (v: string) => {
-                  const m = PDD_STATUS_META[v] || { color: 'default', label: v };
+                render: (v: string, record: TaskRun) => {
+                  const m = record.platform === 'logistics'
+                    ? (LOGI_STATUS_META[v] || { color: 'default', label: v })
+                    : (PDD_STATUS_META[v] || { color: 'default', label: v });
                   return <Tag color={m.color}>{m.label}</Tag>;
                 },
               },

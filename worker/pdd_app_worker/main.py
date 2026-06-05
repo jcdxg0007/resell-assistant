@@ -75,6 +75,27 @@ BURST_IDLE_TIMEOUT_SECONDS_MAX = float(os.environ.get("BURST_IDLE_TIMEOUT_SECOND
 
 _shutdown = asyncio.Event()
 
+# main() 里建好后赋值，供查快递(A/B)上报落库用（查快递不在 task 结果流里）。
+_backend_client: "BackendClient | None" = None
+
+
+async def _report_logistics_run(
+    trigger: str, state: str | None, serial: str | None, elapsed_ms: int | None
+) -> None:
+    """把一次查快递动作上报后端落库（best-effort，自吞异常）。state=None 表示没执行。"""
+    if _backend_client is None or not state:
+        return
+    try:
+        await _backend_client.report_logistics({
+            "trigger": trigger,
+            "status": state,
+            "account_name": BOUND_PDD_ACCOUNT,
+            "device_serial": serial,
+            "elapsed_ms": elapsed_ms,
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"_report_logistics_run failed(swallow): {exc}")
+
 
 class QuotaExhausted(RuntimeError):
     """今日 search quota 用完抛这个，由 _handle_search 转成失败结果。"""
@@ -403,12 +424,15 @@ async def _quiet_logistics_break() -> None:
         return
     serial = devices[0]
     logger.info(f"[{serial}] quiet-break: 静默期插入查物流")
+    _lg_t0 = time.monotonic()
+    state: str | None = None
     try:
         async with PddAppClient(serial) as cli:
             cli.set_cleanup_mode("exit")  # 查完按 home 退后台
-            await cli.browse_logistics_now()
+            state = await cli.browse_logistics_now(trigger="B")
     finally:
         await _press_home_on_device(serial)
+    await _report_logistics_run("B", state, serial, int((time.monotonic() - _lg_t0) * 1000))
 
 
 _scheduler.set_quiet_break_handler(_quiet_logistics_break)
@@ -686,7 +710,11 @@ async def _handle_search(
         # 冷却状态、各自独立概率。best-effort 不影响主流程。
         if not burst_continues and not search_result.error:
             try:
-                await cli.maybe_browse_logistics()
+                _lg_t0 = time.monotonic()
+                _lg_state = await cli.maybe_browse_logistics(trigger="A")
+                await _report_logistics_run(
+                    "A", _lg_state, serial, int((time.monotonic() - _lg_t0) * 1000)
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"maybe_browse_logistics swallowed: {exc}")
         cli.set_cleanup_mode("soft" if burst_continues else "exit")
@@ -853,6 +881,8 @@ async def main() -> int:
     _setup_signals()
 
     client = BackendClient()
+    global _backend_client
+    _backend_client = client  # 供查快递(A/B)上报落库
     try:
         # 启动时先上报一次，建立 worker_status
         from pdd_app_worker.device_manager import ensure_adb_keyboard, healthy_serials

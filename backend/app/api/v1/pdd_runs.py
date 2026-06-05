@@ -474,18 +474,20 @@ async def read_runs(
     status: str | None = Query(None, description="过滤状态：ok/empty/partial/failed/risk_blocked/timeout"),
     source: str | None = Query(None, description="过滤来源：lib/selection/batch/manual/emergency"),
     keyword: str | None = Query(None, description="关键词模糊匹配"),
-    platform: str | None = Query(None, description="平台：pdd / xianyu / 留空=全部合并"),
+    platform: str | None = Query(None, description="平台：pdd / xianyu / logistics / 留空=全部合并"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """任务记录：PDD（pdd_search_runs）+ 闲鱼（xianyu_search_runs）按时间倒序合并。
+    """任务记录：PDD（pdd_search_runs）+ 闲鱼（xianyu_search_runs）+ 查快递
+    （logistics_runs）按时间倒序合并。
 
-    platform=pdd / xianyu 只看单平台；留空=两边合并。合并分页用"各取前
+    platform=pdd / xianyu / logistics 只看单类；留空=全部合并。合并分页用"各取前
     offset+limit 条 → 归并排序 → 切片"，对前几页（页大小 20）足够精确。
     """
     from app.services.xianyu_search_run import count_xianyu_runs, list_xianyu_runs
+    from app.services.logistics_run import count_logistics_runs, list_logistics_runs
 
     plat = (platform or "").strip().lower()
 
@@ -500,6 +502,10 @@ async def read_runs(
             db, status=status, source=source, keyword=keyword, limit=offset + limit,
         )
         return {"total": total, "items": rows[offset:offset + limit]}
+    if plat == "logistics":
+        total = await count_logistics_runs(db, status=status, keyword=keyword)
+        rows = await list_logistics_runs(db, status=status, keyword=keyword, limit=offset + limit)
+        return {"total": total, "items": rows[offset:offset + limit]}
 
     # 合并：各取前 offset+limit 条，归并按 created_at 倒序，再切片
     fetch_n = offset + limit
@@ -507,8 +513,15 @@ async def read_runs(
     xy_rows = await list_xianyu_runs(db, status=status, source=source, keyword=keyword, limit=fetch_n)
     xy_total = await count_xianyu_runs(db, status=status, source=source, keyword=keyword)
     merged = list(pdd["items"]) + list(xy_rows)
+    total = int(pdd["total"]) + int(xy_total)
+    # 查快递无"采集来源(source)"语义，仅当未按 source 过滤时并入合并视图
+    if not source:
+        lg_rows = await list_logistics_runs(db, status=status, keyword=keyword, limit=fetch_n)
+        lg_total = await count_logistics_runs(db, status=status, keyword=keyword)
+        merged += list(lg_rows)
+        total += int(lg_total)
     merged.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return {
-        "total": int(pdd["total"]) + int(xy_total),
+        "total": total,
         "items": merged[offset:offset + limit],
     }

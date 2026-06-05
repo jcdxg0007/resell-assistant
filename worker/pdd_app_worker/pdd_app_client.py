@@ -847,38 +847,48 @@ class PddAppClient:
                 return True
         return await self._ocr_tap(targets, region_ratio=region_ratio, min_conf=min_conf)
 
-    async def maybe_browse_logistics(self) -> None:
+    async def maybe_browse_logistics(self, trigger: str = "A") -> str | None:
         """按概率查订单/物流（roadmap §11.4），best-effort 不抛。
 
         = 廉价决策门控 should_browse_logistics() + 真正执行 browse_logistics_now()。
-        给"已有前台 PDD"的调用方用（如 burst 结尾）。静默期(B)的调用方应该先
+        给"已有前台 PDD"的调用方用（如 burst 结尾 A）。静默期(B)的调用方应该先
         调模块级 should_browse_logistics() 决定要不要开 PDD，再调 browse_logistics_now()，
         避免概率没命中却白白前台化 PDD。
+
+        :return: 概率没命中 → None（没执行）；执行了 → 结果状态字符串
+                 viewed / empty / nav_failed（供上报落库）。
         """
         if not should_browse_logistics(self.serial):
-            return
-        await self.browse_logistics_now()
+            return None
+        return await self.browse_logistics_now(trigger=trigger)
 
-    async def browse_logistics_now(self) -> None:
+    async def browse_logistics_now(self, trigger: str = "A") -> str:
         """真正执行一次查物流并更新每日探测状态（不做开关/概率门控）。
 
         每日首次触发顺带确认该号有无真实订单：有→当日继续随机查；订单页空→
         当日冷却不再尝试（空订单页反而是异常信号）。导航失败保持 unknown 下次再试。
+
+        :param trigger: 触发点 A（burst 结尾）/ B（静默期），仅用于日志。
+        :return: 结果状态 viewed（有单已查物流）/ empty（订单页空）/
+                 nav_failed（没到订单页 or 异常）。供上报落库。
         """
         global _logistics_state
-        logger.info(f"[{self.serial}] logistics: 触发查物流 (state={_logistics_state})")
+        logger.info(f"[{self.serial}] logistics: 触发查物流 (trigger={trigger} state={_logistics_state})")
         try:
             result = await self._browse_logistics_once()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[{self.serial}] logistics: 查物流异常(swallow): {exc}")
-            return
+            return "nav_failed"
         if result is True:
             _logistics_state = "has_orders"
             logger.info(f"[{self.serial}] logistics: 已查物流，确认有真实订单")
-        elif result is False:
+            return "viewed"
+        if result is False:
             _logistics_state = "cooldown"
             logger.info(f"[{self.serial}] logistics: 订单页为空 → 今日冷却，不再尝试")
+            return "empty"
         # None：没到订单页（导航失败），保持 unknown，下次再试
+        return "nav_failed"
 
     async def _on_profile_page(self) -> bool:
         """是否在「个人中心」页：先 xpath，再 OCR 认「我的订单/查看全部/商品收藏」。"""

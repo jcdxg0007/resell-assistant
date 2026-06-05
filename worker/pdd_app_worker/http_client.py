@@ -100,6 +100,17 @@ class BackendClient:
                 await asyncio.sleep(2 ** attempt)
         logger.error(f"push_result gave up after 3 attempts: task_id={result.get('task_id')}")
 
+    async def report_logistics(self, payload: dict[str, Any]) -> None:
+        """上报一次「查快递」拟人动作（roadmap §11.4）。best-effort，失败只记日志。
+
+        查快递不是派发任务、不影响采集主流程，丢一两条无所谓，不重试到死。
+        """
+        try:
+            r = await self._client.post(f"{API_PREFIX}/logistics", json=payload)
+            r.raise_for_status()
+        except Exception as exc:
+            logger.warning(f"report_logistics failed (swallow): {exc}")
+
     async def send_heartbeat(
         self, devices: list[str], scheduler: dict[str, Any] | None = None
     ) -> None:
