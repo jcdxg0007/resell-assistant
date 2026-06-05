@@ -1029,6 +1029,7 @@ const MultiPlatformCompare: React.FC = () => {
             rowKey="id"
             loading={taskLogLoading}
             dataSource={taskLogRows}
+            scroll={{ x: 'max-content' }}
             pagination={{
               current: taskLogPage,
               total: taskLogTotal,
@@ -1045,7 +1046,7 @@ const MultiPlatformCompare: React.FC = () => {
                   ? <Tag color="orange">闲鱼</Tag>
                   : <Tag color="red">PDD</Tag>),
               },
-              { title: '关键词', dataIndex: 'keyword_text', ellipsis: true },
+              { title: '关键词', dataIndex: 'keyword_text', width: 170, ellipsis: true },
               { title: '品类', dataIndex: 'category_name', width: 90, render: (v: string | null) => v || '—' },
               {
                 title: '采集号', dataIndex: 'account_name', width: 130, ellipsis: true,
