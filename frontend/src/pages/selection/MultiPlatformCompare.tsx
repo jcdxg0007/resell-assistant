@@ -799,94 +799,99 @@ const MultiPlatformCompare: React.FC = () => {
           >
             {auto ? (
               <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                <Space size={8}>
-                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>自动开关</Text>
-                  <Switch
-                    size="small" checked={auto.auto_batch_enabled} loading={savingAuto}
-                    onChange={(v) => saveAuto({ auto_batch_enabled: v })}
-                  />
+                <Space size={24} wrap>
+                  <Space size={8}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>自动开关</Text>
+                    <Switch
+                      size="small" checked={auto.auto_batch_enabled} loading={savingAuto}
+                      onChange={(v) => saveAuto({ auto_batch_enabled: v })}
+                    />
+                  </Space>
+                  <Space size={6}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>活跃时段</Text>
+                    <InputNumber
+                      size="small" min={0} max={23} value={auto.auto_active_start_hour} style={{ width: 56 }}
+                      onChange={(v) => setAuto((p) => p ? { ...p, auto_active_start_hour: v ?? 0 } : p)}
+                      onBlur={() => saveAuto({ auto_active_start_hour: auto.auto_active_start_hour })}
+                    />
+                    <Text type="secondary">~</Text>
+                    <InputNumber
+                      size="small" min={0} max={24} value={auto.auto_active_end_hour} style={{ width: 56 }}
+                      onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
+                      onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>点</Text>
+                  </Space>
                 </Space>
-                <Space size={6}>
-                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>活跃时段</Text>
-                  <InputNumber
-                    size="small" min={0} max={23} value={auto.auto_active_start_hour} style={{ width: 56 }}
-                    onChange={(v) => setAuto((p) => p ? { ...p, auto_active_start_hour: v ?? 0 } : p)}
-                    onBlur={() => saveAuto({ auto_active_start_hour: auto.auto_active_start_hour })}
-                  />
-                  <Text type="secondary">~</Text>
-                  <InputNumber
-                    size="small" min={0} max={24} value={auto.auto_active_end_hour} style={{ width: 56 }}
-                    onChange={(v) => setAuto((p) => p ? { ...p, auto_active_end_hour: v ?? 0 } : p)}
-                    onBlur={() => saveAuto({ auto_active_end_hour: auto.auto_active_end_hour })}
-                  />
-                  <Text type="secondary" style={{ fontSize: 12 }}>点</Text>
-                </Space>
-                <Space size={6}>
-                  <Tooltip title="两波之间的间隔在此区间内随机取，避免固定钟点被识别为机器">
-                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>随机间隔</Text>
-                  </Tooltip>
-                  <InputNumber
-                    size="small" min={5} max={720} value={auto.auto_interval_min_minutes} style={{ width: 64 }}
-                    onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_min_minutes: v ?? 5 } : p)}
-                    onBlur={() => saveAuto({ auto_interval_min_minutes: auto.auto_interval_min_minutes })}
-                  />
-                  <Text type="secondary">~</Text>
-                  <InputNumber
-                    size="small" min={5} max={1440} value={auto.auto_interval_max_minutes} style={{ width: 64 }}
-                    onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_max_minutes: v ?? 5 } : p)}
-                    onBlur={() => saveAuto({ auto_interval_max_minutes: auto.auto_interval_max_minutes })}
-                  />
-                  <Text type="secondary" style={{ fontSize: 12 }}>分</Text>
-                </Space>
-                <Space size={6}>
-                  <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>每波词数</Text>
-                  <InputNumber
-                    size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 64 }}
-                    onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
-                    onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
-                  />
-                </Space>
-                <div style={{ borderTop: '1px dashed #f0f0f0', margin: '2px 0' }} />
-                <Space size={8} wrap>
-                  <Tooltip title="总开关。开启后按两条独立概率去「我的订单→查看物流」逛一下：①burst 结尾 ②两波搜索之间的静默期中段。每日首次会确认该号有真实订单，没有则当日冷却。仅对有真实购买记录的号有意义。">
-                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>查物流</Text>
-                  </Tooltip>
-                  <Switch
-                    size="small" checked={auto.logistics_browse_enabled} loading={savingAuto}
-                    onChange={(v) => saveAuto({ logistics_browse_enabled: v })}
-                  />
-                  {auto.logistics_browse_enabled && (
-                    <>
-                      <Tooltip title="每个 burst（一波搜索）结束时触发查物流的概率，0=关闭这条触发">
-                        <Text type="secondary" style={{ fontSize: 12 }}>结尾概率</Text>
-                      </Tooltip>
-                      <InputNumber
-                        size="small" min={0} max={1} step={0.05} value={auto.logistics_browse_prob} style={{ width: 68 }}
-                        onChange={(v) => setAuto((p) => p ? { ...p, logistics_browse_prob: v ?? 0.25 } : p)}
-                        onBlur={() => saveAuto({ logistics_browse_prob: auto.logistics_browse_prob })}
-                      />
-                      <Tooltip title="两波搜索之间的静默期（5-30min）中段触发查物流的概率，0=关闭这条触发。更像真人空闲时看眼快递">
-                        <Text type="secondary" style={{ fontSize: 12 }}>静默概率</Text>
-                      </Tooltip>
-                      <InputNumber
-                        size="small" min={0} max={1} step={0.05} value={auto.logistics_quiet_prob} style={{ width: 68 }}
-                        onChange={(v) => setAuto((p) => p ? { ...p, logistics_quiet_prob: v ?? 0.35 } : p)}
-                        onBlur={() => saveAuto({ logistics_quiet_prob: auto.logistics_quiet_prob })}
-                      />
-                    </>
-                  )}
+                <Space size={24} wrap>
+                  <Space size={6}>
+                    <Tooltip title="两波之间的间隔在此区间内随机取，避免固定钟点被识别为机器">
+                      <Text type="secondary" style={{ fontSize: 12 }}>随机间隔</Text>
+                    </Tooltip>
+                    <InputNumber
+                      size="small" min={5} max={720} value={auto.auto_interval_min_minutes} style={{ width: 64 }}
+                      onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_min_minutes: v ?? 5 } : p)}
+                      onBlur={() => saveAuto({ auto_interval_min_minutes: auto.auto_interval_min_minutes })}
+                    />
+                    <Text type="secondary">~</Text>
+                    <InputNumber
+                      size="small" min={5} max={1440} value={auto.auto_interval_max_minutes} style={{ width: 64 }}
+                      onChange={(v) => setAuto((p) => p ? { ...p, auto_interval_max_minutes: v ?? 5 } : p)}
+                      onBlur={() => saveAuto({ auto_interval_max_minutes: auto.auto_interval_max_minutes })}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>分</Text>
+                  </Space>
+                  <Space size={6}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>每波词数</Text>
+                    <InputNumber
+                      size="small" min={1} max={10} value={auto.auto_batch_count} style={{ width: 64 }}
+                      onChange={(v) => setAuto((p) => p ? { ...p, auto_batch_count: v ?? 1 } : p)}
+                      onBlur={() => saveAuto({ auto_batch_count: auto.auto_batch_count })}
+                    />
+                  </Space>
                 </Space>
                 <div style={{ borderTop: '1px dashed #f0f0f0', margin: '2px 0' }} />
-                <Space size={8} wrap>
-                  <Tooltip title="PDD 采集流水(也是「任务记录」数据源)保留天数。每日 03:10 物理删掉更早的流水，保留最近 N 天任务历史又给表封顶。收藏的 PDD 快照在独立表，不受影响。">
-                    <Text type="secondary" style={{ fontSize: 12, width: 56, display: 'inline-block' }}>流水保留</Text>
-                  </Tooltip>
-                  <InputNumber
-                    size="small" min={1} max={365} value={auto.pdd_runs_retention_days} style={{ width: 80 }}
-                    addonAfter="天"
-                    onChange={(v) => setAuto((p) => p ? { ...p, pdd_runs_retention_days: v ?? 30 } : p)}
-                    onBlur={() => saveAuto({ pdd_runs_retention_days: auto.pdd_runs_retention_days })}
-                  />
+                <Space size={24} wrap>
+                  <Space size={8} wrap>
+                    <Tooltip title="总开关。开启后按两条独立概率去「我的订单→查看物流」逛一下：①burst 结尾 ②两波搜索之间的静默期中段。每日首次会确认该号有真实订单，没有则当日冷却。仅对有真实购买记录的号有意义。">
+                      <Text type="secondary" style={{ fontSize: 12 }}>查物流</Text>
+                    </Tooltip>
+                    <Switch
+                      size="small" checked={auto.logistics_browse_enabled} loading={savingAuto}
+                      onChange={(v) => saveAuto({ logistics_browse_enabled: v })}
+                    />
+                    {auto.logistics_browse_enabled && (
+                      <>
+                        <Tooltip title="每个 burst（一波搜索）结束时触发查物流的概率，0=关闭这条触发">
+                          <Text type="secondary" style={{ fontSize: 12 }}>结尾概率</Text>
+                        </Tooltip>
+                        <InputNumber
+                          size="small" min={0} max={1} step={0.05} value={auto.logistics_browse_prob} style={{ width: 68 }}
+                          onChange={(v) => setAuto((p) => p ? { ...p, logistics_browse_prob: v ?? 0.25 } : p)}
+                          onBlur={() => saveAuto({ logistics_browse_prob: auto.logistics_browse_prob })}
+                        />
+                        <Tooltip title="两波搜索之间的静默期（5-30min）中段触发查物流的概率，0=关闭这条触发。更像真人空闲时看眼快递">
+                          <Text type="secondary" style={{ fontSize: 12 }}>静默概率</Text>
+                        </Tooltip>
+                        <InputNumber
+                          size="small" min={0} max={1} step={0.05} value={auto.logistics_quiet_prob} style={{ width: 68 }}
+                          onChange={(v) => setAuto((p) => p ? { ...p, logistics_quiet_prob: v ?? 0.35 } : p)}
+                          onBlur={() => saveAuto({ logistics_quiet_prob: auto.logistics_quiet_prob })}
+                        />
+                      </>
+                    )}
+                  </Space>
+                  <Space size={6}>
+                    <Tooltip title="PDD 采集流水(也是「任务记录」数据源)保留天数。每日 03:10 物理删掉更早的流水，保留最近 N 天任务历史又给表封顶。收藏的 PDD 快照在独立表，不受影响。">
+                      <Text type="secondary" style={{ fontSize: 12 }}>流水保留</Text>
+                    </Tooltip>
+                    <InputNumber
+                      size="small" min={1} max={365} value={auto.pdd_runs_retention_days} style={{ width: 80 }}
+                      addonAfter="天"
+                      onChange={(v) => setAuto((p) => p ? { ...p, pdd_runs_retention_days: v ?? 30 } : p)}
+                      onBlur={() => saveAuto({ pdd_runs_retention_days: auto.pdd_runs_retention_days })}
+                    />
+                  </Space>
                 </Space>
               </Space>
             ) : <Text type="secondary">加载中…</Text>}
