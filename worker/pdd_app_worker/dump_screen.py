@@ -2,9 +2,12 @@
 
 输出两份：
   - dump_full.xml：完整 UI 树（>50KB，给我做 XPath 用）
-  - dump_summary.txt：候选元素列表（搜索框/弹窗关闭按钮）— 你贴这个给我即可
+  - dump_summary.txt：候选元素列表（搜索框/弹窗关闭按钮/底部导航栏）— 你贴这个给我即可
+
+指定设备（多机时）：SMOKE_SERIAL=xxxx 或命令行第一个参数；都没有则用下面的默认值。
 
 用法（先 Ctrl+C 停掉 main.py，再跑）：
+    set SMOKE_SERIAL=J7JJOVHQYHU8HMHE
     python -m pdd_app_worker.dump_screen
 """
 from __future__ import annotations
@@ -22,7 +25,11 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 import uiautomator2 as u2  # noqa: E402
 
 
-SERIAL = "PKT0220416005274"
+SERIAL = (
+    (sys.argv[1] if len(sys.argv) > 1 else "")
+    or os.environ.get("SMOKE_SERIAL", "").strip()
+    or "PKT0220416005274"
+)
 PDD_PACKAGE = "com.xunmeng.pinduoduo"
 WAIT_AFTER_OPEN = 8.0  # 等 splash + 弹窗完全展开
 
@@ -116,6 +123,36 @@ def main() -> int:
             text_or_desc = (e.get("text") or e.get("content-desc") or "").strip()
             if text_or_desc:
                 summary_lines.append(fmt(e))
+
+    # 屏幕高度：取所有 bounds 的最大 y2 作为近似屏高，用于"底部导航栏"判定
+    screen_h = 0
+    for e in elements:
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", e.get("bounds", ""))
+        if m:
+            screen_h = max(screen_h, int(m.group(4)))
+    bottom_threshold = int(screen_h * 0.82) if screen_h else 0
+
+    # 段 6：底部导航栏候选（屏幕底部 18% 内的非空 text/desc 元素）——找「个人中心」tab
+    summary_lines.append(
+        f"\n### 6. 底部导航栏候选（y1 ≥ {bottom_threshold}，屏高≈{screen_h}）—— 找『个人中心』tab ###"
+    )
+    for e in elements:
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", e.get("bounds", ""))
+        if not m:
+            continue
+        y1 = int(m.group(2))
+        if bottom_threshold and y1 >= bottom_threshold:
+            text_or_desc = (e.get("text") or e.get("content-desc") or "").strip()
+            if text_or_desc or "clickable" in fmt(e):
+                summary_lines.append(fmt(e))
+
+    # 段 7：tab 文案命中（首页/个人中心/我的/聊天/多多视频/购物车/订单 等）
+    summary_lines.append("\n### 7. 命中 tab/订单 文案的元素（看『个人中心』究竟叫什么）###")
+    tab_words = ["个人中心", "我的", "首页", "聊天", "多多视频", "视频", "购物车", "我的订单", "订单"]
+    for e in elements:
+        text = (e.get("text", "") + "|" + e.get("content-desc", ""))
+        if any(w in text for w in tab_words):
+            summary_lines.append(fmt(e))
 
     summary = "\n".join(summary_lines)
     Path("dump_summary.txt").write_text(summary, encoding="utf-8")
