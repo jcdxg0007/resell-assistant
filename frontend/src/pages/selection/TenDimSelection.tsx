@@ -503,27 +503,22 @@ const TenDimSelection: React.FC = () => {
                       background: selected === k.keyword ? '#e6f4ff' : undefined,
                     }}
                   >
-                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                      <Space size={4} wrap>
-                        <Text strong={selected === k.keyword}>{k.keyword}</Text>
-                        {k.both
-                          ? <Tag color="green" style={{ marginInlineEnd: 0 }}>双平台</Tag>
-                          : k.has_pdd
-                            ? <Tag color="red" style={{ marginInlineEnd: 0 }}>仅PDD</Tag>
-                            : <Tag color="gold" style={{ marginInlineEnd: 0 }}>仅闲鱼</Tag>}
-                        {k.stale && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待刷新</Tag>}
-                      </Space>
+                    <Space size={6} wrap style={{ width: '100%' }}>
+                      <Text strong={selected === k.keyword}>{k.keyword}</Text>
+                      {k.both
+                        ? <Tag color="green" style={{ marginInlineEnd: 0 }}>双平台</Tag>
+                        : k.has_pdd
+                          ? <Tag color="red" style={{ marginInlineEnd: 0 }}>仅PDD</Tag>
+                          : <Tag color="gold" style={{ marginInlineEnd: 0 }}>仅闲鱼</Tag>}
+                      {k.stale && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待刷新</Tag>}
                       {k.arb_available && k.arb_direction_label && (
-                        <Tag
-                          color="purple"
-                          style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: '18px', whiteSpace: 'normal' }}
-                        >
+                        <Tag color="purple" style={{ marginInlineEnd: 0 }}>
                           {k.arb_direction_label}
                           {k.arb_score != null ? ` · ${k.arb_score}分` : ''}
                         </Tag>
                       )}
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        {k.cached ? `已分析 ${fmtTime(k.scored_at)}` : '未分析'}
+                        {k.cached ? fmtTime(k.scored_at) : '未分析'}
                       </Text>
                     </Space>
                   </List.Item>
