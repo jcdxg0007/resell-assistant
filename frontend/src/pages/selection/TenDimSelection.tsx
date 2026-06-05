@@ -22,6 +22,11 @@ interface KeywordEntry {
   cached: boolean;
   scored_at: string | null;
   stale: boolean;
+  arb_available?: boolean;
+  arb_direction?: string | null;
+  arb_direction_label?: string | null;
+  arb_score?: number | null;
+  arb_decision?: string | null;
 }
 
 interface Dimension {
@@ -508,6 +513,15 @@ const TenDimSelection: React.FC = () => {
                             : <Tag color="gold" style={{ marginInlineEnd: 0 }}>仅闲鱼</Tag>}
                         {k.stale && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待刷新</Tag>}
                       </Space>
+                      {k.arb_available && k.arb_direction_label && (
+                        <Tag
+                          color="purple"
+                          style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: '18px', whiteSpace: 'normal' }}
+                        >
+                          {k.arb_direction_label}
+                          {k.arb_score != null ? ` · ${k.arb_score}分` : ''}
+                        </Tag>
+                      )}
                       <Text type="secondary" style={{ fontSize: 12 }}>
                         {k.cached ? `已分析 ${fmtTime(k.scored_at)}` : '未分析'}
                       </Text>

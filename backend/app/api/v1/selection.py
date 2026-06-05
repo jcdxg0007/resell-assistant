@@ -490,17 +490,20 @@ async def ten_dim_keywords(
     xy_set = {c for c in xy_rows if c}
 
     cache_rows = (await db.execute(select(SelectionAnalysis))).scalars().all()
-    cache_map = {c.keyword: c.scored_at for c in cache_rows}
+    cache_map = {c.keyword: c for c in cache_rows}
 
     all_kw = sorted(set(pdd_map) | xy_set)
     items = []
     for kw in all_kw:
         has_pdd = kw in pdd_map
         has_xianyu = kw in xy_set
-        scored_at = cache_map.get(kw)
+        cache = cache_map.get(kw)
+        scored_at = cache.scored_at if cache else None
         latest_pdd = pdd_map.get(kw)
         # 缓存比最新一次 PDD 采集还旧 = 过期，建议重新分析
         stale = bool(scored_at and latest_pdd and scored_at < latest_pdd)
+        # 套利方向/推荐结论：从缓存的 arbitrage 里带出来，给左侧列表行标记
+        arb = (cache.arbitrage if cache else None) or {}
         items.append({
             "keyword": kw,
             "has_pdd": has_pdd,
@@ -509,6 +512,11 @@ async def ten_dim_keywords(
             "cached": scored_at is not None,
             "scored_at": scored_at.isoformat() if scored_at else None,
             "stale": stale,
+            "arb_available": bool(arb.get("available")),
+            "arb_direction": arb.get("direction"),
+            "arb_direction_label": arb.get("direction_label"),
+            "arb_score": arb.get("total_score"),
+            "arb_decision": arb.get("decision"),
         })
     # 两池齐全的排前面
     items.sort(key=lambda x: (not x["both"], x["keyword"]))
