@@ -18,29 +18,42 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
 from app.models.selection import Keyword
+from app.models.xianyu_run import XianyuSearchRun
 from app.services.pdd_search_run import _cn_day_start
 
 logger = logging.getLogger(__name__)
+
+# 同 pdd_autobatch：成功(ok)即当天不再重采；失败/空可重试，但当日总尝试达
+# DAILY_MAX_ATTEMPTS 后停止（防一直失败被无限重挑）。
+_SUCCESS_STATUSES = ("ok", "partial")
+DAILY_MAX_ATTEMPTS = 2
 
 
 async def select_xianyu_keywords(db, count: int) -> list[Keyword]:
     """挑 N 个闲鱼可调度词：xianyu_safe + 在用 + 启用，最久没跑闲鱼的优先。
 
-    防重复：同一个词每天只自动跑一遍——已在「今日（东八）」派过闲鱼的词
-    （xianyu_last_searched_at >= 当日 0 点）会被排除。手动「开始任务」走
-    dispatch_xianyu_batch(keywords=...) 入口，不受此限。
+    防重复（按当日跑批记录判定）：排除「今日（东八）已成功」的词——成功了当天
+    不再重采；失败/空的词当天可再自动跑，但当日总尝试 ≥ DAILY_MAX_ATTEMPTS 次后
+    也不再挑。手动「开始任务」走 dispatch_xianyu_batch(keywords=...)，不受此限。
     """
     day_start = _cn_day_start()
+    today_done = (
+        select(XianyuSearchRun.keyword_text)
+        .where(XianyuSearchRun.created_at >= day_start)
+        .where(XianyuSearchRun.keyword_text.isnot(None))
+        .group_by(XianyuSearchRun.keyword_text)
+        .having(or_(
+            func.count().filter(XianyuSearchRun.status.in_(_SUCCESS_STATUSES)) > 0,
+            func.count() >= DAILY_MAX_ATTEMPTS,
+        ))
+    )
     stmt = (
         select(Keyword)
         .options(selectinload(Keyword.category))
         .where(Keyword.xianyu_safe.is_(True))
         .where(Keyword.is_active.is_(True))
         .where(Keyword.schedule_enabled.is_(True))
-        .where(or_(
-            Keyword.xianyu_last_searched_at.is_(None),
-            Keyword.xianyu_last_searched_at < day_start,
-        ))
+        .where(Keyword.text.notin_(today_done))
         .order_by(
             Keyword.xianyu_last_searched_at.asc().nullsfirst(),
             Keyword.xianyu_searches_total.asc(),

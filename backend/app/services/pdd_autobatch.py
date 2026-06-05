@@ -43,6 +43,11 @@ PDD_PLATFORM_FILTER = text(
     "selection_keywords.target_platforms::jsonb @> '[\"pdd\"]'::jsonb"
 )
 
+# 自动跑批「同词每日防重复」口径：成功(ok/partial)即当天不再重采；
+# 失败/空可重试，但当日总尝试达 DAILY_MAX_ATTEMPTS 后停止（防无限重挑）。
+_SUCCESS_STATUSES = ("ok", "partial")
+DAILY_MAX_ATTEMPTS = 2
+
 
 def price_stats(items: list[dict]) -> tuple[float | None, float | None]:
     prices = sorted(float(it["price"]) for it in items if it.get("price"))
@@ -67,18 +72,26 @@ async def select_cohesive_keywords(
 
     可跑词不足 N 个时只返回那几个（不跨品类硬凑，保持 session 主题纯净）。
 
-    防重复：同一个词每天只自动跑一遍——已在「今日（东八）」派过 PDD 的词
-    （pdd_last_searched_at >= 当日 0 点）会被排除。手动「开始任务」/重回队列
-    走别的入口，不受此限。
+    防重复（按当日跑批记录判定，非「派过就跳」）：排除「今日（东八）已成功」
+    的词（status ok/partial）——成功了当天不再重采；失败/空的词当天可再自动
+    跑，但当日总尝试 ≥ DAILY_MAX_ATTEMPTS 次后也不再挑（防一直失败被无限重挑）。
+    手动「开始任务」/重回队列走别的入口，不受此限。
     """
     if allowed_category_ids is not None and len(allowed_category_ids) == 0:
         return []  # 该号未分配任何品类 → 不跑
 
     day_start = _cn_day_start()
-    not_today = or_(
-        Keyword.pdd_last_searched_at.is_(None),
-        Keyword.pdd_last_searched_at < day_start,
+    today_done = (
+        select(PddSearchRun.keyword_text)
+        .where(PddSearchRun.created_at >= day_start)
+        .where(PddSearchRun.keyword_text.isnot(None))
+        .group_by(PddSearchRun.keyword_text)
+        .having(or_(
+            func.count().filter(PddSearchRun.status.in_(_SUCCESS_STATUSES)) > 0,
+            func.count() >= DAILY_MAX_ATTEMPTS,
+        ))
     )
+    not_today = Keyword.text.notin_(today_done)
     if category_slug:
         cat = (await db.execute(
             select(Category).where(Category.slug == category_slug)
