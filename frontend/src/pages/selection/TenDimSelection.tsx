@@ -86,6 +86,16 @@ interface Analysis {
   arbitrage: Arbitrage | null;
 }
 
+// 收藏开关只需要这几个字段；SideItem 与 PinnedItem 都满足它
+interface PinToggleItem {
+  product_id?: string;
+  title: string;
+  price: number;
+  sales?: number;
+  badges?: string[];
+  image_url?: string | null;
+}
+
 interface PinnedItem {
   product_id: string;
   title: string;
@@ -179,7 +189,7 @@ const SideTable: React.FC<{
   platform: 'xianyu' | 'pdd';
   pinnedSet: Set<string>;
   pinBusy: string | null;
-  onTogglePin: (item: SideItem, pinned: boolean) => void;
+  onTogglePin: (item: PinToggleItem, pinned: boolean) => void;
 }> = ({ side, platform, pinnedSet, pinBusy, onTogglePin }) => {
   if (!side || !side.items?.length) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`暂无${platform === 'xianyu' ? '闲鱼' : 'PDD'}样本`} />;
@@ -324,7 +334,7 @@ const TenDimSelection: React.FC = () => {
     } catch { /* 静默 */ } finally { setPinnedLoading(false); }
   }, []);
 
-  const togglePin = useCallback(async (item: SideItem, pinned: boolean) => {
+  const togglePin = useCallback(async (item: PinToggleItem, pinned: boolean) => {
     const productId = item.product_id;
     if (!productId) return;
     setPinBusy(productId);
@@ -687,7 +697,7 @@ const TenDimSelection: React.FC = () => {
                   title: '', width: 44, align: 'center',
                   render: (_: unknown, r: PinnedItem) => (
                     <Tooltip title="取消收藏">
-                      <Button type="text" size="small" loading={pinBusy === r.product_id} icon={<PushpinFilled style={{ color: '#fa8c16' }} />} onClick={() => togglePin(r.product_id, true)} />
+                      <Button type="text" size="small" loading={pinBusy === r.product_id} icon={<PushpinFilled style={{ color: '#fa8c16' }} />} onClick={() => togglePin(r, true)} />
                     </Tooltip>
                   ),
                 },
