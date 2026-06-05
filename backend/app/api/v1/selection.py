@@ -415,6 +415,7 @@ async def _gather_xianyu_raw(db: AsyncSession, keyword: str) -> tuple[list[dict]
         "published_at": p.published_at.isoformat() if p.published_at else None,
         "source_url": p.source_url,
         "seller_name": p.seller_name,
+        "crawled_at": p.last_crawled_at.isoformat() if p.last_crawled_at else None,
     } for p in rows]
     active_listings = (await db.execute(
         select(XianyuMarketData.active_listings)
@@ -430,6 +431,11 @@ async def _compute_and_cache(db: AsyncSession, keyword: str) -> dict:
     xy_items, active_listings = await _gather_xianyu_raw(db, keyword)
     pdd_res = await keyword_items(db, keyword)
     pdd_items = pdd_res.get("items") or []
+    # PDD 单条 item 无自己的时间，同一 run 共享 run.created_at 作为采集时间
+    pdd_crawled = pdd_res.get("created_at")
+    for it in pdd_items:
+        if isinstance(it, dict):
+            it.setdefault("crawled_at", pdd_crawled)
 
     payload = ten_dim_scoring.analyze(
         keyword,

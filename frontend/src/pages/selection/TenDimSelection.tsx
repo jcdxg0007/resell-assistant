@@ -43,6 +43,7 @@ interface SideItem {
   source_url?: string | null;
   seller_name?: string | null;
   published_at?: string | null;
+  crawled_at?: string | null;
   relevance: number;
   risk_tags: string[];
   total_score: number;
@@ -242,6 +243,11 @@ const SideTable: React.FC<{
               : <Text type="secondary">—</Text>,
           },
         ]) as ColumnsType<SideItem>,
+    {
+      title: '采集', dataIndex: 'crawled_at', width: 92,
+      sorter: (a, b) => (new Date(a.crawled_at || 0).getTime()) - (new Date(b.crawled_at || 0).getTime()),
+      render: (v?: string | null) => <Text type="secondary" style={{ fontSize: 12 }}>{fmtTime(v)}</Text>,
+    },
     {
       title: '得分', dataIndex: 'total_score', width: 78, defaultSortOrder: 'descend',
       sorter: (a, b) => a.total_score - b.total_score,

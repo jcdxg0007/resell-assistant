@@ -985,11 +985,11 @@ const MultiPlatformCompare: React.FC = () => {
                       <Text strong={selectedKw === c.keyword_text}>{c.keyword_text}</Text>
                       <Space size={6} wrap>
                         {c.xianyu && (
-                          <Tag color="gold">闲鱼 {fmtHM(c.xianyu.last_at)} · {c.xianyu.items_count}件</Tag>
+                          <Tag color="gold">闲鱼 {fmtTime(c.xianyu.last_at)} · {c.xianyu.items_count}件</Tag>
                         )}
                         {c.pdd && (
                           <Tag color="red">
-                            PDD {fmtHM(c.pdd.last_at)} · {c.pdd.items_count}件
+                            PDD {fmtTime(c.pdd.last_at)} · {c.pdd.items_count}件
                             {c.pdd.status !== 'ok' ? ` · ${PDD_STATUS_META[c.pdd.status]?.label || c.pdd.status}` : ''}
                           </Tag>
                         )}
