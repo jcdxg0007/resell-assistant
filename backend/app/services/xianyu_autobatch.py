@@ -13,23 +13,34 @@ import logging
 import random
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
 from app.models.selection import Keyword
+from app.services.pdd_search_run import _cn_day_start
 
 logger = logging.getLogger(__name__)
 
 
 async def select_xianyu_keywords(db, count: int) -> list[Keyword]:
-    """挑 N 个闲鱼可调度词：xianyu_safe + 在用 + 启用，最久没跑闲鱼的优先。"""
+    """挑 N 个闲鱼可调度词：xianyu_safe + 在用 + 启用，最久没跑闲鱼的优先。
+
+    防重复：同一个词每天只自动跑一遍——已在「今日（东八）」派过闲鱼的词
+    （xianyu_last_searched_at >= 当日 0 点）会被排除。手动「开始任务」走
+    dispatch_xianyu_batch(keywords=...) 入口，不受此限。
+    """
+    day_start = _cn_day_start()
     stmt = (
         select(Keyword)
         .options(selectinload(Keyword.category))
         .where(Keyword.xianyu_safe.is_(True))
         .where(Keyword.is_active.is_(True))
         .where(Keyword.schedule_enabled.is_(True))
+        .where(or_(
+            Keyword.xianyu_last_searched_at.is_(None),
+            Keyword.xianyu_last_searched_at < day_start,
+        ))
         .order_by(
             Keyword.xianyu_last_searched_at.asc().nullsfirst(),
             Keyword.xianyu_searches_total.asc(),

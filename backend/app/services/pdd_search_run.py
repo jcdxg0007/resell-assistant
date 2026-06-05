@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -420,12 +420,25 @@ async def paginated_items(
 
 
 async def clear_today(db: AsyncSession, keyword_text: str | None = None) -> int:
-    """清空今日采集记录。keyword_text 给定则只清该词；否则清今日全部。返回删除条数。"""
+    """清空今日采集记录。keyword_text 给定则只清该词；否则清今日全部。返回删除条数。
+
+    同时把对应词的 pdd_last_searched_at 清空——自动跑批已加「同词每日只跑一遍」
+    去重（按 pdd_last_searched_at >= 当日 0 点排除），清今日记录就得一并把该标记
+    复位，否则词虽回到待采集池却仍被去重挡住、当天不会被重采（重回队列失效）。
+    """
     day_start = _cn_day_start()
     stmt = delete(PddSearchRun).where(PddSearchRun.created_at >= day_start)
     if keyword_text:
         stmt = stmt.where(PddSearchRun.keyword_text == keyword_text)
     res = await db.execute(stmt)
+
+    reset = update(Keyword).values(pdd_last_searched_at=None).where(
+        Keyword.pdd_last_searched_at >= day_start
+    )
+    if keyword_text:
+        reset = reset.where(Keyword.text == keyword_text)
+    await db.execute(reset)
+
     await db.commit()
     return res.rowcount or 0
 

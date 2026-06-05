@@ -14,7 +14,7 @@ import random
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import selectinload
 
 from app.core.database import AsyncSessionLocal
@@ -66,9 +66,19 @@ async def select_cohesive_keywords(
     传空列表 → 该号没分配任何品类 → 返回 []（未分配=不跑）。
 
     可跑词不足 N 个时只返回那几个（不跨品类硬凑，保持 session 主题纯净）。
+
+    防重复：同一个词每天只自动跑一遍——已在「今日（东八）」派过 PDD 的词
+    （pdd_last_searched_at >= 当日 0 点）会被排除。手动「开始任务」/重回队列
+    走别的入口，不受此限。
     """
     if allowed_category_ids is not None and len(allowed_category_ids) == 0:
         return []  # 该号未分配任何品类 → 不跑
+
+    day_start = _cn_day_start()
+    not_today = or_(
+        Keyword.pdd_last_searched_at.is_(None),
+        Keyword.pdd_last_searched_at < day_start,
+    )
     if category_slug:
         cat = (await db.execute(
             select(Category).where(Category.slug == category_slug)
@@ -84,6 +94,7 @@ async def select_cohesive_keywords(
             .where(Keyword.is_active.is_(True))
             .where(Keyword.schedule_enabled.is_(True))
             .where(PDD_PLATFORM_FILTER)
+            .where(not_today)
         )
         if allowed_category_ids is not None:
             cat_stmt = cat_stmt.where(Category.id.in_(allowed_category_ids))
@@ -108,6 +119,7 @@ async def select_cohesive_keywords(
         .where(Keyword.is_active.is_(True))
         .where(Keyword.schedule_enabled.is_(True))
         .where(PDD_PLATFORM_FILTER)
+        .where(not_today)
         .order_by(
             Keyword.pdd_last_searched_at.asc().nullsfirst(),
             Keyword.pdd_searches_total.asc(),
