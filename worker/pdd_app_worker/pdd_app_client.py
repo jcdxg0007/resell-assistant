@@ -893,6 +893,14 @@ class PddAppClient:
         返回 True=有单已浏览 / False=订单页为空 / None=没到订单页（导航失败）。
         selector 已按 2026-06-05 真机截图校准（底部导航坐标兜底 + 查看全部入口）。
         """
+        # 0) 先回首页：burst 结尾调用时页面停在搜索结果页（无底部导航栏），
+        #    没有「个人中心」tab 可点。真人也得先退到有 tab 的页再点个人中心。
+        try:
+            await self._ensure_home_tab()
+        except Exception:
+            pass
+        await _sleep_jitter(0.6, jitter=0.4)
+
         # 1) 进底部「个人中心」tab（含坐标兜底 + 自校验）
         if not await self._go_profile_tab():
             logger.info(f"[{self.serial}] logistics: 没进到「个人中心」页，放弃")
@@ -970,24 +978,31 @@ class PddAppClient:
         try:
             def _scroll():
                 w, h = self._d.window_size()
+                # 起止点抖动对齐 _idle_browse_warmup：x 抖 ±30、y 起止各自随机，
+                # 别每次都同一条固定竖线（固定轨迹 = 机器特征）。
                 for _ in range(random.randint(1, 2)):
+                    x_start = w // 2 + random.randint(-30, 30)
+                    x_end = w // 2 + random.randint(-30, 30)
+                    y_start = int(h * random.uniform(0.62, 0.75))
+                    y_end = int(h * random.uniform(0.30, 0.42))
                     _humanize_swipe_path(
                         self._d,
-                        (w // 2, int(h * 0.70)),
-                        (w // 2, int(h * 0.38)),
-                        duration_s=random.uniform(0.30, 0.60),
+                        (x_start, y_start),
+                        (x_end, y_end),
+                        duration_s=random.uniform(0.30, 0.70),
                     )
                     time.sleep(_pace_uniform(0.6, 1.2))
             await asyncio.to_thread(_scroll)
         except Exception:
             pass
 
-        # 5) 退回去（back 两三次），让 cleanup 的 home press 收尾
+        # 5) 退回去（back 两三次），让 cleanup 的 home press 收尾。
+        #    back 间隔走 _pace_uniform 受全局节奏因子，别固定 0.5s（固定节拍 = 机器特征）。
         try:
             def _back():
                 for _ in range(random.randint(2, 3)):
                     self._d.press("back")
-                    time.sleep(0.5)
+                    time.sleep(_pace_uniform(0.4, 0.9))
             await asyncio.to_thread(_back)
         except Exception:
             pass
