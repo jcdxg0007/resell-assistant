@@ -119,6 +119,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.compliance.daily_purge_collected",
         "schedule": crontab(minute=0, hour=3),
     },
+    # PDD 流水保留 N 天：03:10 删过期 pdd_search_runs（错峰避开 03:00 闲鱼清库）。
+    # 见 compliance.purge_pdd_search_runs / PDD_RUNS_RETENTION_DAYS。
+    "purge-pdd-search-runs": {
+        "task": "app.tasks.compliance.purge_pdd_search_runs",
+        "schedule": crontab(minute=10, hour=3),
+    },
 
     # === PDD 全自动跑批 ===
     # 每 3 分钟唤醒一次「自带闸门」的 tick：是否真派由任务内部按 开关/暂停/

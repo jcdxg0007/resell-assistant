@@ -11,7 +11,7 @@ Currently:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 from sqlalchemy import text
@@ -168,5 +168,39 @@ async def _daily_purge_collected():
         return {
             "purged_at": datetime.now(timezone.utc).isoformat(),
             "day_start": day_start.isoformat(),
+            "deleted": deleted,
+        }
+
+
+# PDD 流水保留天数：pdd_search_runs 同时是「任务记录」的数据源，物理删它会连任务
+# 历史一起删，所以按「保留窗口」删而非按逻辑日删——保住最近 N 天任务历史，又给表
+# 封顶。收藏的 PDD 快照在独立的 pdd_pins 表，不受影响。改这个数即可调保留时长。
+PDD_RUNS_RETENTION_DAYS = 30
+
+
+@celery_app.task(name="app.tasks.compliance.purge_pdd_search_runs")
+def purge_pdd_search_runs():
+    """每日物理清理过期 PDD 采集流水（保留最近 PDD_RUNS_RETENTION_DAYS 天）。"""
+    logger.info("compliance: starting purge_pdd_search_runs")
+    return run_async(_purge_pdd_search_runs())
+
+
+async def _purge_pdd_search_runs():
+    cutoff = datetime.now(timezone.utc) - timedelta(days=PDD_RUNS_RETENTION_DAYS)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text("DELETE FROM pdd_search_runs WHERE created_at < :cutoff"),
+            {"cutoff": cutoff},
+        )
+        await db.commit()
+        deleted = result.rowcount or 0
+        logger.info(
+            f"compliance: purge_pdd_search_runs deleted {deleted} rows "
+            f"older than {cutoff.isoformat()} (retention={PDD_RUNS_RETENTION_DAYS}d)"
+        )
+        return {
+            "purged_at": datetime.now(timezone.utc).isoformat(),
+            "cutoff": cutoff.isoformat(),
+            "retention_days": PDD_RUNS_RETENTION_DAYS,
             "deleted": deleted,
         }
