@@ -169,6 +169,26 @@ def _cn_today_key() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
 
 
+def should_browse_logistics(serial: str = "") -> bool:
+    """廉价决策：现在该不该查物流？（不碰设备，供静默期 B 先判断再决定开不开 PDD）
+
+    门控顺序：总开关 → 跨天重置探测状态 → 当日冷却 → 概率掷骰。返回 True 表示
+    应该执行一次 browse_logistics_now()。命中概率这一步会"消耗"本次机会，所以
+    调用方拿到 True 后应当真正去执行（别再调一次本函数）。
+    """
+    global _logistics_day_key, _logistics_state
+    if not _LOGISTICS_BROWSE_ENABLED:
+        return False
+    today = _cn_today_key()
+    if today != _logistics_day_key:
+        _logistics_day_key = today
+        _logistics_state = "unknown"
+        logger.info(f"[{serial}] logistics: 新的一天，重置查物流探测状态")
+    if _logistics_state == "cooldown":
+        return False
+    return random.random() < _LOGISTICS_BROWSE_PROB
+
+
 async def _sleep_jitter(base: float, jitter: float = 0.4, pace: bool = True) -> None:
     """带抖动的 sleep —— base ± jitter*base 范围内随机。
 
@@ -810,23 +830,24 @@ class PddAppClient:
         return await self._ocr_tap(targets, region_ratio=region_ratio, min_conf=min_conf)
 
     async def maybe_browse_logistics(self) -> None:
-        """burst 结束时按概率查订单/物流（roadmap §11.4），best-effort 不抛。
+        """按概率查订单/物流（roadmap §11.4），best-effort 不抛。
+
+        = 廉价决策门控 should_browse_logistics() + 真正执行 browse_logistics_now()。
+        给"已有前台 PDD"的调用方用（如 burst 结尾）。静默期(B)的调用方应该先
+        调模块级 should_browse_logistics() 决定要不要开 PDD，再调 browse_logistics_now()，
+        避免概率没命中却白白前台化 PDD。
+        """
+        if not should_browse_logistics(self.serial):
+            return
+        await self.browse_logistics_now()
+
+    async def browse_logistics_now(self) -> None:
+        """真正执行一次查物流并更新每日探测状态（不做开关/概率门控）。
 
         每日首次触发顺带确认该号有无真实订单：有→当日继续随机查；订单页空→
         当日冷却不再尝试（空订单页反而是异常信号）。导航失败保持 unknown 下次再试。
         """
-        global _logistics_day_key, _logistics_state
-        if not _LOGISTICS_BROWSE_ENABLED:
-            return
-        today = _cn_today_key()
-        if today != _logistics_day_key:
-            _logistics_day_key = today
-            _logistics_state = "unknown"
-            logger.info(f"[{self.serial}] logistics: 新的一天，重置查物流探测状态")
-        if _logistics_state == "cooldown":
-            return
-        if random.random() >= _LOGISTICS_BROWSE_PROB:
-            return
+        global _logistics_state
         logger.info(f"[{self.serial}] logistics: 触发查物流 (state={_logistics_state})")
         try:
             result = await self._browse_logistics_once()

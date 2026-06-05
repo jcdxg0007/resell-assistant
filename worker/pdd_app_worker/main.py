@@ -107,6 +107,39 @@ class BurstScheduler:
         # 本 burst 的 idle 关闭阈值（每次开 burst 随机抽 45-180s，避免固定 60s
         # 的统计指纹）。0 = 还没开 burst / 已经关闭。
         self._current_burst_idle_timeout: float = 0.0
+        # inter-burst 静默期"插一次拟人动作"的回调（如查物流 B 方案）。
+        # async callable，无参；None = 不插。由 main 启动时注册。
+        self._quiet_break_cb = None
+
+    def set_quiet_break_handler(self, cb) -> None:
+        """注册 inter-burst 静默期中段要插入的拟人动作回调（async, 无参, 自吞异常）。"""
+        self._quiet_break_cb = cb
+
+    async def _quiet_sleep_with_break(self, sleep_s: float) -> None:
+        """睡满 inter-burst 静默期；中途随机挑一个点插入一次拟人动作（B 方案查物流）。
+
+        真人在两波搜索之间的长间隔里，会偶尔点亮手机看一眼快递/订单——比"每次
+        搜完立刻查一遍再放下"自然。这里把整段静默切成「睡一会 → 插动作 → 睡剩下」，
+        插入动作耗时从剩余里扣掉，保证总静默 ≈ 目标 gap（不破坏 burst 节奏画像）。
+
+        静默太短（< 90s）或没注册回调时，退化成普通整段 sleep。
+        """
+        cb = self._quiet_break_cb
+        if cb is None or sleep_s < 90:
+            await asyncio.sleep(sleep_s)
+            return
+        # 在 [25%, 75%] 区间随机挑一个点插入，别每次都在正中间（固定相位 = 指纹）
+        break_at = sleep_s * random.uniform(0.25, 0.75)
+        await asyncio.sleep(break_at)
+        cb_started = time.monotonic()
+        try:
+            await cb()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"scheduler: quiet-break 回调异常(swallow): {exc}")
+        cb_elapsed = time.monotonic() - cb_started
+        remaining = sleep_s - break_at - cb_elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
 
     @staticmethod
     def _today_key() -> str:
@@ -199,7 +232,7 @@ class BurstScheduler:
                         f"(target gap {target_s / 60:.1f} min, "
                         f"elapsed since last burst {elapsed / 60:.1f} min)"
                     )
-                    await asyncio.sleep(sleep_s)
+                    await self._quiet_sleep_with_break(sleep_s)
             elif self._last_burst_ended_at > 0 and is_emergency:
                 # 紧急旁路：把 quiet 跳掉。reset _last_burst_ended_at 让后续
                 # 普通任务的 quiet 计时从本紧急 burst 结束时算起，避免连续
@@ -350,6 +383,34 @@ async def _press_home_on_device(serial: str) -> None:
         )
     except Exception as exc:
         logger.warning(f"[{serial}] press_home failed: {exc}")
+
+
+async def _quiet_logistics_break() -> None:
+    """inter-burst 静默期中段插入的「查物流」动作（B 方案）。
+
+    静默期 PDD 在后台、设备空闲，可安全独占一次：先廉价门控（开关/冷却/概率，
+    不碰设备），命中才前台化 PDD 走查物流流程，结束退后台。best-effort，自吞异常。
+    """
+    from pdd_app_worker import pdd_app_client as _pac
+    from pdd_app_worker.device_manager import healthy_serials
+    from pdd_app_worker.pdd_app_client import PddAppClient
+
+    if not _pac.should_browse_logistics():
+        return
+    devices = healthy_serials()
+    if not devices:
+        return
+    serial = devices[0]
+    logger.info(f"[{serial}] quiet-break: 静默期插入查物流")
+    try:
+        async with PddAppClient(serial) as cli:
+            cli.set_cleanup_mode("exit")  # 查完按 home 退后台
+            await cli.browse_logistics_now()
+    finally:
+        await _press_home_on_device(serial)
+
+
+_scheduler.set_quiet_break_handler(_quiet_logistics_break)
 
 
 def _setup_signals() -> None:
@@ -609,13 +670,9 @@ async def _handle_search(
         cli.set_cleanup_mode("soft")  # 临时；search 跑完后用真实结果覆盖
         search_result = await cli.search(keyword, **search_kwargs)
         burst_continues = _scheduler.mark_search_done()
-        # burst 结束 + 本次搜索没被风控/没报错时，按概率查物流（roadmap §11.4）。
-        # 必须在 __aexit__（退 PDD）之前、PDD 仍前台时做；best-effort 不影响主流程。
-        if not burst_continues and not search_result.error:
-            try:
-                await cli.maybe_browse_logistics()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"maybe_browse_logistics swallowed: {exc}")
+        # 查物流已从"burst 结尾"(A)挪到 inter-burst 静默期中段触发(B 方案，见
+        # _quiet_logistics_break + BurstScheduler._quiet_sleep_with_break)，更像
+        # 真人"两波搜索之间点亮手机看眼快递"，这里不再做。
         cli.set_cleanup_mode("soft" if burst_continues else "exit")
     # __aexit__ 已用最新的 cleanup_mode 跑完 _post_task_cleanup
 
