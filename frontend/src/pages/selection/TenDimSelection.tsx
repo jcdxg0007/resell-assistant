@@ -2,9 +2,11 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Typography, Card, Row, Col, Tag, Space, Button, Table, List, Input,
   Progress, Statistic, Empty, App, Tooltip, Segmented, Alert, Divider, Image,
+  Popconfirm,
 } from 'antd';
 import {
   ReloadOutlined, ThunderboltOutlined, SwapOutlined, SearchOutlined,
+  PushpinOutlined, PushpinFilled, DeleteOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -81,6 +83,19 @@ interface Analysis {
   arbitrage: Arbitrage | null;
 }
 
+interface PinnedItem {
+  product_id: string;
+  title: string;
+  price: number;
+  source_platform: string;
+  category: string | null;
+  item_wants: number;
+  seller_name: string | null;
+  source_url: string;
+  image_url: string | null;
+  pinned_at: string | null;
+}
+
 // ── 样式映射 ───────────────────────────────────────────────────
 const sideDecisionColor: Record<string, string> = { buy: 'green', watch: 'orange', skip: 'red' };
 const arbDecisionColor: Record<string, string> = { strong: 'green', try: 'blue', skip: 'red' };
@@ -144,7 +159,13 @@ const DimensionBars: React.FC<{ dims: Dimension[] }> = ({ dims }) => (
 );
 
 // ── 单平台结果表 ───────────────────────────────────────────────
-const SideTable: React.FC<{ side: SidePayload | null; platform: 'xianyu' | 'pdd' }> = ({ side, platform }) => {
+const SideTable: React.FC<{
+  side: SidePayload | null;
+  platform: 'xianyu' | 'pdd';
+  pinnedSet: Set<string>;
+  pinBusy: string | null;
+  onTogglePin: (productId: string, pinned: boolean) => void;
+}> = ({ side, platform, pinnedSet, pinBusy, onTogglePin }) => {
   if (!side || !side.items?.length) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`暂无${platform === 'xianyu' ? '闲鱼' : 'PDD'}样本`} />;
   }
@@ -182,6 +203,26 @@ const SideTable: React.FC<{ side: SidePayload | null; platform: 'xianyu' | 'pdd'
     {
       title: '判定', dataIndex: 'decision', width: 70,
       render: (d: string, r: SideItem) => <Tag color={sideDecisionColor[d]}>{r.decision_label}</Tag>,
+    },
+    {
+      title: '收藏', width: 56, align: 'center',
+      render: (_: unknown, r: SideItem) => {
+        // 只有闲鱼商品有真实 product_id 可 Pin；PDD 端是快照无商品行
+        if (platform !== 'xianyu' || !r.product_id) {
+          return <Tooltip title="PDD 端为快照，暂不支持收藏"><PushpinOutlined style={{ color: '#d9d9d9' }} /></Tooltip>;
+        }
+        const pinned = pinnedSet.has(r.product_id);
+        return (
+          <Tooltip title={pinned ? '取消收藏' : '收藏(Pin，永不进每日清库)'}>
+            <Button
+              type="text" size="small"
+              loading={pinBusy === r.product_id}
+              icon={pinned ? <PushpinFilled style={{ color: '#fa8c16' }} /> : <PushpinOutlined />}
+              onClick={() => onTogglePin(r.product_id as string, pinned)}
+            />
+          </Tooltip>
+        );
+      },
     },
   ];
   return (
@@ -225,6 +266,47 @@ const TenDimSelection: React.FC = () => {
   }, []);
   const [analyzingAll, setAnalyzingAll] = useState(false);
   const [allProgress, setAllProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // ── Pin 收藏 ──
+  const [pinnedRows, setPinnedRows] = useState<PinnedItem[]>([]);
+  const [pinnedLoading, setPinnedLoading] = useState(false);
+  const [pinBusy, setPinBusy] = useState<string | null>(null);
+  const [pinSelected, setPinSelected] = useState<string[]>([]);
+  const [pinDeleting, setPinDeleting] = useState(false);
+  const pinnedSet = React.useMemo(() => new Set(pinnedRows.map((r) => r.product_id)), [pinnedRows]);
+
+  const loadPinned = useCallback(async () => {
+    setPinnedLoading(true);
+    try {
+      const res = await api.get('/selection/pinned');
+      setPinnedRows(res.data.items || []);
+    } catch { /* 静默 */ } finally { setPinnedLoading(false); }
+  }, []);
+
+  const togglePin = useCallback(async (productId: string, pinned: boolean) => {
+    setPinBusy(productId);
+    try {
+      if (pinned) await api.delete(`/selection/products/${productId}/pin`);
+      else await api.post(`/selection/products/${productId}/pin`);
+      message.success(pinned ? '已取消收藏' : '已收藏');
+      await loadPinned();
+    } catch {
+      message.error('操作失败');
+    } finally { setPinBusy(null); }
+  }, [loadPinned, message]);
+
+  const deleteSelectedPinned = useCallback(async () => {
+    if (pinSelected.length === 0) return;
+    setPinDeleting(true);
+    try {
+      const res = await api.post('/selection/pinned/delete', { product_ids: pinSelected });
+      message.success(`已删除 ${res.data.deleted ?? pinSelected.length} 个`);
+      setPinSelected([]);
+      await loadPinned();
+    } catch {
+      message.error('删除失败');
+    } finally { setPinDeleting(false); }
+  }, [pinSelected, loadPinned, message]);
 
   const loadKeywords = useCallback(async () => {
     setKwLoading(true);
@@ -300,7 +382,7 @@ const TenDimSelection: React.FC = () => {
     loadKeywords();
   }, [selected, putCache, message, loadKeywords]);
 
-  useEffect(() => { loadKeywords(); }, [loadKeywords]);
+  useEffect(() => { loadKeywords(); loadPinned(); }, [loadKeywords, loadPinned]);
 
   const visibleKeywords = keywords.filter((k) => {
     if (filter === 'both' && !k.both) return false;
@@ -472,7 +554,13 @@ const TenDimSelection: React.FC = () => {
                   })()
                 }
               >
-                <SideTable side={sideView === 'xianyu' ? analysis?.xianyu ?? null : analysis?.pdd ?? null} platform={sideView} />
+                <SideTable
+                  side={sideView === 'xianyu' ? analysis?.xianyu ?? null : analysis?.pdd ?? null}
+                  platform={sideView}
+                  pinnedSet={pinnedSet}
+                  pinBusy={pinBusy}
+                  onTogglePin={togglePin}
+                />
                 <Divider style={{ margin: '8px 0' }} />
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   点击行展开查看该商品的各维度得分。判定：<Tag color="green">推荐</Tag><Tag color="orange">观察</Tag><Tag color="red">跳过</Tag>
@@ -480,6 +568,75 @@ const TenDimSelection: React.FC = () => {
               </Card>
             </>
           )}
+
+          {/* 已 Pin 收藏：跨关键词的保留清单，永不进每日清库 */}
+          <Card
+            size="small"
+            title={
+              <Space>
+                <PushpinFilled style={{ color: '#fa8c16' }} />
+                已 Pin 收藏
+                <Tag>{pinnedRows.length}</Tag>
+              </Space>
+            }
+            extra={
+              <Space>
+                <Button size="small" type="text" icon={<ReloadOutlined />} onClick={loadPinned} loading={pinnedLoading} />
+                <Popconfirm
+                  title={`删除选中的 ${pinSelected.length} 个收藏？`}
+                  description="物理删除，不可恢复"
+                  okText="删除" okButtonProps={{ danger: true }} cancelText="取消"
+                  onConfirm={deleteSelectedPinned}
+                  disabled={pinSelected.length === 0}
+                >
+                  <Button size="small" danger icon={<DeleteOutlined />} disabled={pinSelected.length === 0} loading={pinDeleting}>
+                    删除选中{pinSelected.length ? ` (${pinSelected.length})` : ''}
+                  </Button>
+                </Popconfirm>
+              </Space>
+            }
+          >
+            <Table<PinnedItem>
+              size="small"
+              rowKey="product_id"
+              loading={pinnedLoading}
+              dataSource={pinnedRows}
+              locale={{ emptyText: '还没有收藏。在上方闲鱼端列表点「收藏」按钮即可保留商品，每日清库不会清掉它们。' }}
+              pagination={{ pageSize: 8, size: 'small', showSizeChanger: false, hideOnSinglePage: true }}
+              rowSelection={{
+                selectedRowKeys: pinSelected,
+                onChange: (keys) => setPinSelected(keys as string[]),
+              }}
+              columns={[
+                {
+                  title: '商品', dataIndex: 'title', ellipsis: true,
+                  render: (t: string, r: PinnedItem) => (
+                    <Space size={6}>
+                      {r.image_url && (
+                        <Image src={r.image_url} alt="" width={32} height={32} style={{ objectFit: 'cover', borderRadius: 4 }} preview={{ mask: false }} />
+                      )}
+                      {r.source_url
+                        ? <a href={r.source_url} target="_blank" rel="noreferrer" style={{ maxWidth: 240, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t || '—'}</a>
+                        : <Text ellipsis style={{ maxWidth: 240 }}>{t || '—'}</Text>}
+                    </Space>
+                  ),
+                },
+                { title: '关键词', dataIndex: 'category', width: 110, ellipsis: true, render: (c: string | null) => c ? <Tag>{c}</Tag> : '—' },
+                { title: '价格', dataIndex: 'price', width: 80, sorter: (a, b) => a.price - b.price, render: (v: number) => <Text>¥{v?.toFixed(0)}</Text> },
+                { title: '想要', dataIndex: 'item_wants', width: 64, render: (v: number) => <Text type="secondary">{v ?? 0}</Text> },
+                { title: '卖家', dataIndex: 'seller_name', width: 110, ellipsis: true, render: (s: string | null) => s || '—' },
+                { title: '收藏于', dataIndex: 'pinned_at', width: 116, render: (v: string | null) => <Text type="secondary" style={{ fontSize: 12 }}>{fmtTime(v)}</Text> },
+                {
+                  title: '', width: 44, align: 'center',
+                  render: (_: unknown, r: PinnedItem) => (
+                    <Tooltip title="取消收藏">
+                      <Button type="text" size="small" loading={pinBusy === r.product_id} icon={<PushpinFilled style={{ color: '#fa8c16' }} />} onClick={() => togglePin(r.product_id, true)} />
+                    </Tooltip>
+                  ),
+                },
+              ]}
+            />
+          </Card>
         </Space>
       </Col>
     </Row>

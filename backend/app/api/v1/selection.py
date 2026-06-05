@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,6 +89,81 @@ async def clear_xianyu_products(
     if category:
         stmt = stmt.where(Product.category == category)
     res = await db.execute(stmt)
+    await db.commit()
+    return {"ok": True, "deleted": res.rowcount or 0}
+
+
+# ── Pin 收藏（保留商品、永不进每日清库）──────────────────────────────
+def _pinned_to_dict(p: Product) -> dict:
+    imgs = p.image_urls if isinstance(p.image_urls, list) else []
+    return {
+        "product_id": str(p.id),
+        "title": p.title,
+        "price": p.price,
+        "source_platform": p.source_platform,
+        "category": p.category,
+        "item_wants": p.sales_count or 0,
+        "seller_name": p.seller_name,
+        "source_url": p.source_url,
+        "image_url": imgs[0] if imgs else None,
+        "pinned_at": p.pinned_at.isoformat() if p.pinned_at else None,
+    }
+
+
+@router.post("/products/{product_id}/pin", summary="Pin 一个商品（收藏，不进每日清库）")
+async def pin_product(
+    product_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    p = (await db.execute(select(Product).where(Product.id == product_id))).scalar_one_or_none()
+    if p is None:
+        raise HTTPException(status_code=404, detail="商品不存在")
+    p.pinned_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"ok": True, "product_id": product_id, "pinned_at": p.pinned_at.isoformat()}
+
+
+@router.delete("/products/{product_id}/pin", summary="取消 Pin")
+async def unpin_product(
+    product_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    p = (await db.execute(select(Product).where(Product.id == product_id))).scalar_one_or_none()
+    if p is None:
+        raise HTTPException(status_code=404, detail="商品不存在")
+    p.pinned_at = None
+    await db.commit()
+    return {"ok": True, "product_id": product_id}
+
+
+@router.get("/pinned", summary="已 Pin 收藏的商品列表")
+async def list_pinned(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        select(Product)
+        .where(Product.pinned_at.isnot(None))
+        .order_by(Product.pinned_at.desc())
+    )).scalars().all()
+    return {"total": len(rows), "items": [_pinned_to_dict(p) for p in rows]}
+
+
+class PinnedDeleteBody(BaseModel):
+    product_ids: list[str]
+
+
+@router.post("/pinned/delete", summary="批量删除已 Pin 商品（物理删除，不可恢复）")
+async def delete_pinned(
+    body: PinnedDeleteBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not body.product_ids:
+        return {"ok": True, "deleted": 0}
+    res = await db.execute(delete(Product).where(Product.id.in_(body.product_ids)))
     await db.commit()
     return {"ok": True, "deleted": res.rowcount or 0}
 

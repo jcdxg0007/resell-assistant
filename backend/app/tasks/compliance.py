@@ -19,6 +19,7 @@ from sqlalchemy import text
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
+from app.services.pdd_search_run import _cn_day_start
 from app.tasks.selection import run_async
 
 
@@ -114,4 +115,58 @@ async def _enforce_product_cap():
             "cap": cap,
             "deleted": deleted,
             "unevictable": max(0, to_delete - deleted),
+        }
+
+
+@celery_app.task(name="app.tasks.compliance.daily_purge_collected")
+def daily_purge_collected():
+    """每日清库：把「前一日」的闲鱼采集商品物理删掉，今日重新来过。
+
+    保留：① 人工 Pin 的（pinned_at 非空，收藏永不清）；② 今日（东八区 0 点起）
+    又采到的（last_crawled_at >= 当日 0 点）；③ 业务关联行（在卖挂牌/订单/匹配对）。
+    只清 source_platform=XIANYU 的采集结果——PDD 采集结果存在 pdd_search_runs
+    流水里、且控制台本就按「今日」窗口滚动，不在此物理清理。
+    """
+    logger.info("compliance: starting daily_purge_collected")
+    return run_async(_daily_purge_collected())
+
+
+async def _daily_purge_collected():
+    day_start = _cn_day_start()
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            text(
+                """
+                WITH victims AS (
+                    SELECT p.id
+                    FROM products p
+                    WHERE p.source_platform = 'XIANYU'
+                      AND p.pinned_at IS NULL
+                      AND p.last_crawled_at < :day_start
+                      AND NOT EXISTS (
+                          SELECT 1 FROM xianyu_listings xl
+                          WHERE xl.product_id = p.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM orders o
+                          WHERE o.product_id = p.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM product_matches pm
+                          WHERE pm.source_product_id = p.id
+                             OR pm.target_product_id = p.id
+                      )
+                )
+                DELETE FROM products WHERE id IN (SELECT id FROM victims)
+                """
+            ),
+            {"day_start": day_start},
+        )
+        await db.commit()
+        deleted = result.rowcount or 0
+        logger.info(f"compliance: daily_purge_collected deleted {deleted} stale xianyu rows")
+        return {
+            "purged_at": datetime.now(timezone.utc).isoformat(),
+            "day_start": day_start.isoformat(),
+            "deleted": deleted,
         }

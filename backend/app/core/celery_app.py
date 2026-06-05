@@ -113,6 +113,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.compliance.enforce_product_cap",
         "schedule": crontab(minute=15, hour=4),
     },
+    # 每日清库：03:00 把前一日的闲鱼采集商品清掉（Pin 的、今日又采到的、业务
+    # 关联的都保留），让采集结果每天重新来过。见 compliance.daily_purge_collected。
+    "daily-purge-collected": {
+        "task": "app.tasks.compliance.daily_purge_collected",
+        "schedule": crontab(minute=0, hour=3),
+    },
 
     # === PDD 全自动跑批 ===
     # 每 3 分钟唤醒一次「自带闸门」的 tick：是否真派由任务内部按 开关/暂停/
