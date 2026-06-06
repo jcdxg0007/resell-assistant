@@ -241,3 +241,17 @@ def purge_xianyu_search_runs():
     return run_async(_purge_search_runs(
         "xianyu_search_runs", "xianyu_runs_retention_days", XIANYU_RUNS_RETENTION_DAYS
     ))
+
+
+# 跨天同款观测表的保留天数。它比流水更想留长一点（看长期价格趋势），单独给个默认
+# 90 天；走运行时配置 sightings_retention_days 时可改。
+SIGHTINGS_RETENTION_DAYS = 90
+
+
+@celery_app.task(name="app.tasks.compliance.purge_product_sightings")
+def purge_product_sightings():
+    """每日物理清理过期跨天同款观测（保留天数走 sightings_retention_days，默认 90）。"""
+    logger.info("compliance: starting purge_product_sightings")
+    return run_async(_purge_search_runs(
+        "product_sightings", "sightings_retention_days", SIGHTINGS_RETENTION_DAYS
+    ))
