@@ -598,20 +598,13 @@ const TenDimSelection: React.FC = () => {
                           {k.cached ? fmtTime(k.scored_at) : '未分析'}
                         </Text>
                       </Space>
-                      <Popconfirm
-                        title="从候选列表移除"
-                        description={<span>清掉「{k.keyword}」的分析缓存、PDD 流水与闲鱼采集商品<br />（Pin 收藏保留；下次再采到会重现）</span>}
-                        okText="移除" cancelText="取消" okButtonProps={{ danger: true }}
-                        onConfirm={() => removeKeyword(k.keyword)}
-                      >
-                        <Button
-                          size="small" type="text" danger
-                          icon={<CloseOutlined />}
-                          loading={kwDeleting === k.keyword}
-                          onClick={(e) => e.stopPropagation()}
-                          style={{ flex: '0 0 auto' }}
-                        />
-                      </Popconfirm>
+                      <Button
+                        size="small" type="text" danger
+                        icon={<CloseOutlined />}
+                        loading={kwDeleting === k.keyword}
+                        onClick={(e) => { e.stopPropagation(); removeKeyword(k.keyword); }}
+                        style={{ flex: '0 0 auto' }}
+                      />
                     </div>
                   </List.Item>
                 )}
