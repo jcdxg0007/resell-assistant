@@ -79,6 +79,13 @@ def run_async(coro):
             loop.run_until_complete(engine.dispose())
         except Exception as e:
             logger.debug(f"Pre-task engine dispose ignored: {e}")
+        # 同理重置 redis 连接池，否则复用死 loop 上的连接会抛
+        # 'Future attached to a different loop / Event loop is closed'
+        try:
+            from app.core.redis import reset_redis_pool
+            loop.run_until_complete(reset_redis_pool())
+        except Exception as e:
+            logger.debug(f"Pre-task redis reset ignored: {e}")
         return loop.run_until_complete(coro)
     finally:
         try:
