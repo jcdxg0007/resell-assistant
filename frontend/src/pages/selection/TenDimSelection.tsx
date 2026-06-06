@@ -217,7 +217,13 @@ const SideTable: React.FC<{
             />
           )}
           {r.source_url
-            ? <a href={r.source_url} target="_blank" rel="noreferrer" style={{ maxWidth: 220, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }}>{t || '—'}</a>
+            ? <a
+                href={r.source_url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                style={{ maxWidth: 220, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom', color: '#1677ff' }}
+              >{t || '—'}</a>
             : <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>}
           {(r.risk_tags || []).includes('suspicious_low') && <Tag color="volcano">极低价</Tag>}
         </Space>

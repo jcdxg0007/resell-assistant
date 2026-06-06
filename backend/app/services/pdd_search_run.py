@@ -42,6 +42,26 @@ def _cn_day_start() -> datetime:
     return start
 
 
+# 选品池保留窗口的回落默认（与 compliance.PDD_RUNS_RETENTION_DAYS 一致）。
+_PDD_RETENTION_FALLBACK_DAYS = 30
+
+
+async def _pdd_retention_start(db: AsyncSession) -> datetime:
+    """选品池/展示窗口起点 = now - pdd_runs_retention_days（前端可改）。
+
+    注意：这是「显示/选品池」口径，比「逻辑日」宽；自动跑批的去重仍走 _cn_day_start
+    （每个逻辑日每词只跑一遍），两者互不影响。
+    """
+    try:
+        from app.services.pdd_worker_config import get_runtime_config
+        cfg = await get_runtime_config(db)
+        days = int(cfg.get("pdd_runs_retention_days") or _PDD_RETENTION_FALLBACK_DAYS)
+    except Exception:
+        days = _PDD_RETENTION_FALLBACK_DAYS
+    days = max(1, days)
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
 async def persist_search_run(
     *,
     status: str,
@@ -339,11 +359,15 @@ async def console_data(db: AsyncSession) -> dict[str, Any]:
 
 
 async def keyword_items(db: AsyncSession, keyword_text: str) -> dict[str, Any]:
-    """取某关键词今天最新一条采集记录的逐条商品，给前端结果区展示。"""
-    day_start = _cn_day_start()
+    """取某关键词「保留窗口内」最新一条采集记录的逐条商品，给十维度选品页用。
+
+    口径与选品池统一：窗口 = now - pdd_runs_retention_days（前端「数据清理」可改），
+    而非「当天」——这样今天没跑过的词也能回看最近 N 天内最新一次快照。
+    """
+    since = await _pdd_retention_start(db)
     stmt = (
         select(PddSearchRun)
-        .where(PddSearchRun.created_at >= day_start)
+        .where(PddSearchRun.created_at >= since)
         .where(PddSearchRun.keyword_text == keyword_text)
         .order_by(PddSearchRun.created_at.desc())
         .limit(1)

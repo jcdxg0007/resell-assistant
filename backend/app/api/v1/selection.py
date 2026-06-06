@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -22,6 +22,7 @@ from app.services.selection.pricing import smart_pricing
 from app.services.selection import ten_dim_scoring
 from app.services.selection.ten_dim_scoring import pdd_fingerprint
 from app.services.pdd_search_run import keyword_items, _cn_day_start
+from app.services.pdd_worker_config import get_runtime_config
 
 router = APIRouter()
 
@@ -471,11 +472,16 @@ async def ten_dim_keywords(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    day_start = _cn_day_start()
+    # 选品池窗口（比逻辑日宽）：PDD 走 pdd_runs_retention_days，闲鱼商品本身已按
+    # xianyu_runs_retention_days 保留 N 天，这里只兜底按同窗口过滤。
+    cfg = await get_runtime_config(db)
+    now = datetime.now(timezone.utc)
+    pdd_since = now - timedelta(days=max(1, int(cfg.get("pdd_runs_retention_days") or 30)))
+    xy_since = now - timedelta(days=max(1, int(cfg.get("xianyu_runs_retention_days") or 30)))
 
     pdd_rows = (await db.execute(
         select(PddSearchRun.keyword_text, func.max(PddSearchRun.created_at))
-        .where(PddSearchRun.created_at >= day_start)
+        .where(PddSearchRun.created_at >= pdd_since)
         .group_by(PddSearchRun.keyword_text)
     )).all()
     pdd_map = {kw: ts for kw, ts in pdd_rows if kw}
@@ -485,6 +491,7 @@ async def ten_dim_keywords(
         .where(Product.source_platform == Platform.XIANYU)
         .where(Product.is_active == True)
         .where(Product.category.isnot(None))
+        .where(Product.last_crawled_at >= xy_since)
         .distinct()
     )).scalars().all()
     xy_set = {c for c in xy_rows if c}

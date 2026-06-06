@@ -19,7 +19,6 @@ from sqlalchemy import text
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
-from app.services.pdd_search_run import _cn_day_start
 from app.tasks.selection import run_async
 
 
@@ -120,20 +119,31 @@ async def _enforce_product_cap():
 
 @celery_app.task(name="app.tasks.compliance.daily_purge_collected")
 def daily_purge_collected():
-    """每日清库：把「前一日」的闲鱼采集商品物理删掉，今日重新来过。
+    """每日清库：把超过「保留窗口」的闲鱼采集商品物理删掉。
 
-    保留：① 人工 Pin 的（pinned_at 非空，收藏永不清）；② 今日（东八区 0 点起）
-    又采到的（last_crawled_at >= 当日 0 点）；③ 业务关联行（在卖挂牌/订单/匹配对）。
-    只清 source_platform=XIANYU 的采集结果——PDD 采集结果存在 pdd_search_runs
-    流水里、且控制台本就按「今日」窗口滚动，不在此物理清理。
+    与「选品池/任务流水」口径统一：保留天数走运行时配置 xianyu_runs_retention_days
+    （前端「数据清理」可改），默认回落 XIANYU_RUNS_RETENTION_DAYS。这样十维度选品
+    页的闲鱼侧能往回看 N 天，而不是每天 3 点归零。
+
+    保留：① 人工 Pin 的（pinned_at 非空，收藏永不清）；② 保留窗口内又采到的
+    （last_crawled_at >= now - N 天）；③ 业务关联行（在卖挂牌/订单/匹配对）。
+    只清 source_platform=XIANYU 的采集结果——PDD 采集结果存在 pdd_search_runs 流水里。
     """
     logger.info("compliance: starting daily_purge_collected")
     return run_async(_daily_purge_collected())
 
 
 async def _daily_purge_collected():
-    day_start = _cn_day_start()
     async with AsyncSessionLocal() as db:
+        # 闲鱼商品保留天数与「闲鱼流水保留」统一，前端可改，读不到回落常量。
+        try:
+            from app.services.pdd_worker_config import get_runtime_config
+            cfg = await get_runtime_config(db)
+            retention = int(cfg.get("xianyu_runs_retention_days") or XIANYU_RUNS_RETENTION_DAYS)
+        except Exception:
+            retention = XIANYU_RUNS_RETENTION_DAYS
+        retention = max(1, retention)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention)
         result = await db.execute(
             text(
                 """
@@ -142,7 +152,7 @@ async def _daily_purge_collected():
                     FROM products p
                     WHERE p.source_platform = 'XIANYU'
                       AND p.pinned_at IS NULL
-                      AND p.last_crawled_at < :day_start
+                      AND p.last_crawled_at < :cutoff
                       AND NOT EXISTS (
                           SELECT 1 FROM xianyu_listings xl
                           WHERE xl.product_id = p.id
@@ -160,14 +170,18 @@ async def _daily_purge_collected():
                 DELETE FROM products WHERE id IN (SELECT id FROM victims)
                 """
             ),
-            {"day_start": day_start},
+            {"cutoff": cutoff},
         )
         await db.commit()
         deleted = result.rowcount or 0
-        logger.info(f"compliance: daily_purge_collected deleted {deleted} stale xianyu rows")
+        logger.info(
+            f"compliance: daily_purge_collected deleted {deleted} stale xianyu rows "
+            f"older than {cutoff.isoformat()} (retention={retention}d)"
+        )
         return {
             "purged_at": datetime.now(timezone.utc).isoformat(),
-            "day_start": day_start.isoformat(),
+            "cutoff": cutoff.isoformat(),
+            "retention_days": retention,
             "deleted": deleted,
         }
 
