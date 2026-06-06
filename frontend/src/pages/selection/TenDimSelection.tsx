@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   ReloadOutlined, ThunderboltOutlined, SwapOutlined, SearchOutlined,
-  PushpinOutlined, PushpinFilled, DeleteOutlined,
+  PushpinOutlined, PushpinFilled, DeleteOutlined, CloseOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -370,6 +370,7 @@ const TenDimSelection: React.FC = () => {
 
   const [keywords, setKeywords] = useState<KeywordEntry[]>([]);
   const [kwLoading, setKwLoading] = useState(false);
+  const [kwDeleting, setKwDeleting] = useState<string | null>(null);
   const [filter, setFilter] = useState<'both' | 'all'>('both');
   const [search, setSearch] = useState('');
 
@@ -455,6 +456,18 @@ const TenDimSelection: React.FC = () => {
       setKeywords(res.data.items || []);
     } catch { /* 静默 */ } finally { setKwLoading(false); }
   }, []);
+
+  const removeKeyword = useCallback(async (kw: string) => {
+    setKwDeleting(kw);
+    try {
+      await api.delete(`/selection/ten-dim/${encodeURIComponent(kw)}`);
+      setKeywords((prev) => prev.filter((k) => k.keyword !== kw));
+      setSelected((cur) => (cur === kw ? null : cur));
+      message.success('已从候选列表移除');
+    } catch {
+      message.error('移除失败');
+    } finally { setKwDeleting(null); }
+  }, [message]);
 
   const loadAnalysis = useCallback(async (kw: string) => {
     setSelected(kw);
@@ -566,24 +579,40 @@ const TenDimSelection: React.FC = () => {
                       background: selected === k.keyword ? '#e6f4ff' : undefined,
                     }}
                   >
-                    <Space size={6} wrap style={{ width: '100%' }}>
-                      <Text strong={selected === k.keyword}>{k.keyword}</Text>
-                      {k.both
-                        ? <Tag color="green" style={{ marginInlineEnd: 0 }}>双平台</Tag>
-                        : k.has_pdd
-                          ? <Tag color="red" style={{ marginInlineEnd: 0 }}>仅PDD</Tag>
-                          : <Tag color="gold" style={{ marginInlineEnd: 0 }}>仅闲鱼</Tag>}
-                      {k.stale && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待刷新</Tag>}
-                      {k.arb_available && k.arb_direction_label && (
-                        <Tag color="purple" style={{ marginInlineEnd: 0 }}>
-                          {k.arb_direction_label}
-                          {k.arb_score != null ? ` · ${k.arb_score}分` : ''}
-                        </Tag>
-                      )}
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        {k.cached ? fmtTime(k.scored_at) : '未分析'}
-                      </Text>
-                    </Space>
+                    <div style={{ display: 'flex', alignItems: 'center', width: '100%', gap: 4 }}>
+                      <Space size={6} wrap style={{ flex: 1, minWidth: 0 }}>
+                        <Text strong={selected === k.keyword}>{k.keyword}</Text>
+                        {k.both
+                          ? <Tag color="green" style={{ marginInlineEnd: 0 }}>双平台</Tag>
+                          : k.has_pdd
+                            ? <Tag color="red" style={{ marginInlineEnd: 0 }}>仅PDD</Tag>
+                            : <Tag color="gold" style={{ marginInlineEnd: 0 }}>仅闲鱼</Tag>}
+                        {k.stale && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待刷新</Tag>}
+                        {k.arb_available && k.arb_direction_label && (
+                          <Tag color="purple" style={{ marginInlineEnd: 0 }}>
+                            {k.arb_direction_label}
+                            {k.arb_score != null ? ` · ${k.arb_score}分` : ''}
+                          </Tag>
+                        )}
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {k.cached ? fmtTime(k.scored_at) : '未分析'}
+                        </Text>
+                      </Space>
+                      <Popconfirm
+                        title="从候选列表移除"
+                        description={<span>清掉「{k.keyword}」的分析缓存、PDD 流水与闲鱼采集商品<br />（Pin 收藏保留；下次再采到会重现）</span>}
+                        okText="移除" cancelText="取消" okButtonProps={{ danger: true }}
+                        onConfirm={() => removeKeyword(k.keyword)}
+                      >
+                        <Button
+                          size="small" type="text" danger
+                          icon={<CloseOutlined />}
+                          loading={kwDeleting === k.keyword}
+                          onClick={(e) => e.stopPropagation()}
+                          style={{ flex: '0 0 auto' }}
+                        />
+                      </Popconfirm>
+                    </div>
                   </List.Item>
                 )}
               />

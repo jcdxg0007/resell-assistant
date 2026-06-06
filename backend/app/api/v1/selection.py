@@ -595,6 +595,40 @@ async def ten_dim_refresh(
     return await _compute_and_cache(db, keyword)
 
 
+@router.delete("/ten-dim/{keyword}", summary="从候选列表移除某关键词（清其选品数据）")
+async def ten_dim_delete(
+    keyword: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """清掉该词的选品数据，使它从候选列表消失（下次再采到会重现）。
+
+    删三处：① selection_analysis 分析缓存；② 该词全部 pdd_search_runs 流水；
+    ③ 该词闲鱼采集商品（保留 Pin：pinned_at 非空的不删）。Pin 收藏与跨天观测
+    （product_sightings，给趋势用）不动。
+    """
+    analysis_deleted = (await db.execute(
+        delete(SelectionAnalysis).where(SelectionAnalysis.keyword == keyword)
+    )).rowcount or 0
+    pdd_deleted = (await db.execute(
+        delete(PddSearchRun).where(PddSearchRun.keyword_text == keyword)
+    )).rowcount or 0
+    xy_deleted = (await db.execute(
+        delete(Product)
+        .where(Product.source_platform == Platform.XIANYU)
+        .where(Product.category == keyword)
+        .where(Product.pinned_at.is_(None))
+    )).rowcount or 0
+    await db.commit()
+    return {
+        "ok": True,
+        "keyword": keyword,
+        "analysis_deleted": analysis_deleted,
+        "pdd_runs_deleted": pdd_deleted,
+        "xianyu_products_deleted": xy_deleted,
+    }
+
+
 @router.get("/xhs/recommendations", summary="小红书选品推荐")
 async def xhs_recommendations(
     min_score: float = Query(0, ge=0, le=100),
