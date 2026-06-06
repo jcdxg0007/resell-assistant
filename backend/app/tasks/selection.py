@@ -1440,6 +1440,28 @@ async def _instant_search(
             f"market_data active_listings={market_data.get('active_listings', 0)}"
         )
 
+        # 跨天同款观测（Phase 1）：按 xy:<item_id> 记当日一条，绝不连累采集
+        try:
+            from app.services.selection.sightings import (
+                xianyu_item_key, record_sightings,
+            )
+            sight_recs = []
+            for item in items:
+                key = xianyu_item_key(item.get("item_id"))
+                if not key:
+                    continue
+                sight_recs.append({
+                    "item_key": key,
+                    "title": (item.get("title") or "")[:500],
+                    "price": item.get("price"),
+                    "heat": item.get("want_count", 0),
+                    "image_url": item.get("image_url"),
+                })
+            if sight_recs:
+                await record_sightings(db, "xianyu", sight_recs, keyword=keyword)
+        except Exception as e:
+            logger.warning(f"xianyu record_sightings failed: {e}")
+
         # ─── P2 scoring pipeline ─────────────────────────────────────
         # 1) make sure this keyword exists in the curated library
         # 2) clean the sample (relevance + suite split + robust stats)

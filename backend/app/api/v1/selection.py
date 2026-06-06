@@ -416,6 +416,7 @@ async def _gather_xianyu_raw(db: AsyncSession, keyword: str) -> tuple[list[dict]
         "published_at": p.published_at.isoformat() if p.published_at else None,
         "source_url": p.source_url,
         "seller_name": p.seller_name,
+        "source_id": p.source_id,
         "crawled_at": p.last_crawled_at.isoformat() if p.last_crawled_at else None,
     } for p in rows]
     active_listings = (await db.execute(
@@ -444,6 +445,7 @@ async def _compute_and_cache(db: AsyncSession, keyword: str) -> dict:
         pdd_items=pdd_items,
         active_listings=active_listings,
     )
+    await _attach_sighting_stats(db, payload)
     now = datetime.now(timezone.utc)
     existing = (await db.execute(
         select(SelectionAnalysis).where(SelectionAnalysis.keyword == keyword)
@@ -465,6 +467,39 @@ async def _compute_and_cache(db: AsyncSession, keyword: str) -> dict:
     payload["scored_at"] = now.isoformat()
     payload["cached"] = False
     return payload
+
+
+async def _attach_sighting_stats(db: AsyncSession, payload: dict) -> None:
+    """给打分结果的每条商品附上跨天观测统计（同款识别 Phase 1）。
+
+    闲鱼 key=xy:<source_id>，PDD key=pdd:<sha1(clean_title)>。给每条加 item_key /
+    first_seen / last_seen / days_seen / price_history，供前端做「出现N天」标签与
+    价格趋势 sparkline。读不到/出错则静默跳过，不影响打分主结果。
+    """
+    try:
+        from app.services.selection.sightings import (
+            xianyu_item_key, pdd_item_key, gather_sighting_stats,
+        )
+        xy_items = (payload.get("xianyu") or {}).get("items") or []
+        pdd_items = (payload.get("pdd") or {}).get("items") or []
+        for it in xy_items:
+            it["item_key"] = xianyu_item_key(it.get("source_id"))
+        for it in pdd_items:
+            it["item_key"] = pdd_item_key(it.get("title"))
+
+        keys = [it["item_key"] for it in (xy_items + pdd_items) if it.get("item_key")]
+        stats = await gather_sighting_stats(db, keys)
+        for it in (xy_items + pdd_items):
+            s = stats.get(it.get("item_key") or "")
+            if not s:
+                continue
+            it["first_seen"] = s["first_seen"]
+            it["last_seen"] = s["last_seen"]
+            it["days_seen"] = s["days_seen"]
+            it["price_history"] = s["history"]
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(f"_attach_sighting_stats failed: {exc}")
 
 
 @router.get("/ten-dim/keywords", summary="十维度选品候选关键词（今日两池有数据的）")

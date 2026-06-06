@@ -49,6 +49,11 @@ interface SideItem {
   seller_name?: string | null;
   published_at?: string | null;
   crawled_at?: string | null;
+  item_key?: string | null;
+  first_seen?: string | null;
+  last_seen?: string | null;
+  days_seen?: number | null;
+  price_history?: { date: string; price: number | null; heat: number | null }[];
   relevance: number;
   risk_tags: string[];
   total_score: number;
@@ -168,6 +173,32 @@ const fmtPublished = (iso?: string | null): string => {
   return d.toLocaleDateString('zh-CN');
 };
 
+// ── 价格趋势 mini sparkline（无依赖，纯 SVG）────────────────────
+const Sparkline: React.FC<{
+  points: { date: string; price: number | null; heat: number | null }[];
+  width?: number;
+  height?: number;
+}> = ({ points, width = 56, height = 18 }) => {
+  const vals = points.map((p) => (typeof p.price === 'number' ? p.price : null)).filter((v): v is number => v != null);
+  if (vals.length < 2) return <span style={{ color: '#bbb', fontSize: 11 }}>—</span>;
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  const span = max - min || 1;
+  const stepX = width / (vals.length - 1);
+  const coords = vals.map((v, i) => {
+    const x = i * stepX;
+    const y = height - ((v - min) / span) * (height - 2) - 1;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const up = vals[vals.length - 1] >= vals[0];
+  const stroke = up ? '#cf1322' : '#52c41a'; // 价涨=红 价跌=绿
+  return (
+    <svg width={width} height={height} style={{ verticalAlign: 'middle' }}>
+      <polyline points={coords.join(' ')} fill="none" stroke={stroke} strokeWidth={1.2} />
+    </svg>
+  );
+};
+
 // ── 维度条 ─────────────────────────────────────────────────────
 const DimensionBars: React.FC<{ dims: Dimension[] }> = ({ dims }) => (
   <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -258,6 +289,32 @@ const SideTable: React.FC<{
       title: '采集', dataIndex: 'crawled_at', width: 92,
       sorter: (a, b) => (new Date(a.crawled_at || 0).getTime()) - (new Date(b.crawled_at || 0).getTime()),
       render: (v?: string | null) => <Text type="secondary" style={{ fontSize: 12 }}>{fmtTime(v)}</Text>,
+    },
+    {
+      title: '动态', dataIndex: 'days_seen', width: 118,
+      sorter: (a, b) => (a.days_seen ?? 0) - (b.days_seen ?? 0),
+      render: (_: unknown, r: SideItem) => {
+        const d = r.days_seen ?? 0;
+        if (!d) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
+        const color = d >= 3 ? 'green' : d >= 2 ? 'blue' : 'default';
+        const label = d === 1 ? '新出现' : `出现${d}天`;
+        const tip = (
+          <div style={{ fontSize: 12 }}>
+            <div>首次 {r.first_seen} · 最近 {r.last_seen}</div>
+            {(r.price_history || []).slice(-10).map((h) => (
+              <div key={h.date}>{h.date}: ¥{h.price ?? '—'}{platform === 'xianyu' ? ` · 想要${h.heat ?? 0}` : ` · 销量${h.heat ?? 0}`}</div>
+            ))}
+          </div>
+        );
+        return (
+          <Tooltip title={tip}>
+            <Space size={4}>
+              <Tag color={color} style={{ marginInlineEnd: 0 }}>{label}</Tag>
+              <Sparkline points={r.price_history || []} />
+            </Space>
+          </Tooltip>
+        );
+      },
     },
     {
       title: '得分', dataIndex: 'total_score', width: 78, defaultSortOrder: 'descend',

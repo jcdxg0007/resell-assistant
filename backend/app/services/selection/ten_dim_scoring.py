@@ -327,6 +327,7 @@ def score_xianyu_side(
             "image_url": (image_urls[0] if isinstance(image_urls, list) and image_urls else None),
             "source_url": orig.get("source_url"),
             "seller_name": orig.get("seller_name"),
+            "source_id": orig.get("source_id"),
             "published_at": published_at,
             "crawled_at": orig.get("crawled_at"),
             "relevance": cp.relevance_score,

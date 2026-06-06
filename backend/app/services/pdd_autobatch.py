@@ -280,7 +280,37 @@ async def persist_pdd_result(result: PddAppResult, meta: dict) -> bool:
         elapsed_ms=result.elapsed_ms, priority=meta.get("priority", 1),
         error=result.error,
     )
+    await _record_pdd_sightings(items, meta.get("keyword_text"))
     return True
+
+
+async def _record_pdd_sightings(items: list[dict], keyword: str | None) -> None:
+    """把本次 PDD 采集的逐条商品写入跨天观测（同款识别 Phase 1）。绝不抛异常。
+
+    PDD 图是 base64 data-URI，太大不入观测；image_url 留空。
+    """
+    if not items:
+        return
+    try:
+        from app.services.selection.sightings import pdd_item_key, record_sightings
+        recs = []
+        for it in items:
+            key = pdd_item_key(it.get("title"))
+            if not key:
+                continue
+            recs.append({
+                "item_key": key,
+                "title": it.get("title"),
+                "price": float(it["price"]) if it.get("price") else None,
+                "heat": int(it.get("sales") or 0),
+                "image_url": None,
+            })
+        if not recs:
+            return
+        async with AsyncSessionLocal() as sdb:
+            await record_sightings(sdb, "pdd", recs, keyword=keyword)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"_record_pdd_sightings failed: {exc}")
 
 
 async def dispatch_auto_batch(
