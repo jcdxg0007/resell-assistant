@@ -20,12 +20,16 @@
     12_dumpsys_top.txt              dumpsys activity top（页面内 view 属性，可能含 url）
     13_detail_hierarchy.xml         详情页首屏控件树（全量 content-desc/text）
     14_detail.png                   详情页首屏截图
-    15_detail_scrolled.xml/.png     下滑一屏后（SKU/历史价/评论常在下面）
-    20_share_*.xml/.png             点「分享」后的浮层（链接/复制链接常在这里）
+    15_detail_scrolled.xml/.png     下滑一屏后（SKU/历史价/评论/店铺常在下面）
+    20_share_*.xml/.png             仅 SMOKE_SHARE=1 时：点「分享」后的浮层（链接在这里）
     99_grep_hits.txt                自动在以上文本里 grep goods_id/yangkeduo/拼多多链接
 
-跑完把整个文件夹（尤其 11/12/13/20 和 99）发回来，我据此定 goods_id 的可靠抠法
-再写正式抽取逻辑。
+**分享默认关闭**：第一次跑是纯被动 dump（等同正常浏览一个商品，零额外动作）。
+先看 goods_id 是否本就躺在 intent/URL（11/12）里——在的话顺手抓、零风险。确认不在、
+且确实想测分享链接路径时，再 `SMOKE_SHARE=1 python -m pdd_app_worker.smoke_detail`。
+
+跑完把整个文件夹（尤其 11/12/13 和 99）发回来，我据此判断：能否被动拿到 goods_id /
+店铺 / 评论 / 历史价 / 真实价，从而定深度模式抓哪些、要不要 OCR、要不要 goods_id。
 """
 from __future__ import annotations
 
@@ -260,14 +264,21 @@ async def main() -> int:
         _write(out_dir / "15_detail_scrolled.xml", await asyncio.to_thread(_dump_xml, d))
         await asyncio.to_thread(_save_png, d, out_dir / "15_detail_scrolled.png")
 
-        print("→ 尝试点「分享」抓链接浮层 …")
-        shared = await asyncio.to_thread(_try_tap_share, cli)
-        if shared:
-            await _sleep_jitter(2.0, 0.4)
-            _write(out_dir / "20_share_hierarchy.xml", await asyncio.to_thread(_dump_xml, d))
-            await asyncio.to_thread(_save_png, d, out_dir / "20_share.png")
-            await asyncio.to_thread(d.press, "back")   # 关掉分享浮层
-            await _sleep_jitter(0.8, 0.4)
+        # 分享默认**关闭**：第一次跑只做纯被动 dump（intent/URL/控件树），完全等同
+        # 正常浏览一个商品，零额外动作。先看 goods_id 是否本就躺在 intent/URL 里——
+        # 在的话顺手抓、零风险，根本不需要分享。确认 intent/URL 里没有、且你确实想
+        # 测分享链接这条路时，再 SMOKE_SHARE=1 重跑一次。
+        if os.environ.get("SMOKE_SHARE", "").strip() in ("1", "true", "yes"):
+            print("→ SMOKE_SHARE=1：尝试点「分享」抓链接浮层 …")
+            shared = await asyncio.to_thread(_try_tap_share, cli)
+            if shared:
+                await _sleep_jitter(2.0, 0.4)
+                _write(out_dir / "20_share_hierarchy.xml", await asyncio.to_thread(_dump_xml, d))
+                await asyncio.to_thread(_save_png, d, out_dir / "20_share.png")
+                await asyncio.to_thread(d.press, "back")   # 关掉分享浮层
+                await _sleep_jitter(0.8, 0.4)
+        else:
+            print("→ 跳过分享（默认纯被动）。如需测分享链接路径：SMOKE_SHARE=1 重跑。")
 
         print("→ 自动 grep goods_id / 链接线索 …")
         _write(out_dir / "99_grep_hits.txt", _grep_clues(out_dir))
