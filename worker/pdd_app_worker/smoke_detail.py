@@ -201,6 +201,8 @@ async def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"产物目录：{out_dir}\n")
 
+    from pdd_app_worker.pdd_app_client import _sleep_jitter
+
     async with PddAppClient(serial) as cli:
         cli.set_cleanup_mode("exit")
         d = cli._d
@@ -213,13 +215,22 @@ async def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"⚠️ 前置出错（继续）: {exc!r}")
 
+        # 搜索前先摸鱼一下（与正式 search() 的 cold-open 一致：看推荐流，不直奔搜索栏）。
+        # 用 short_peek 档（不会随机点进详情页，避免污染本次调研的目标详情页）。
+        print("→ 搜索前轻量 warmup（看推荐流，拟人）…")
+        try:
+            await cli._idle_browse_warmup(mode="short_peek")
+            await cli._ensure_home_tab()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"warmup 跳过: {exc!r}")
+
         print(f"→ 搜索「{keyword}」…")
         await cli._tap_search_entry()
-        await cli._type_keyword(keyword)
+        await cli._type_keyword(keyword)          # 内部含 IME 指纹收敛 + 逐字节奏
         await cli._submit_search()
         risk = await cli._detect_risk_walls()
         if risk:
-            print(f"❌ 命中风控墙 {risk}，放弃本次调研。")
+            print(f"❌ 命中风控墙 {risk}，放弃本次调研（与正式采集一致地中止）。")
             return 1
         await cli._wait_search_results()
         await asyncio.to_thread(_save_png, d, out_dir / "01_results.png")
@@ -229,9 +240,12 @@ async def main() -> int:
         if not tapped:
             print("❌ 没点进详情页（没找到商品卡）。把 01_results.png 发我看看。")
             return 1
-        await asyncio.sleep(3.0)  # 等详情页渲染
+        # 进详情页后像真人一样"读一会"再操作（抖动 sleep，受全局节奏因子控制）
+        await _sleep_jitter(2.6, 0.4)
 
-        print("→ dump 详情页（intent / dumpsys / 控件树 / 截图）…")
+        # dumpsys / dump_hierarchy / 截图都是**被动读取**（adb 侧 / 无障碍读屏），
+        # 不是 PDD 能看到的"点击/滑动"操作，对账号零额外动作风险。
+        print("→ dump 详情页（intent / dumpsys / 控件树 / 截图，被动读取）…")
         _write(out_dir / "10_app_current.txt", str(await asyncio.to_thread(d.app_current)))
         _write(out_dir / "11_dumpsys_activities.txt",
                await asyncio.to_thread(_shell, d, "dumpsys activity activities"))
@@ -241,19 +255,19 @@ async def main() -> int:
         await asyncio.to_thread(_save_png, d, out_dir / "14_detail.png")
 
         print("→ 下滑一屏再 dump（SKU/历史价/评论常在下面）…")
-        await asyncio.to_thread(_scroll_down, cli)
-        await asyncio.sleep(1.5)
+        await asyncio.to_thread(_scroll_down, cli)   # 曲线+缓动滑动，对齐平时浏览
+        await _sleep_jitter(1.6, 0.4)
         _write(out_dir / "15_detail_scrolled.xml", await asyncio.to_thread(_dump_xml, d))
         await asyncio.to_thread(_save_png, d, out_dir / "15_detail_scrolled.png")
 
         print("→ 尝试点「分享」抓链接浮层 …")
         shared = await asyncio.to_thread(_try_tap_share, cli)
         if shared:
-            await asyncio.sleep(2.0)
+            await _sleep_jitter(2.0, 0.4)
             _write(out_dir / "20_share_hierarchy.xml", await asyncio.to_thread(_dump_xml, d))
             await asyncio.to_thread(_save_png, d, out_dir / "20_share.png")
-            # 浮层里若有「复制链接」，OCR 点一下（剪贴板可能拿到 URL）
-            await asyncio.to_thread(d.press, "back")
+            await asyncio.to_thread(d.press, "back")   # 关掉分享浮层
+            await _sleep_jitter(0.8, 0.4)
 
         print("→ 自动 grep goods_id / 链接线索 …")
         _write(out_dir / "99_grep_hits.txt", _grep_clues(out_dir))
