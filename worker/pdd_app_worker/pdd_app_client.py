@@ -129,6 +129,36 @@ def _pace_uniform(lo: float, hi: float) -> float:
     return random.uniform(lo, hi) * _HUMANIZE_PACE
 
 
+# 商品详情页 goods_id / 主图 的提取（来自 `dumpsys activity top` 里 WebView 的
+# props/url，纯被动读取，零额外动作。真机 2026-06-07 验证：props 里有干净的
+# "goods_id":"<数字>" 字段，url 里有 goods.html?...goods_id=<数字>...&thumb_url=...）
+_GOODS_ID_JSON_RE = re.compile(r'"goods_id"\s*:\s*"?(\d{6,})"?')
+_GOODS_ID_URL_RE = re.compile(r'goods_id=(\d{6,})')
+_THUMB_JSON_RE = re.compile(r'"thumb_url"\s*:\s*"([^"\\]+(?:\\.[^"\\]*)*)"')
+
+
+def extract_goods_meta(dumpsys_top: str) -> dict[str, str | None]:
+    """从 `dumpsys activity top` 文本里抠 goods_id / 主图 url / 拼好的唤起链接。
+
+    :return: {"goods_id": str|None, "thumb_url": str|None, "detail_url": str|None}
+    唤起链接形如 https://mobile.yangkeduo.com/goods.html?goods_id=<id> —— **只供人手动点**，
+    绝不让 worker 自动唤起（automation 指纹）。
+    """
+    text = dumpsys_top or ""
+    gid = None
+    m = _GOODS_ID_JSON_RE.search(text) or _GOODS_ID_URL_RE.search(text)
+    if m:
+        gid = m.group(1)
+    thumb = None
+    tm = _THUMB_JSON_RE.search(text)
+    if tm:
+        thumb = tm.group(1).replace("\\/", "/").replace("\\", "")
+    detail_url = (
+        f"https://mobile.yangkeduo.com/goods.html?goods_id={gid}" if gid else None
+    )
+    return {"goods_id": gid, "thumb_url": thumb, "detail_url": detail_url}
+
+
 def set_humanize_pace(value: float) -> None:
     """热更新全局浏览节奏因子（被 main.apply_remote_config 调用）。
 
@@ -1201,6 +1231,93 @@ class PddAppClient:
                 f"[{self.serial}] warmup({mode}) skipped: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+    async def browse_detail_and_harvest(
+        self,
+        *,
+        min_screens: int = 3,
+        max_screens: int = 6,
+        capture_dir: Any = None,
+    ) -> dict[str, Any]:
+        """**假设当前已在某商品详情页**（调用方负责点卡片进入）：像真人一样通览
+        整页并收割可被动获取的字段，**绝不"进去秒退"**。
+
+        动作序列（全程拟人、受全局节奏因子控制）：
+          1. 首屏停留 → `dumpsys activity top` 抓 goods_id / 主图 / 唤起链接（被动读）
+          2. 随机 N 屏（min~max）逐屏下滑：每屏曲线滑动 + 停留看一会，
+             模拟真人"翻图看详情看评价"
+          3. 返回收割结果（不负责 press back，由调用方收尾）
+
+        :param capture_dir: 给定 Path 时，每屏存一张截图（screen_00.png ...）+ 首屏
+            dumpsys 文本，供 OCR 区域标定/调试。生产环境留空（不落盘）。
+        :return: {"goods_id", "thumb_url", "detail_url", "screens"(实际滑动屏数)}
+        """
+        from pathlib import Path as _Path
+
+        def _do_sync() -> dict[str, Any]:
+            d = self._d
+            w, h = d.window_size()
+            out: dict[str, Any] = {
+                "goods_id": None, "thumb_url": None, "detail_url": None, "screens": 0,
+            }
+
+            # ── 首屏停留 + 抓 goods_id（dumpsys 被动读取）
+            time.sleep(_pace_uniform(1.6, 2.8))
+            try:
+                resp = d.shell("dumpsys activity top")
+                top_txt = getattr(resp, "output", None) or (
+                    resp if isinstance(resp, str) else str(resp)
+                )
+            except Exception as exc:  # noqa: BLE001
+                top_txt = ""
+                logger.debug(f"[{self.serial}] detail dumpsys failed: {exc!r}")
+            meta = extract_goods_meta(top_txt)
+            out.update(meta)
+            if capture_dir:
+                try:
+                    cap = _Path(capture_dir)
+                    cap.mkdir(parents=True, exist_ok=True)
+                    (cap / "detail_dumpsys_top.txt").write_text(
+                        top_txt or "", encoding="utf-8"
+                    )
+                    d.screenshot().save(str(cap / "screen_00.png"))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[{self.serial}] capture screen_00 failed: {exc!r}")
+
+            # ── 随机多屏下滑通览（真人翻图看详情/评价，不是滑一屏就走）
+            n = random.randint(max(1, min_screens), max(min_screens, max_screens))
+            for i in range(n):
+                x = w // 2 + random.randint(-30, 30)
+                _humanize_swipe_path(
+                    d,
+                    (x, int(h * random.uniform(0.66, 0.80))),
+                    (x + random.randint(-25, 25), int(h * random.uniform(0.20, 0.34))),
+                    duration_s=random.uniform(0.45, 0.85),
+                )
+                # 每屏停留看一会（偶尔停久一点，像在认真看某段）
+                if random.random() < 0.30:
+                    time.sleep(_pace_uniform(2.0, 3.6))
+                else:
+                    time.sleep(_pace_uniform(1.0, 2.0))
+                out["screens"] = i + 1
+                if capture_dir:
+                    try:
+                        d.screenshot().save(
+                            str(_Path(capture_dir) / f"screen_{i + 1:02d}.png")
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            f"[{self.serial}] capture screen_{i + 1} failed: {exc!r}"
+                        )
+            return out
+
+        result = await asyncio.to_thread(_do_sync)
+        logger.info(
+            f"[{self.serial}] detail harvest: goods_id={result.get('goods_id')} "
+            f"thumb={'y' if result.get('thumb_url') else 'n'} "
+            f"screens={result.get('screens')}"
+        )
+        return result
 
     async def _tap_search_entry(self) -> None:
         """点首页顶部搜索栏。

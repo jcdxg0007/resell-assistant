@@ -19,8 +19,8 @@
     11_dumpsys_activities.txt       dumpsys activity activities（找 intent/dat=goods_id）
     12_dumpsys_top.txt              dumpsys activity top（页面内 view 属性，可能含 url）
     13_detail_hierarchy.xml         详情页首屏控件树（全量 content-desc/text）
-    14_detail.png                   详情页首屏截图
-    15_detail_scrolled.xml/.png     下滑一屏后（SKU/历史价/评论/店铺常在下面）
+    detail_dumpsys_top.txt          收割函数抓 goods_id 用的 dumpsys 原文
+    screen_00.png ~ screen_NN.png   首屏 + 逐屏下滑通览的截图（供 OCR 区域标定）
     20_share_*.xml/.png             仅 SMOKE_SHARE=1 时：点「分享」后的浮层（链接在这里）
     99_grep_hits.txt                自动在以上文本里 grep goods_id/yangkeduo/拼多多链接
 
@@ -93,21 +93,6 @@ def _dump_xml(d) -> str:
         return d.dump_hierarchy() or ""
     except Exception as exc:  # noqa: BLE001
         return f"<dump_hierarchy 失败: {exc!r}>"
-
-
-def _scroll_down(cli) -> None:
-    """详情页下滑一屏（复用拟人滑动）。"""
-    from pdd_app_worker.pdd_app_client import _humanize_swipe_path
-    import random
-    d = cli._d
-    w, h = d.window_size()
-    x = w // 2 + random.randint(-25, 25)
-    _humanize_swipe_path(
-        d,
-        (x, int(h * 0.72)),
-        (x + random.randint(-20, 20), int(h * 0.26)),
-        duration_s=0.6,
-    )
 
 
 def _tap_first_card(cli) -> bool:
@@ -220,10 +205,10 @@ async def main() -> int:
             print(f"⚠️ 前置出错（继续）: {exc!r}")
 
         # 搜索前先摸鱼一下（与正式 search() 的 cold-open 一致：看推荐流，不直奔搜索栏）。
-        # 用 short_peek 档（不会随机点进详情页，避免污染本次调研的目标详情页）。
+        # 用 short 档（detail_visit_prob=0，不会随机点进别的详情页，避免污染本次调研）。
         print("→ 搜索前轻量 warmup（看推荐流，拟人）…")
         try:
-            await cli._idle_browse_warmup(mode="short_peek")
+            await cli._idle_browse_warmup(mode="short")
             await cli._ensure_home_tab()
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"warmup 跳过: {exc!r}")
@@ -247,22 +232,26 @@ async def main() -> int:
         # 进详情页后像真人一样"读一会"再操作（抖动 sleep，受全局节奏因子控制）
         await _sleep_jitter(2.6, 0.4)
 
-        # dumpsys / dump_hierarchy / 截图都是**被动读取**（adb 侧 / 无障碍读屏），
-        # 不是 PDD 能看到的"点击/滑动"操作，对账号零额外动作风险。
-        print("→ dump 详情页（intent / dumpsys / 控件树 / 截图，被动读取）…")
+        # 首屏原始 dump（dumpsys / 控件树 / 截图都是**被动读取**，零额外动作风险）。
+        # 这几份留作排查"店铺/评论/历史价在不在控件树、要不要 OCR"。
+        print("→ 首屏 dump（intent / dumpsys / 控件树，供 OCR 字段排查）…")
         _write(out_dir / "10_app_current.txt", str(await asyncio.to_thread(d.app_current)))
         _write(out_dir / "11_dumpsys_activities.txt",
                await asyncio.to_thread(_shell, d, "dumpsys activity activities"))
         _write(out_dir / "12_dumpsys_top.txt",
                await asyncio.to_thread(_shell, d, "dumpsys activity top"))
         _write(out_dir / "13_detail_hierarchy.xml", await asyncio.to_thread(_dump_xml, d))
-        await asyncio.to_thread(_save_png, d, out_dir / "14_detail.png")
 
-        print("→ 下滑一屏再 dump（SKU/历史价/评论常在下面）…")
-        await asyncio.to_thread(_scroll_down, cli)   # 曲线+缓动滑动，对齐平时浏览
-        await _sleep_jitter(1.6, 0.4)
-        _write(out_dir / "15_detail_scrolled.xml", await asyncio.to_thread(_dump_xml, d))
-        await asyncio.to_thread(_save_png, d, out_dir / "15_detail_scrolled.png")
+        # 统一收割函数（生产同款）：抓 goods_id/主图/唤起链接 + 随机多屏通览，
+        # 每屏存截图（screen_00..NN.png）供 OCR 区域标定。**不秒退**。
+        print("→ 拟人通览整页（随机 3-6 屏，每屏停留+截图）+ 抓 goods_id …")
+        meta = await cli.browse_detail_and_harvest(
+            min_screens=3, max_screens=6, capture_dir=out_dir,
+        )
+        print(f"   goods_id   = {meta.get('goods_id')}")
+        print(f"   thumb_url  = {meta.get('thumb_url')}")
+        print(f"   detail_url = {meta.get('detail_url')}")
+        print(f"   实际滑了    = {meta.get('screens')} 屏")
 
         # 分享默认**关闭**：第一次跑只做纯被动 dump（intent/URL/控件树），完全等同
         # 正常浏览一个商品，零额外动作。先看 goods_id 是否本就躺在 intent/URL 里——
