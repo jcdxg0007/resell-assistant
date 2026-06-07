@@ -140,12 +140,12 @@ async def main() -> int:
         await cli._wait_search_results()
         await asyncio.to_thread(_save_png, d, out_dir / "01_results.png")
 
-        # 分段"逛 2-3 屏 → 回头挑信号最强的进详情收割 → 接续再逛"，最多 dip K 次。
+        # "边往下逛边遇强就点，进入概率随深度递减"（头部点得多、越往下越少）。
         # K 走 SMOKE_DIPS（默认 3），与生产 detail_top_k 同义。
         dips = int(os.environ.get("SMOKE_DIPS", "3") or "3")
-        print(f"→ 结果页分段浏览 + 回头点进详情（最多 {dips} 次 dip，每段 2-3 屏）…")
+        print(f"→ 结果页边逛边点（进入概率随深度递减，最多 {dips} 次 dip）…")
         harvested = await cli.browse_results_with_dips(
-            max_dips=dips, chunk_min=2, chunk_max=3, capture_dir=out_dir,
+            max_dips=dips, capture_dir=out_dir,
         )
         if not harvested:
             print("❌ 一次详情都没收割到（回头定位都失败？）。把 01_results.png 发我看看。")

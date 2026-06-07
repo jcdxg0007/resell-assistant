@@ -1487,73 +1487,95 @@ class PddAppClient:
         *,
         max_dips: int,
         chunk_min: int = 1,
-        chunk_max: int = 3,
+        chunk_max: int = 2,
+        dip_base: float = 0.92,
+        dip_decay: float = 0.6,
         capture_dir: Any = None,
     ) -> list[dict[str, Any]]:
-        """搜索结果页拟人浏览 + 分段"回头点进详情"收割。
+        """搜索结果页拟人浏览 + "边逛边遇强就点"收割（进入概率随深度递减）。
 
-        节奏（贴合真人逛店）：逛 ``chunk_min~chunk_max`` 屏 → 回头挑这段里信号
-        最强（badges 多 + 销量高）的一条进详情通览收割 → 返回结果页 → 接续再逛
-        一段 → 再挑一条，最多 dip ``max_dips`` 次或列表逛完为止。
+        **为什么这样设计**：PDD 结果页前几条本就是算法优选过的，真人不会"往下翻
+        四五屏再折返回去点第一个、再重复折返点第二个"——那很机械也低效。真人是
+        **头部看得最仔细、连点好几个**（最好的就在前面），**越往下兴趣越低、点得
+        越少**。所以这里：
 
-        全程 **best-effort**：某次定位/进入失败就跳过该次 dip 继续，绝不抛出、
-        不打断采集主流程。
+          1. 向下逛一小段（``chunk_min~chunk_max`` 屏，偏向少屏）
+          2. 看**当前屏**最强（badges 多 + 销量高）的一张未访问卡
+          3. 以 ``dip_base × dip_decay**段深`` 的概率决定点不点 —— 头部概率高、
+             越深越低，自然形成"头部连点几个、越往下越稀"
+          4. 要点就**点眼前这张**（安全区校正处理图被吸顶/底栏裁切），不再大幅
+             折返回顶部；点完通览收割 → 返回 → 继续向下推进（不重复逛头部）
+
+        最多 dip ``max_dips`` 次或逛到底为止。全程 **best-effort**：定位/进入失败
+        就跳过继续，绝不抛出、不打断主流程。若一路都没点成，末尾会保底点一次。
 
         :return: 收割到的详情列表 [{title, goods_id, thumb_url, detail_url, screens}]
         """
         harvested: list[dict[str, Any]] = []
         visited: set[str] = set()
         dip = 0
-        guard = 0  # 防御：逛了好几段都没可点的就收手
-        while dip < max_dips and guard < max_dips + 3:
-            guard += 1
-            # 1. 逛一段：滚 n 屏，沿途记下每屏可见卡（取本段最强未访问卡）。
-            #    屏数加权偏向少屏（真人多数瞥两眼就回头/翻过，偶尔才连翻好几屏），
-            #    既更跟手也少触发耗时的 dump_hierarchy。
-            lo = max(1, chunk_min)
-            hi = max(lo, chunk_max)
+        segment = 0
+        empty_streak = 0
+        max_segments = max_dips + 6  # 允许逛得比 dip 数更深（越深越可能不点）
+        lo = max(1, chunk_min)
+        hi = max(lo, chunk_max)
+
+        while dip < max_dips and segment < max_segments:
+            # 1. 向下逛一小段（屏数加权偏少，更跟手、少触发耗时 dump）
             choices = list(range(lo, hi + 1))
-            weights = [1.0 / (i - lo + 1) for i in choices]  # 1屏权重最高，依次递减
+            weights = [1.0 / (i - lo + 1) for i in choices]
             n = random.choices(choices, weights=weights, k=1)[0]
-            chunk: dict[str, dict[str, Any]] = {}
             for _ in range(n):
-                try:
-                    cards = await self._dump_visible_cards()
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[{self.serial}] dips dump failed: {exc!r}")
-                    cards = []
-                for c in cards:
-                    t = (c.get("title") or "").strip()
-                    if not t or t in visited:
-                        continue
-                    badges = c.get("badges") or []
-                    sales = c.get("sales") or 0
-                    chunk[t] = {"badges": len(badges), "sales": sales}
-                # 扫一眼这屏就滑（多数偏快、偶尔停下来看），下限压低更跟手
                 await asyncio.sleep(_human_secs(0.45, 1.2))
                 await self._human_scroll_down()
 
-            if not chunk:
-                # 这一段没有新的可点卡（可能到底了）
-                if dip == 0:
-                    continue
-                break
-
-            # 2. 选本段最强：badges 数优先，其次销量
-            best_title = max(
-                chunk, key=lambda k: (chunk[k]["badges"], chunk[k]["sales"])
+            # 2. 看当前屏，挑最强未访问卡
+            try:
+                cards = await self._dump_visible_cards()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[{self.serial}] dips dump failed: {exc!r}")
+                cards = []
+            cand = [
+                c for c in cards
+                if (c.get("title") or "").strip()
+                and (c.get("title") or "").strip() not in visited
+            ]
+            if not cand:
+                empty_streak += 1
+                segment += 1
+                if empty_streak >= 3:  # 连着几段都没新卡 → 多半到底了
+                    break
+                continue
+            empty_streak = 0
+            cand.sort(
+                key=lambda c: (len(c.get("badges") or []), c.get("sales") or 0),
+                reverse=True,
             )
-            visited.add(best_title)
+            best_title = (cand[0].get("title") or "").strip()
 
-            # 3. 回头滑回去重新认那张卡并点进（点商品图）
-            found = await self._scroll_back_and_tap_title(best_title, max_up=n + 1)
-            if not found:
+            # 3. 是否点进：概率随段深递减（头部点得多，越往下越少）。
+            #    兜底：逛到快收尾还一个没点成，强制点一次保证有产出。
+            prob = dip_base * (dip_decay ** segment)
+            force = dip == 0 and segment >= max_segments - 2
+            segment += 1
+            if not force and random.random() >= prob:
                 logger.info(
-                    f"[{self.serial}] dips: 回头没找到「{best_title[:14]}」，跳过本次"
+                    f"[{self.serial}] dips: 第{segment}段没点进"
+                    f"（p={prob:.2f}），继续往下逛"
                 )
                 continue
 
-            # 4. 详情页通览收割（require_goods_id：先确认真进了商品详情页）
+            # 4. 点眼前这张（安全区校正；它就在当前视野内，max_up 给点余量
+            #    以防微调后短暂移出屏）
+            visited.add(best_title)
+            found = await self._scroll_back_and_tap_title(best_title, max_up=2)
+            if not found:
+                logger.info(
+                    f"[{self.serial}] dips: 「{best_title[:14]}」没点进，继续往下逛"
+                )
+                continue
+
+            # 5. 详情页通览收割（require_goods_id：先确认真进了商品详情页）
             cap = None
             if capture_dir:
                 from pathlib import Path as _Path
@@ -1581,17 +1603,16 @@ class PddAppClient:
             harvested.append(meta)
             dip += 1
 
-            # 5. 确实进过详情页 → press back 回结果页，继续下一段
+            # 6. 确实进过详情页 → press back 回结果页，继续向下逛（不滚回头部）
             try:
                 await asyncio.to_thread(self._d.press, "back")
             except Exception:
                 pass
-            # 退回结果页后顿一下接着逛（偶尔顿久点像在回味刚看的那个）
             await asyncio.sleep(_human_secs(0.6, 1.5))
 
         logger.info(
             f"[{self.serial}] browse_results_with_dips: dips={len(harvested)} "
-            f"goods_ids={[h.get('goods_id') for h in harvested]}"
+            f"segments={segment} goods_ids={[h.get('goods_id') for h in harvested]}"
         )
         return harvested
 
