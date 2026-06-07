@@ -1327,6 +1327,142 @@ class PddAppClient:
         )
         return result
 
+    async def _scroll_up_one(self) -> None:
+        """结果页向上回滚一屏（手指下划），用于"回头"找刚逛过的卡。"""
+        def _do_sync():
+            w, h = self._d.window_size()
+            x = w // 2 + random.randint(-30, 30)
+            _humanize_swipe_path(
+                self._d,
+                (x, int(h * random.uniform(0.24, 0.34))),
+                (x + random.randint(-25, 25), int(h * random.uniform(0.70, 0.82))),
+                duration_s=random.uniform(0.30, 0.55),
+            )
+        await asyncio.to_thread(_do_sync)
+        await _sleep_jitter(0.5, 0.4)
+
+    async def _scroll_back_and_tap_title(self, title: str, max_up: int) -> bool:
+        """从当前位置向上回滚，逐屏找标题=title 的卡并点进详情。命中返回 True。
+
+        真人"回头看刚才那个"——不是按死坐标，而是滑回去重新认那张卡（标题是
+        PDD 唯一可靠锚点 tv_title），所以多屏采集滚走后也能稳定重定位。
+        """
+        for _ in range(max(1, max_up)):
+            cards = await self._dump_visible_cards()
+            for c in cards:
+                ct = (c.get("title") or "").strip()
+                if not ct:
+                    continue
+                if ct == title or (len(title) >= 6 and title in ct) or (len(ct) >= 6 and ct in title):
+                    bounds = c.get("card_bounds") or c.get("bounds")
+                    if not bounds:
+                        continue
+                    def _tap():
+                        tx, ty = _jittered_point_in_bounds(
+                            {"left": bounds[0], "top": bounds[1],
+                             "right": bounds[2], "bottom": bounds[3]},
+                            jitter_px=14,
+                        )
+                        self._d.click(tx, ty)
+                    await asyncio.to_thread(_tap)
+                    await _sleep_jitter(2.4, 0.4)  # 等详情页渲染
+                    return True
+            await self._scroll_up_one()
+        return False
+
+    async def browse_results_with_dips(
+        self,
+        *,
+        max_dips: int,
+        chunk_min: int = 2,
+        chunk_max: int = 3,
+        capture_dir: Any = None,
+    ) -> list[dict[str, Any]]:
+        """搜索结果页拟人浏览 + 分段"回头点进详情"收割。
+
+        节奏（贴合真人逛店）：逛 ``chunk_min~chunk_max`` 屏 → 回头挑这段里信号
+        最强（badges 多 + 销量高）的一条进详情通览收割 → 返回结果页 → 接续再逛
+        一段 → 再挑一条，最多 dip ``max_dips`` 次或列表逛完为止。
+
+        全程 **best-effort**：某次定位/进入失败就跳过该次 dip 继续，绝不抛出、
+        不打断采集主流程。
+
+        :return: 收割到的详情列表 [{title, goods_id, thumb_url, detail_url, screens}]
+        """
+        harvested: list[dict[str, Any]] = []
+        visited: set[str] = set()
+        dip = 0
+        guard = 0  # 防御：逛了好几段都没可点的就收手
+        while dip < max_dips and guard < max_dips + 3:
+            guard += 1
+            # 1. 逛一段：滚 n 屏，沿途记下每屏可见卡（取本段最强未访问卡）
+            n = random.randint(max(1, chunk_min), max(chunk_min, chunk_max))
+            chunk: dict[str, dict[str, Any]] = {}
+            for _ in range(n):
+                try:
+                    cards = await self._dump_visible_cards()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[{self.serial}] dips dump failed: {exc!r}")
+                    cards = []
+                for c in cards:
+                    t = (c.get("title") or "").strip()
+                    if not t or t in visited:
+                        continue
+                    badges = c.get("badges") or []
+                    sales = c.get("sales") or 0
+                    chunk[t] = {"badges": len(badges), "sales": sales}
+                await _sleep_jitter(random.uniform(0.9, 1.6), 0.35)
+                await self._human_scroll_down()
+
+            if not chunk:
+                # 这一段没有新的可点卡（可能到底了）
+                if dip == 0:
+                    continue
+                break
+
+            # 2. 选本段最强：badges 数优先，其次销量
+            best_title = max(
+                chunk, key=lambda k: (chunk[k]["badges"], chunk[k]["sales"])
+            )
+            visited.add(best_title)
+
+            # 3. 回头滑回去重新认那张卡并点进
+            found = await self._scroll_back_and_tap_title(best_title, max_up=n + 1)
+            if not found:
+                logger.info(
+                    f"[{self.serial}] dips: 回头没找到「{best_title[:14]}」，跳过本次"
+                )
+                continue
+
+            # 4. 详情页通览收割
+            cap = None
+            if capture_dir:
+                from pathlib import Path as _Path
+                cap = _Path(capture_dir) / f"dip{dip + 1:02d}"
+            try:
+                meta = await self.browse_detail_and_harvest(
+                    min_screens=2, max_screens=4, capture_dir=cap,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[{self.serial}] dips harvest failed: {exc!r}")
+                meta = {}
+            meta["title"] = best_title
+            harvested.append(meta)
+            dip += 1
+
+            # 5. 返回结果页（press back），继续下一段
+            try:
+                await asyncio.to_thread(self._d.press, "back")
+            except Exception:
+                pass
+            await _sleep_jitter(random.uniform(1.0, 1.8), 0.35)
+
+        logger.info(
+            f"[{self.serial}] browse_results_with_dips: dips={len(harvested)} "
+            f"goods_ids={[h.get('goods_id') for h in harvested]}"
+        )
+        return harvested
+
     async def _tap_search_entry(self) -> None:
         """点首页顶部搜索栏。
 
