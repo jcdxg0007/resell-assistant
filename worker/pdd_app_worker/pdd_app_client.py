@@ -1246,6 +1246,7 @@ class PddAppClient:
         min_screens: int = 3,
         max_screens: int = 6,
         capture_dir: Any = None,
+        require_goods_id: bool = False,
     ) -> dict[str, Any]:
         """**假设当前已在某商品详情页**（调用方负责点卡片进入）：像真人一样通览
         整页并收割可被动获取的字段，**绝不"进去秒退"**。
@@ -1291,6 +1292,13 @@ class PddAppClient:
                     d.screenshot().save(str(cap / "screen_00.png"))
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"[{self.serial}] capture screen_00 failed: {exc!r}")
+
+            # 没抓到 goods_id 多半=根本没进商品详情页（误点/没跳转）。这时**不要**
+            # 继续滚屏（会在错的页面上瞎滑），直接返回让调用方判定"未进入"。
+            if require_goods_id and not out.get("goods_id"):
+                out["entered"] = False
+                return out
+            out["entered"] = True
 
             # ── 随机多屏下滑通览（真人翻图看详情/评价，不是滑一屏就走）
             n = random.randint(max(1, min_screens), max(min_screens, max_screens))
@@ -1341,33 +1349,110 @@ class PddAppClient:
         await asyncio.to_thread(_do_sync)
         await _sleep_jitter(0.5, 0.4)
 
+    def _match_title(self, ct: str, title: str) -> bool:
+        if not ct:
+            return False
+        return (
+            ct == title
+            or (len(title) >= 6 and title in ct)
+            or (len(ct) >= 6 and ct in title)
+        )
+
+    async def _nudge(self, frac: float) -> None:
+        """小幅微调滚动：frac>0 把内容往下推（手指下划，露出上方被吸顶栏裁掉的卡），
+        frac<0 把内容往上推。幅度比整屏小，用于把目标卡调进安全可点区。"""
+        def _do_sync():
+            w, h = self._d.window_size()
+            x = w // 2 + random.randint(-25, 25)
+            dist = abs(frac) * h
+            if frac > 0:  # 内容下移：从上往下划
+                y0 = int(h * 0.42)
+                y1 = min(int(h * 0.92), int(y0 + dist))
+            else:         # 内容上移：从下往上划
+                y0 = int(h * 0.58)
+                y1 = max(int(h * 0.10), int(y0 - dist))
+            _humanize_swipe_path(
+                self._d, (x, y0), (x + random.randint(-20, 20), y1),
+                duration_s=random.uniform(0.28, 0.50),
+            )
+        await asyncio.to_thread(_do_sync)
+        await _sleep_jitter(0.5, 0.4)
+
     async def _scroll_back_and_tap_title(self, title: str, max_up: int) -> bool:
         """从当前位置向上回滚，逐屏找标题=title 的卡并点进详情。命中返回 True。
 
         真人"回头看刚才那个"——不是按死坐标，而是滑回去重新认那张卡（标题是
         PDD 唯一可靠锚点 tv_title），所以多屏采集滚走后也能稳定重定位。
+
+        **点的是商品图（image_bounds），不是标题**——PDD 搜索结果页标题文字区
+        往往不可点，只有商品主图能跳进详情页（与 _idle_browse_warmup 点 ImageView
+        一致）。image_bounds 缺失时回退到标题正上方一块（图通常在标题上方）。
+
+        **安全区校正（关键）**：真机里目标卡的图常被顶部吸顶栏（搜索框+筛选条，
+        约屏高 18%）或底部导航裁掉一截。这时固定点图中心会落到吸顶栏的"店铺/
+        商品切换"等控件上 → 跳错页甚至漂回首页。所以匹配到标题后先判断它的图是否
+        完整落在安全区 [h*0.18, h*0.86]：被顶栏裁→往下微调露出来；被底栏裁→往上
+        微调；微调几次仍调不进来就放弃这张（绝不点到吸顶栏）。
         """
+        w, h = await asyncio.to_thread(self._d.window_size)
+        safe_top = h * 0.18
+        safe_bottom = h * 0.86
+
+        def _find(cards: list[dict[str, Any]]) -> dict[str, Any] | None:
+            for c in cards:
+                if self._match_title((c.get("title") or "").strip(), title):
+                    return c
+            return None
+
         for _ in range(max(1, max_up)):
             cards = await self._dump_visible_cards()
-            for c in cards:
-                ct = (c.get("title") or "").strip()
-                if not ct:
-                    continue
-                if ct == title or (len(title) >= 6 and title in ct) or (len(ct) >= 6 and ct in title):
-                    bounds = c.get("card_bounds") or c.get("bounds")
-                    if not bounds:
-                        continue
+            c = _find(cards)
+            if c is None:
+                await self._scroll_up_one()
+                continue
+
+            # 命中标题 → 取图 bounds，做安全区校正（最多 3 次微调）
+            for _adj in range(3):
+                img = c.get("image_bounds")
+                tb = c.get("bounds")
+                if img:
+                    box = img
+                elif tb:  # 回退：标题正上方一个列宽见方
+                    col_w = tb[2] - tb[0]
+                    box = [tb[0], max(0, tb[1] - col_w), tb[2], tb[1] - 8]
+                else:
+                    return False
+
+                top, bottom = box[1], box[3]
+                if top < safe_top:
+                    # 图被顶栏裁掉 → 往下推一点（推多少≈差多少，归一化到屏高）
+                    await self._nudge(frac=min(0.30, (safe_top - top) / h + 0.05))
+                elif bottom > safe_bottom:
+                    await self._nudge(frac=-min(0.30, (bottom - safe_bottom) / h + 0.05))
+                else:
+                    # 落在安全区 → 点图中心（带抖动）进详情
+                    tap_box = {"left": box[0], "top": box[1],
+                               "right": box[2], "bottom": box[3]}
                     def _tap():
-                        tx, ty = _jittered_point_in_bounds(
-                            {"left": bounds[0], "top": bounds[1],
-                             "right": bounds[2], "bottom": bounds[3]},
-                            jitter_px=14,
-                        )
+                        tx, ty = _jittered_point_in_bounds(tap_box, jitter_px=14)
                         self._d.click(tx, ty)
                     await asyncio.to_thread(_tap)
                     await _sleep_jitter(2.4, 0.4)  # 等详情页渲染
                     return True
-            await self._scroll_up_one()
+
+                # 微调后重新认这张卡（位置已变）
+                c = _find(await self._dump_visible_cards())
+                if c is None:
+                    break  # 微调后跟丢了，回外层继续向上找
+
+            # 这张卡始终调不进安全区（或跟丢）→ 放弃，避免点到吸顶栏
+            if c is None:
+                continue
+            logger.info(
+                f"[{self.serial}] dips: 「{title[:14]}」图始终被吸顶/底栏裁切，"
+                f"放弃点击（不冒险点吸顶栏）"
+            )
+            return False
         return False
 
     async def browse_results_with_dips(
@@ -1426,7 +1511,7 @@ class PddAppClient:
             )
             visited.add(best_title)
 
-            # 3. 回头滑回去重新认那张卡并点进
+            # 3. 回头滑回去重新认那张卡并点进（点商品图）
             found = await self._scroll_back_and_tap_title(best_title, max_up=n + 1)
             if not found:
                 logger.info(
@@ -1434,7 +1519,7 @@ class PddAppClient:
                 )
                 continue
 
-            # 4. 详情页通览收割
+            # 4. 详情页通览收割（require_goods_id：先确认真进了商品详情页）
             cap = None
             if capture_dir:
                 from pathlib import Path as _Path
@@ -1442,15 +1527,27 @@ class PddAppClient:
             try:
                 meta = await self.browse_detail_and_harvest(
                     min_screens=2, max_screens=4, capture_dir=cap,
+                    require_goods_id=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[{self.serial}] dips harvest failed: {exc!r}")
                 meta = {}
+
+            if not meta.get("entered"):
+                # 没真进商品详情页（点了图但没跳转 / 跳到非商品页）。**绝不按 back**
+                # ——在结果页按 back 会漂回首页，导致后续都在首页瞎点。原地跳过，
+                # 下一段继续往下逛结果页。
+                logger.info(
+                    f"[{self.serial}] dips: 点了「{best_title[:14]}」但没进商品详情页"
+                    f"(goods_id 空)，原地跳过、不回退"
+                )
+                continue
+
             meta["title"] = best_title
             harvested.append(meta)
             dip += 1
 
-            # 5. 返回结果页（press back），继续下一段
+            # 5. 确实进过详情页 → press back 回结果页，继续下一段
             try:
                 await asyncio.to_thread(self._d.press, "back")
             except Exception:
