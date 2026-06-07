@@ -1518,7 +1518,9 @@ class PddAppClient:
         dip = 0
         segment = 0
         empty_streak = 0
-        max_segments = max_dips + 6  # 允许逛得比 dip 数更深（越深越可能不点）
+        # 深度预算随 K 缩放：概率衰减到 0.3 地板后，每个 dip 期望约 3 段，
+        # 给足余量保证大 K（如 5）也能稳定点完，不会卡在上限提前收手。
+        max_segments = max_dips * 3 + 3
         lo = max(1, chunk_min)
         hi = max(lo, chunk_max)
 
