@@ -1501,10 +1501,12 @@ class PddAppClient:
 
           1. 向下逛一小段（``chunk_min~chunk_max`` 屏，偏向少屏）
           2. 看**当前屏**最强（badges 多 + 销量高）的一张未访问卡
-          3. 以 ``max(0.3, dip_base × dip_decay**已点数)`` 的概率决定点不点 ——
-             **概率按"已经点了几个"衰减、不按段深**：刚开始最想点（头部连点几个），
-             每点一个后下次点的欲望就降一档；没点中只是"再往下逛一点下段大概率
-             点"，所以预算不会被深度白白吃光。自然形成"头部聚集、间隔递增"。
+          3. 以 ``max(floor_eff, dip_base × decay_eff**已点数)`` 的概率决定点不点
+             —— **概率按"已经点了几个"衰减、不按段深**：刚开始最想点（头部连点
+             几个），每点一个后下次点的欲望就降一档；没点中只是"再往下逛一点下段
+             大概率点"，所以预算不会被深度白白吃光。自然形成"头部聚集、间隔递增"。
+             **decay_eff / floor_eff 随 K 自适应**：K 越大=越像认真选品，点得越密
+             （衰减更缓、地板更高），避免为凑够 K 逛到几十段；K=3 时维持原曲线。
           4. 要点就**点眼前这张**（安全区校正处理图被吸顶/底栏裁切），不再大幅
              折返回顶部；点完通览收割 → 返回 → 继续向下推进（不重复逛头部）
 
@@ -1518,9 +1520,15 @@ class PddAppClient:
         dip = 0
         segment = 0
         empty_streak = 0
-        # 深度预算随 K 缩放：概率衰减到 0.3 地板后，每个 dip 期望约 3 段，
-        # 给足余量保证大 K（如 5）也能稳定点完，不会卡在上限提前收手。
-        max_segments = max_dips * 3 + 3
+        # ── K 自适应衰减：基准 K0=3。K 越大→越像"认真选品"→点得越密
+        #    （衰减更缓 decay_eff↑、地板更高 floor_eff↑），避免为凑够 K 逛到
+        #    几十段。K=3 时 k_ratio=1，完全维持原曲线（头部聚集、间隔递增）。
+        k0 = 3.0
+        k_ratio = k0 / max(k0, float(max_dips))      # K=3→1, 5→0.6, 10→0.3
+        decay_eff = dip_decay ** k_ratio              # K 越大指数越小→衰减越缓
+        floor_eff = min(0.75, 0.30 * max_dips / k0)   # K=3→0.30, 5→0.50, 10→0.75
+        # 深度预算据 floor 推算（每 dip 最坏约 1/floor 段）+ 余量，绑定到 K 上限
+        max_segments = int(max_dips / floor_eff) + 5
         lo = max(1, chunk_min)
         hi = max(lo, chunk_max)
 
@@ -1558,9 +1566,9 @@ class PddAppClient:
             best_title = (cand[0].get("title") or "").strip()
 
             # 3. 是否点进：概率按"已点数"衰减（头部连点几个、每点一次降一档），
-            #    不按段深 → 没点中不浪费预算，下段大概率补上。floor=0.3 保证
-            #    深处仍可能点、预算能用完。兜底：快收尾还一个没点成则强制点一次。
-            prob = max(0.3, dip_base * (dip_decay ** dip))
+            #    不按段深 → 没点中不浪费预算，下段大概率补上。floor_eff 随 K 抬高
+            #    保证深处仍可能点、预算能用完。兜底：快收尾还一个没点成则强制点一次。
+            prob = max(floor_eff, dip_base * (decay_eff ** dip))
             force = dip == 0 and segment >= max_segments - 2
             segment += 1
             if not force and random.random() >= prob:
