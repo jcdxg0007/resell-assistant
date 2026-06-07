@@ -1488,8 +1488,8 @@ class PddAppClient:
         max_dips: int,
         chunk_min: int = 1,
         chunk_max: int = 2,
-        dip_base: float = 0.92,
-        dip_decay: float = 0.6,
+        dip_base: float = 0.95,
+        dip_decay: float = 0.7,
         capture_dir: Any = None,
     ) -> list[dict[str, Any]]:
         """搜索结果页拟人浏览 + "边逛边遇强就点"收割（进入概率随深度递减）。
@@ -1501,8 +1501,10 @@ class PddAppClient:
 
           1. 向下逛一小段（``chunk_min~chunk_max`` 屏，偏向少屏）
           2. 看**当前屏**最强（badges 多 + 销量高）的一张未访问卡
-          3. 以 ``dip_base × dip_decay**段深`` 的概率决定点不点 —— 头部概率高、
-             越深越低，自然形成"头部连点几个、越往下越稀"
+          3. 以 ``max(0.3, dip_base × dip_decay**已点数)`` 的概率决定点不点 ——
+             **概率按"已经点了几个"衰减、不按段深**：刚开始最想点（头部连点几个），
+             每点一个后下次点的欲望就降一档；没点中只是"再往下逛一点下段大概率
+             点"，所以预算不会被深度白白吃光。自然形成"头部聚集、间隔递增"。
           4. 要点就**点眼前这张**（安全区校正处理图被吸顶/底栏裁切），不再大幅
              折返回顶部；点完通览收割 → 返回 → 继续向下推进（不重复逛头部）
 
@@ -1553,15 +1555,16 @@ class PddAppClient:
             )
             best_title = (cand[0].get("title") or "").strip()
 
-            # 3. 是否点进：概率随段深递减（头部点得多，越往下越少）。
-            #    兜底：逛到快收尾还一个没点成，强制点一次保证有产出。
-            prob = dip_base * (dip_decay ** segment)
+            # 3. 是否点进：概率按"已点数"衰减（头部连点几个、每点一次降一档），
+            #    不按段深 → 没点中不浪费预算，下段大概率补上。floor=0.3 保证
+            #    深处仍可能点、预算能用完。兜底：快收尾还一个没点成则强制点一次。
+            prob = max(0.3, dip_base * (dip_decay ** dip))
             force = dip == 0 and segment >= max_segments - 2
             segment += 1
             if not force and random.random() >= prob:
                 logger.info(
                     f"[{self.serial}] dips: 第{segment}段没点进"
-                    f"（p={prob:.2f}），继续往下逛"
+                    f"（已点{dip}，p={prob:.2f}），继续往下逛"
                 )
                 continue
 
