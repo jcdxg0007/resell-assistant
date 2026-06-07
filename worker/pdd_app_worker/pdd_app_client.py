@@ -26,6 +26,7 @@ import os
 import random
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -130,11 +131,14 @@ def _pace_uniform(lo: float, hi: float) -> float:
 
 
 # 商品详情页 goods_id / 主图 的提取（来自 `dumpsys activity top` 里 WebView 的
-# props/url，纯被动读取，零额外动作。真机 2026-06-07 验证：props 里有干净的
-# "goods_id":"<数字>" 字段，url 里有 goods.html?...goods_id=<数字>...&thumb_url=...）
-_GOODS_ID_JSON_RE = re.compile(r'"goods_id"\s*:\s*"?(\d{6,})"?')
-_GOODS_ID_URL_RE = re.compile(r'goods_id=(\d{6,})')
-_THUMB_JSON_RE = re.compile(r'"thumb_url"\s*:\s*"([^"\\]+(?:\\.[^"\\]*)*)"')
+# props/url，纯被动读取，零额外动作）。真机 2026-06-07 验证：字段在两种形态里都出现——
+#   ① url 字段（query 参数、URL 编码）：goods.html?thumb_url=<enc>&...&goods_id=<数字>...
+#   ② props 字段（转义 JSON）：{\"thumb_url\":\"...\",\"goods_id\":\"<数字>\"}
+# 用宽松字符类同时吃下 = / : / " / \ 这几种分隔，兼容两种形态。
+_GOODS_ID_RE = re.compile(r'goods_id[\\":=\s]{1,5}(\d{6,})')
+# 主图优先从 url 的 query 参数取（URL 编码、干净），再 unquote 还原
+_THUMB_URLQ_RE = re.compile(r'thumb_url=([^&"\\]+)')
+_THUMB_JSON_RE = re.compile(r'thumb_url[\\":=\s]{1,5}(https[^"\\&]+)')
 
 
 def extract_goods_meta(dumpsys_top: str) -> dict[str, str | None]:
@@ -146,13 +150,17 @@ def extract_goods_meta(dumpsys_top: str) -> dict[str, str | None]:
     """
     text = dumpsys_top or ""
     gid = None
-    m = _GOODS_ID_JSON_RE.search(text) or _GOODS_ID_URL_RE.search(text)
+    m = _GOODS_ID_RE.search(text)
     if m:
         gid = m.group(1)
     thumb = None
-    tm = _THUMB_JSON_RE.search(text)
+    tm = _THUMB_URLQ_RE.search(text)
     if tm:
-        thumb = tm.group(1).replace("\\/", "/").replace("\\", "")
+        thumb = urllib.parse.unquote(tm.group(1))
+    else:
+        tj = _THUMB_JSON_RE.search(text)
+        if tj:
+            thumb = tj.group(1).replace("\\/", "/").replace("\\", "")
     detail_url = (
         f"https://mobile.yangkeduo.com/goods.html?goods_id={gid}" if gid else None
     )
