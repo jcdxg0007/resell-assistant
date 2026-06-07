@@ -1486,7 +1486,7 @@ class PddAppClient:
         self,
         *,
         max_dips: int,
-        chunk_min: int = 2,
+        chunk_min: int = 1,
         chunk_max: int = 3,
         capture_dir: Any = None,
     ) -> list[dict[str, Any]]:
@@ -1507,8 +1507,14 @@ class PddAppClient:
         guard = 0  # 防御：逛了好几段都没可点的就收手
         while dip < max_dips and guard < max_dips + 3:
             guard += 1
-            # 1. 逛一段：滚 n 屏，沿途记下每屏可见卡（取本段最强未访问卡）
-            n = random.randint(max(1, chunk_min), max(chunk_min, chunk_max))
+            # 1. 逛一段：滚 n 屏，沿途记下每屏可见卡（取本段最强未访问卡）。
+            #    屏数加权偏向少屏（真人多数瞥两眼就回头/翻过，偶尔才连翻好几屏），
+            #    既更跟手也少触发耗时的 dump_hierarchy。
+            lo = max(1, chunk_min)
+            hi = max(lo, chunk_max)
+            choices = list(range(lo, hi + 1))
+            weights = [1.0 / (i - lo + 1) for i in choices]  # 1屏权重最高，依次递减
+            n = random.choices(choices, weights=weights, k=1)[0]
             chunk: dict[str, dict[str, Any]] = {}
             for _ in range(n):
                 try:
