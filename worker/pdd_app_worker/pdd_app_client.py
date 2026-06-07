@@ -130,6 +130,34 @@ def _pace_uniform(lo: float, hi: float) -> float:
     return random.uniform(lo, hi) * _HUMANIZE_PACE
 
 
+def _human_secs(
+    quick: float,
+    typical: float,
+    *,
+    flick_prob: float = 0.22,
+    pause_prob: float = 0.16,
+    pause_mult: float = 2.6,
+) -> float:
+    """人手节奏单次时长——比纯 uniform 更像真人「时快时慢、偶尔停下来看」：
+
+    - ``flick_prob`` 概率：手指连续操作的**极短**停顿（0.4~1.0 × quick），
+      模拟"连着滑两三下没怎么停"。
+    - ``pause_prob`` 概率：停下来看/想的**长**停顿（typical ~ typical×pause_mult）。
+    - 其余：常规 quick~typical。
+
+    结果再乘全局 _HUMANIZE_PACE（与 _pace_uniform 一致，可被远程节奏因子压缩）。
+    三段混合分布把单一窄区间的"节拍机感"打散成有突发的人手节奏。
+    """
+    r = random.random()
+    if r < flick_prob:
+        base = random.uniform(quick * 0.4, quick)
+    elif r < flick_prob + pause_prob:
+        base = random.uniform(typical, typical * pause_mult)
+    else:
+        base = random.uniform(quick, typical)
+    return max(0.05, base * _HUMANIZE_PACE)
+
+
 # 商品详情页 goods_id / 主图 的提取（来自 `dumpsys activity top` 里 WebView 的
 # props/url，纯被动读取，零额外动作）。真机 2026-06-07 验证：字段在两种形态里都出现——
 #   ① url 字段（query 参数、URL 编码）：goods.html?thumb_url=<enc>&...&goods_id=<数字>...
@@ -1310,11 +1338,9 @@ class PddAppClient:
                     (x + random.randint(-25, 25), int(h * random.uniform(0.20, 0.34))),
                     duration_s=random.uniform(0.45, 0.85),
                 )
-                # 每屏停留看一会（偶尔停久一点，像在认真看某段）
-                if random.random() < 0.30:
-                    time.sleep(_pace_uniform(2.0, 3.6))
-                else:
-                    time.sleep(_pace_uniform(1.0, 2.0))
+                # 每屏停留看一会：人手节奏（多数 0.8~1.8s，偶尔拉长像认真看某段，
+                # 偶尔连滑几乎不停），比固定 30/70 分档更自然
+                time.sleep(_human_secs(0.8, 1.8))
                 out["screens"] = i + 1
                 if capture_dir:
                     try:
@@ -1347,7 +1373,7 @@ class PddAppClient:
                 duration_s=random.uniform(0.30, 0.55),
             )
         await asyncio.to_thread(_do_sync)
-        await _sleep_jitter(0.5, 0.4)
+        await asyncio.sleep(_human_secs(0.3, 0.7))
 
     def _match_title(self, ct: str, title: str) -> bool:
         if not ct:
@@ -1376,7 +1402,7 @@ class PddAppClient:
                 duration_s=random.uniform(0.28, 0.50),
             )
         await asyncio.to_thread(_do_sync)
-        await _sleep_jitter(0.5, 0.4)
+        await asyncio.sleep(_human_secs(0.3, 0.7))
 
     async def _scroll_back_and_tap_title(self, title: str, max_up: int) -> bool:
         """从当前位置向上回滚，逐屏找标题=title 的卡并点进详情。命中返回 True。
@@ -1437,7 +1463,8 @@ class PddAppClient:
                         tx, ty = _jittered_point_in_bounds(tap_box, jitter_px=14)
                         self._d.click(tx, ty)
                     await asyncio.to_thread(_tap)
-                    await _sleep_jitter(2.4, 0.4)  # 等详情页渲染
+                    # 等详情页渲染：不连滑（必须等加载），但时长有快慢
+                    await asyncio.sleep(_human_secs(1.4, 2.2, flick_prob=0.0))
                     return True
 
                 # 微调后重新认这张卡（位置已变）
@@ -1496,7 +1523,8 @@ class PddAppClient:
                     badges = c.get("badges") or []
                     sales = c.get("sales") or 0
                     chunk[t] = {"badges": len(badges), "sales": sales}
-                await _sleep_jitter(random.uniform(0.9, 1.6), 0.35)
+                # 扫一眼这屏就滑（多数偏快、偶尔停下来看），下限压低更跟手
+                await asyncio.sleep(_human_secs(0.45, 1.2))
                 await self._human_scroll_down()
 
             if not chunk:
@@ -1552,7 +1580,8 @@ class PddAppClient:
                 await asyncio.to_thread(self._d.press, "back")
             except Exception:
                 pass
-            await _sleep_jitter(random.uniform(1.0, 1.8), 0.35)
+            # 退回结果页后顿一下接着逛（偶尔顿久点像在回味刚看的那个）
+            await asyncio.sleep(_human_secs(0.6, 1.5))
 
         logger.info(
             f"[{self.serial}] browse_results_with_dips: dips={len(harvested)} "
