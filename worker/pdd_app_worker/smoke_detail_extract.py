@@ -34,6 +34,14 @@ def _dump_shopcard(blocks: list[dict]) -> None:
         print(f"    cy={b['cy']:>5} cx={b['cx']:>5} conf={b.get('conf', 0):.2f}"
               f"  {b['text']!r}{flag}")
 
+    import re as _re
+    name_re = _re.compile(r"(旗舰店|专营店|专卖店|官方旗舰|百货|商行|商城|真彩|Truecolor|旗舰)")
+    hits = [b for b in blocks if name_re.search(b.get("text", ""))]
+    print(f"  [debug] 全局疑似店名块（含店铺后缀/真彩/Truecolor）共 {len(hits)} 块：")
+    for b in sorted(hits, key=lambda b: b["cy"]):
+        print(f"    cy={b['cy']:>5} cx={b['cx']:>5} conf={b.get('conf', 0):.2f}"
+              f"  {b['text']!r}")
+
 
 def _run_one(dip_dir: Path, debug: bool = False) -> None:
     ocr_files = sorted(dip_dir.glob("screen_*_ocr.txt"))
