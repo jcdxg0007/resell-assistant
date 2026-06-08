@@ -146,27 +146,32 @@ def extract_detail_fields(blocks: list[dict[str, Any]]) -> dict[str, Any]:
     jin = next((it for it in items if "进店" in it[0]), None)
     if jin:
         _jt, jx, jy, _jc = jin
-        cands: list[tuple[str, float]] = []
+        # 裸徽章/营销词不能当店名（旗舰店常是独立小徽章块）
+        badge_stop = {"旗舰店", "专营店", "专卖店", "官方旗舰", "旗舰",
+                      "品牌", "自营", "认证", "好店"}
+        cands: list[tuple[str, int, float]] = []
         for t, cx, cy, c in items:
             if "进店" in t:
                 continue
             if abs(cy - jy) > 140 or cx >= jx - 60:
                 continue
-            if _looks_like_stat(t):
+            if _looks_like_stat(t) or t in badge_stop:
                 continue
             if len(t) < 2 or len(t) > 24:
                 continue
-            cands.append((t, c))
+            cands.append((t, cx, c))
         if cands:
             from collections import Counter
-            cnt = Counter(t for t, _ in cands)
+            cnt = Counter(t for t, _cx, _c in cands)
 
-            def _shopname_score(tc: tuple[str, float]) -> tuple:
-                t, c = tc
+            def _shopname_score(tc: tuple[str, int, float]) -> tuple:
+                t, cx, c = tc
+                # 优先带店铺后缀的；否则取**最靠近"进店"**（最右）的那个
+                # ——左侧最左多是 logo 名（如荣麟数码），店名紧贴进店按钮。
                 name_like = 1 if re.search(
                     r"(旗舰店|专营店|专卖店|官方旗舰|百货|商行|商城|店$)", t
                 ) else 0
-                return (name_like, cnt[t], c)
+                return (name_like, cx, cnt[t], c)
 
             out["shop_name"] = max(cands, key=_shopname_score)[0]
     # 兜底：含"旗舰店/专营店/专卖店/百货"且不含统计词的块
