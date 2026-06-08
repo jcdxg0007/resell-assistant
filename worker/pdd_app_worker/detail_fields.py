@@ -140,7 +140,9 @@ def extract_detail_fields(blocks: list[dict[str, Any]]) -> dict[str, Any]:
         # 吸顶栏那条会重复出现且通常是最小的本品数；取众数/最小更稳
         out["sold_count"] = min(sold_vals)
 
-    # ── 店铺名：锚定"进店"，取其同高度左侧的非统计文本
+    # ── 店铺名：锚定"进店"，取其同高度左侧的非统计文本。**优先含店铺后缀**
+    #    （旗舰店/专营店/专卖店/百货/商行…），否则品牌旗舰页会误取旁边的 logo 名
+    #    （如真彩页的"荣麟数码"）而漏掉真正的"Truecolor真彩旗舰店"。
     jin = next((it for it in items if "进店" in it[0]), None)
     if jin:
         _jt, jx, jy, _jc = jin
@@ -156,11 +158,17 @@ def extract_detail_fields(blocks: list[dict[str, Any]]) -> dict[str, Any]:
                 continue
             cands.append((t, c))
         if cands:
-            # 同名常出现两次（logo alt + 店名）→ 取出现次数最多，再按 conf
             from collections import Counter
             cnt = Counter(t for t, _ in cands)
-            best = max(cands, key=lambda tc: (cnt[tc[0]], tc[1]))
-            out["shop_name"] = best[0]
+
+            def _shopname_score(tc: tuple[str, float]) -> tuple:
+                t, c = tc
+                name_like = 1 if re.search(
+                    r"(旗舰店|专营店|专卖店|官方旗舰|百货|商行|商城|店$)", t
+                ) else 0
+                return (name_like, cnt[t], c)
+
+            out["shop_name"] = max(cands, key=_shopname_score)[0]
     # 兜底：含"旗舰店/专营店/专卖店/百货"且不含统计词的块
     if not out["shop_name"]:
         for t, *_ in items:
@@ -223,63 +231,82 @@ def _looks_like_stat(t: str) -> bool:
     return bool(_STAT_RE.search(t))
 
 
-def _extract_review_tags(items: list[tuple[str, int, int, int]]) -> list[str]:
-    """口碑标签云：评价区下方成行排列的短好评词（如 服务满意/书写流畅/好用）。
+_NAV_STOP = {"店铺", "收藏", "客服", "首页", "顶部", "分享", "进店",
+             "商品详情", "店铺保障", "品牌介绍", "查看全部"}
 
-    判定：2-6 个中文字、无标点/数字、不像统计文案；且位于"评价(...)"锚点之下、
-    "进店/店铺保障/商品详情"之上的版面区间。容错——取不到就返回 []。
+
+def _extract_review_tags(items: list[tuple[str, int, int, int]]) -> list[str]:
+    """口碑标签云：PDD 评价区下方那块**网格状的短好评词**（服务满意/书写流畅/
+    好用/质量很好…，每行 3-4 个等距排列）。
+
+    关键判定：**同一行≥3 个纯 2-5 中文字的短词** 才算标签行——真实评论是
+    长句/带标点、评论人名一行只 1-2 个，都凑不出≥3 短词，自然被排除（真彩页
+    那种"商品评价(15)"后面跟真实评论的，这里会正确地返回空）。再叠加"评价(...)
+    之下、进店/商品详情之上"的版面区间，把底部规格栅格也排除掉。
     """
-    # 评价区起点：第一处含"评价("的块的 cy
     start_y = None
     for t, _cx, cy, _c in items:
         if re.search(r"评价\s*[(（]", t):
             start_y = cy
             break
-    # 终点锚：进店 / 店铺保障 / 商品详情 中最靠上的
     end_y = None
     for t, _cx, cy, _c in items:
         if re.search(r"(进店|店铺保障|商品详情|品牌介绍)", t):
             end_y = cy if end_y is None else min(end_y, cy)
-    nav_stop = {"店铺", "收藏", "客服", "首页", "顶部", "分享", "进店",
-                "商品详情", "店铺保障", "品牌介绍"}
+
+    # 限定到评价区→店铺卡之间
+    region = [
+        (t, cx, cy) for t, cx, cy, _c in items
+        if (start_y is None or cy > start_y) and (end_y is None or cy < end_y)
+    ]
+    # 按行分组（同一视觉行 cy 接近）
+    rows: dict[int, list[tuple[int, str]]] = {}
+    for t, cx, cy in region:
+        rows.setdefault(round(cy / 30), []).append((cx, t))
+
     tags: list[str] = []
-    for t, _cx, cy, _c in items:
-        if start_y is not None and cy <= start_y:
-            continue
-        if end_y is not None and cy >= end_y:
-            continue
-        if t in nav_stop:
-            continue
-        if re.fullmatch(r"[\u4e00-\u9fa5]{2,6}", t) and not _looks_like_stat(t):
-            tags.append(t)
-    # 去重保序
+    for _key in sorted(rows):
+        shorts = [
+            (cx, t) for cx, t in rows[_key]
+            if re.fullmatch(r"[\u4e00-\u9fa5]{2,5}", t)
+            and t not in _NAV_STOP
+            and not _looks_like_stat(t)
+        ]
+        if len(shorts) >= 3:  # 一行≥3 短词 = 标签网格行
+            tags.extend(t for _cx, t in sorted(shorts))
+
     seen: set[str] = set()
-    uniq = [x for x in tags if not (x in seen or seen.add(x))]
-    return uniq[:12]
+    return [x for x in tags if not (x in seen or seen.add(x))][:12]
 
 
 def _extract_specs(items: list[tuple[str, int, int, int]]) -> dict[str, str]:
-    """规格栅格：标签块（如 是否双头/发货地/风格）→ 正下方同列的值块。"""
+    """规格栅格：标签块（是否双头/发货地/风格…）→ **同列最近的值块**。
+
+    两套模板：风达页"标签在上、值在下"；真彩品牌页"值在上、标签在下"。所以
+    上下都找，取同列（|cx-lx|<100）、纵向最近（|dy|≤130）、本身不是标签、够短
+    的块当值。
+    """
     specs: dict[str, str] = {}
     labels = [it for it in items if _SPEC_LABEL_RE.match(it[0])]
     for lt, lx, ly, _lc in labels:
-        # 值块：在标签正下方 ~一行（cy 在 ly+10..ly+120）、横向对齐（|cx-lx|<90）
         best = None
         best_dy = 999
         for vt, vx, vy, _vc in items:
             if vt == lt:
                 continue
-            if vy <= ly or vy - ly > 130:
-                continue
-            if abs(vx - lx) > 100:
-                continue
-            if _SPEC_LABEL_RE.match(vt):  # 别把另一个标签当值
-                continue
             dy = vy - ly
-            if dy < best_dy:
-                best_dy = dy
+            if dy == 0 or abs(dy) > 130:   # 上下都看，但别太远
+                continue
+            if abs(vx - lx) > 100:          # 同列
+                continue
+            if _SPEC_LABEL_RE.match(vt):    # 别把另一个标签当值
+                continue
+            if _looks_like_stat(vt) or len(vt) > 16:
+                continue
+            if abs(dy) < best_dy:
+                best_dy = abs(dy)
                 best = vt
-        if best and len(best) <= 16:
+        if best:
             specs[lt] = best
     return specs
 
