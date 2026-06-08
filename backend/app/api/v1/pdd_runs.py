@@ -172,8 +172,6 @@ async def dispatch_search(
             detail="pdd_worker_offline",
         )
     mode = "deep" if body.mode == "deep" else "fast"
-    # fast 现在按 target_count 最多滚 5 屏，单次耗时比单屏长，超时相应放宽
-    task_timeout = 180 if mode == "deep" else 150
     cfg = await get_runtime_config(db)
     lo = int(cfg.get("target_count_min") or 8)
     hi = int(cfg.get("target_count_max") or 20)
@@ -184,6 +182,7 @@ async def dispatch_search(
         "keyword": body.keyword.strip(), "mode": mode, "target_count": target_count,
         "scroll_screens": scroll_screens_for(target_count),
     }
+    dips = 0
     if mode == "deep":
         # 前端显式给了就用该值，否则在运行时配置 [min,max] 区间内随机取
         if body.harvest_dips is not None:
@@ -196,6 +195,13 @@ async def dispatch_search(
             dips = random.randint(dlo, dhi)
         if dips > 0:
             dispatch_payload["harvest_dips"] = dips
+    # 超时：fast 150s。deep 基础 240s（冷启动 + warmup + 深搜 + 收尾），每进一个
+    # 详情页再 +120s（拟人多屏浏览 + OCR）。否则进详情的 deep 会在结果回传前超时，
+    # 把迟到的真结果挤成 timeout（实测 14:31 那次就是如此）。
+    if mode == "fast":
+        task_timeout = 150
+    else:
+        task_timeout = 240 + dips * 120  # K=3→600s, K=6→960s
     task = PddAppTask(
         kind="search",
         payload=dispatch_payload,
