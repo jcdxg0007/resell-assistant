@@ -285,3 +285,82 @@ async def locate_texts_async(
     return await asyncio.to_thread(
         locate_texts, image_bgr, targets, region, min_confidence
     )
+
+
+def extract_text_blocks(
+    image_bgr: Any,
+    region: tuple[int, int, int, int] | None = None,
+    min_confidence: float = 0.3,
+) -> list[dict[str, Any]]:
+    """通用文本块提取：OCR（全屏或指定 region）返回**所有**识别到的文本块。
+
+    与 ``locate_texts``（只找已知 targets）不同，这里把整片识别结果都吐出来，
+    供"按标签/正则/相对位置"抽结构化字段用（店铺名、评论数、历史价、补贴价等）。
+    详情页是长滚动、每屏滚动量随机，写死像素区域不稳——靠文本锚定更健壮。
+
+    :param image_bgr: numpy BGR 截图（``d.screenshot(format='opencv')``）
+    :param region: (x1,y1,x2,y2) 像素裁剪窗口；None=全屏。坐标会换算回全屏绝对像素
+    :param min_confidence: 置信阈值（默认 0.3，比定位用的略低，尽量多召回文本）
+    :return: ``[{"text", "conf", "cx", "cy", "x1","y1","x2","y2"}, ...]``，
+             按 ``cy``（从上到下）升序——便于按版面顺序读
+    """
+    try:
+        h, w = image_bgr.shape[:2]
+    except AttributeError:
+        return []
+
+    ox, oy = 0, 0
+    crop = image_bgr
+    if region:
+        x1, y1, x2, y2 = region
+        x1 = max(0, min(int(x1), w)); y1 = max(0, min(int(y1), h))
+        x2 = max(0, min(int(x2), w)); y2 = max(0, min(int(y2), h))
+        if x2 <= x1 or y2 <= y1:
+            return []
+        crop = image_bgr[y1:y2, x1:x2]
+        ox, oy = x1, y1
+    if getattr(crop, "size", 0) == 0:
+        return []
+
+    try:
+        reader = _get_reader()
+    except Exception as exc:
+        logger.debug(f"extract_text_blocks: reader init failed: {exc!r}")
+        return []
+    try:
+        results = reader.readtext(crop, detail=1, paragraph=False)
+    except Exception as exc:
+        logger.debug(f"extract_text_blocks: readtext failed: {exc!r}")
+        return []
+
+    blocks: list[dict[str, Any]] = []
+    for bbox, text, conf in results:
+        if conf < min_confidence:
+            continue
+        t = (text or "").strip()
+        if not t:
+            continue
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        bx1 = int(ox + min(xs)); by1 = int(oy + min(ys))
+        bx2 = int(ox + max(xs)); by2 = int(oy + max(ys))
+        blocks.append({
+            "text": t,
+            "conf": round(float(conf), 3),
+            "cx": (bx1 + bx2) // 2,
+            "cy": (by1 + by2) // 2,
+            "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
+        })
+    blocks.sort(key=lambda b: (b["cy"], b["cx"]))
+    return blocks
+
+
+async def extract_text_blocks_async(
+    image_bgr: Any,
+    region: tuple[int, int, int, int] | None = None,
+    min_confidence: float = 0.3,
+) -> list[dict[str, Any]]:
+    """``extract_text_blocks`` 的 async 包装。"""
+    return await asyncio.to_thread(
+        extract_text_blocks, image_bgr, region, min_confidence
+    )

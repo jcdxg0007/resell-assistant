@@ -1298,6 +1298,32 @@ class PddAppClient:
                 "goods_id": None, "thumb_url": None, "detail_url": None, "screens": 0,
             }
 
+            def _cap_screen(idx: int) -> None:
+                """仅 spike（capture_dir 给定）：存 PNG + dump 全屏 OCR 文本块，
+                供 Step 2 标定字段标签/位置。生产不传 capture_dir → 不执行、零开销。"""
+                if not capture_dir:
+                    return
+                try:
+                    cap = _Path(capture_dir)
+                    cap.mkdir(parents=True, exist_ok=True)
+                    img = d.screenshot(format="opencv")
+                    try:
+                        import cv2  # easyocr 依赖，必有
+                        cv2.imwrite(str(cap / f"screen_{idx:02d}.png"), img)
+                    except Exception:
+                        d.screenshot().save(str(cap / f"screen_{idx:02d}.png"))
+                    from pdd_app_worker import ocr as _ocr
+                    blocks = _ocr.extract_text_blocks(img, min_confidence=0.3)
+                    lines = [
+                        f"y={b['cy']:>5} x={b['cx']:>5} conf={b['conf']:.2f} | {b['text']}"
+                        for b in blocks
+                    ]
+                    (cap / f"screen_{idx:02d}_ocr.txt").write_text(
+                        "\n".join(lines), encoding="utf-8"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[{self.serial}] cap screen_{idx} failed: {exc!r}")
+
             # ── 首屏停留 + 抓 goods_id（dumpsys 被动读取）
             time.sleep(_pace_uniform(1.6, 2.8))
             try:
@@ -1317,9 +1343,9 @@ class PddAppClient:
                     (cap / "detail_dumpsys_top.txt").write_text(
                         top_txt or "", encoding="utf-8"
                     )
-                    d.screenshot().save(str(cap / "screen_00.png"))
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[{self.serial}] capture screen_00 failed: {exc!r}")
+                    logger.debug(f"[{self.serial}] write dumpsys failed: {exc!r}")
+                _cap_screen(0)
 
             # 没抓到 goods_id 多半=根本没进商品详情页（误点/没跳转）。这时**不要**
             # 继续滚屏（会在错的页面上瞎滑），直接返回让调用方判定"未进入"。
@@ -1342,15 +1368,7 @@ class PddAppClient:
                 # 偶尔连滑几乎不停），比固定 30/70 分档更自然
                 time.sleep(_human_secs(0.8, 1.8))
                 out["screens"] = i + 1
-                if capture_dir:
-                    try:
-                        d.screenshot().save(
-                            str(_Path(capture_dir) / f"screen_{i + 1:02d}.png")
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug(
-                            f"[{self.serial}] capture screen_{i + 1} failed: {exc!r}"
-                        )
+                _cap_screen(i + 1)
             return out
 
         result = await asyncio.to_thread(_do_sync)

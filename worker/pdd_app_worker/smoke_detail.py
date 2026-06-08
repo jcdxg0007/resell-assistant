@@ -163,8 +163,9 @@ async def main() -> int:
 
     print("\n🎉 调研完成。请把整个文件夹发回：")
     print(f"   {out_dir}")
-    print("重点看 99_grep_hits.txt（自动命中的线索），没命中就翻 "
-          "11/12/13/20 这几个 dump。")
+    print("【Step 2 标定】重点看每个 dipNN/ 下的 screen_*_ocr.txt —— 那是详情页"
+          "每屏的全屏 OCR 文本（带 y/x 坐标），用来定位店铺名/评论数/历史价/"
+          "补贴价的真实标签与位置。把 dip01、dip02 两个文件夹整包发回即可。")
     return 0
 
 
