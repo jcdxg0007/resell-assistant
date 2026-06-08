@@ -292,23 +292,50 @@ async def _record_pdd_sightings(items: list[dict], keyword: str | None) -> None:
     if not items:
         return
     try:
-        from app.services.selection.sightings import pdd_item_key, record_sightings
+        from app.services.selection.sightings import (
+            pdd_item_key, record_sightings, upsert_pdd_goods,
+        )
         recs = []
+        goods: list[dict] = []  # 仅深度 dip 到（有 goods_id）的进 pdd_goods
         for it in items:
             key = pdd_item_key(it.get("title"))
             if not key:
                 continue
+            price = float(it["price"]) if it.get("price") else None
+            # detail = worker 深度收割的 out["fields"]（批 2 接入后才有；现全 None）
+            detail = it.get("detail") or {}
+            goods_id = it.get("goods_id")
             recs.append({
                 "item_key": key,
                 "title": it.get("title"),
-                "price": float(it["price"]) if it.get("price") else None,
+                "price": price,
                 "heat": int(it.get("sales") or 0),
                 "image_url": None,
+                "goods_id": goods_id,
+                "sold_count": detail.get("sold_count"),
+                "coupon_price": detail.get("coupon_price"),
             })
+            if goods_id:
+                goods.append({
+                    "goods_id": goods_id,
+                    "shop_name": detail.get("shop_name"),
+                    "comment_count": detail.get("comment_count"),
+                    "praise_rate": detail.get("praise_rate"),
+                    "rank_badges": detail.get("rank_badges"),
+                    "review_tags": detail.get("review_tags"),
+                    "specs": detail.get("specs"),
+                    "discount": detail.get("discount"),
+                    "thumb_url": it.get("thumb_url"),
+                    "detail_url": it.get("detail_url"),
+                    "last_title": it.get("title"),
+                    "last_price": price,
+                })
         if not recs:
             return
         async with AsyncSessionLocal() as sdb:
             await record_sightings(sdb, "pdd", recs, keyword=keyword)
+            if goods:
+                await upsert_pdd_goods(sdb, goods)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"_record_pdd_sightings failed: {exc}")
 

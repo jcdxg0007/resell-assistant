@@ -478,7 +478,7 @@ async def _attach_sighting_stats(db: AsyncSession, payload: dict) -> None:
     """
     try:
         from app.services.selection.sightings import (
-            xianyu_item_key, pdd_item_key, gather_sighting_stats,
+            xianyu_item_key, pdd_item_key, gather_sighting_stats, gather_pdd_goods,
         )
         xy_items = (payload.get("xianyu") or {}).get("items") or []
         pdd_items = (payload.get("pdd") or {}).get("items") or []
@@ -497,6 +497,16 @@ async def _attach_sighting_stats(db: AsyncSession, payload: dict) -> None:
             it["last_seen"] = s["last_seen"]
             it["days_seen"] = s["days_seen"]
             it["price_history"] = s["history"]
+
+        # PDD 深度收割的商品级详情（按 goods_id 附上店铺/规格/口碑等）。
+        # 批 1 阶段 goods_id 多半还没回流，此段自然空跑、无副作用。
+        gids = [it.get("goods_id") for it in pdd_items if it.get("goods_id")]
+        if gids:
+            details = await gather_pdd_goods(db, gids)
+            for it in pdd_items:
+                d = details.get(it.get("goods_id") or "")
+                if d:
+                    it["detail"] = d
     except Exception as exc:  # noqa: BLE001
         import logging
         logging.getLogger(__name__).warning(f"_attach_sighting_stats failed: {exc}")

@@ -40,6 +40,15 @@ class ProductSighting(Base, UUIDMixin, TimestampMixin):
     heat: Mapped[int | None] = mapped_column(Integer, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ── Step 3（§11.2 Phase 2）：深度模式 dip 收割补充的字段 ──────────────
+    # PDD 商品唯一标识：只有进过详情页（被 dip）的才有；作为**附加精确归并维度**
+    #（item_key 仍是标题哈希，不断历史；读取时 goods_id 优先归并，见 sightings.py）。
+    goods_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # 已拼件数（PDD 详情页「已拼N件」）——随日变的热度信号，留在每日快照里
+    sold_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 券后实付价（OCR best-effort）——随促销变，与 price 一起做时序
+    coupon_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     __table_args__ = (
         UniqueConstraint("item_key", "seen_date", name="uq_sightings_key_date"),
         Index("ix_sightings_key_date", "item_key", "seen_date"),
