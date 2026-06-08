@@ -696,8 +696,8 @@ async def _handle_search(
         # search() 内部会 clamp 到 [1, 5]
         search_kwargs["scroll_screens"] = override_scroll_screens
     if isinstance(override_harvest_dips, int) and override_harvest_dips > 0:
-        # 安全上限：单 session 最多进 5 个详情，避免暴露面失控
-        search_kwargs["harvest_dips"] = min(override_harvest_dips, 5)
+        # 安全上限：单 session 最多进 8 个详情，避免极端值
+        search_kwargs["harvest_dips"] = min(override_harvest_dips, 8)
     # burst 位置：first 走完整 cold-start + warmup；intra 跳过冷启动 + 强制 direct profile
     is_first = _scheduler.is_first_in_burst
     search_kwargs["is_first_in_burst"] = is_first

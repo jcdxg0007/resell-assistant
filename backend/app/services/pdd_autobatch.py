@@ -380,8 +380,12 @@ async def dispatch_auto_batch(
         tc_hi = int(cfg.get("target_count_max") or 20)
         if tc_lo > tc_hi:
             tc_lo, tc_hi = tc_hi, tc_lo
-        # 深度词进详情数（K）。仅对 worker_mode=="deep" 的任务下发，0=不进详情。
-        deep_dips = max(0, min(int(cfg.get("deep_harvest_dips") or 0), 5))
+        # 深度词进详情数（K）区间。仅对 worker_mode=="deep" 的任务下发，每任务在
+        # [lo,hi] 随机取，更去指纹（真人看一个词通常也点开三五个）。0=不进详情。
+        dip_lo = max(0, min(int(cfg.get("deep_harvest_dips_min") or 0), 8))
+        dip_hi = max(0, min(int(cfg.get("deep_harvest_dips_max") or 0), 8))
+        if dip_lo > dip_hi:
+            dip_lo, dip_hi = dip_hi, dip_lo
         # 单任务超时给足：worker 最坏要先等满一个 inter-burst 静默才开新 burst
         per_task_timeout = int(float(cfg.get("inter_burst_gap_minutes_max", 30)) * 60) + 600
 
@@ -399,8 +403,10 @@ async def dispatch_auto_batch(
                 "scroll_screens": eff_scroll,
                 "mode": worker_mode,
             }
-            if worker_mode == "deep" and deep_dips > 0:
-                task_payload["harvest_dips"] = deep_dips
+            if worker_mode == "deep" and dip_hi > 0:
+                k = random.randint(dip_lo, dip_hi)
+                if k > 0:
+                    task_payload["harvest_dips"] = k
             task = PddAppTask(
                 kind="search",
                 payload=task_payload,

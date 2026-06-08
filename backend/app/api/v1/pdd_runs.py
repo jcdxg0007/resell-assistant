@@ -63,8 +63,8 @@ class DispatchBody(BaseModel):
     keyword: str = Field(..., min_length=1, max_length=128)
     mode: str = Field("fast", description="fast / deep")
     harvest_dips: int | None = Field(
-        None, ge=0, le=5,
-        description="仅 deep 生效：进 K 个详情页收割详情。留空=用运行时配置默认值。",
+        None, ge=0, le=8,
+        description="仅 deep 生效：进 K 个详情页收割详情。留空=按运行时配置区间随机取。",
     )
 
 
@@ -185,11 +185,15 @@ async def dispatch_search(
         "scroll_screens": scroll_screens_for(target_count),
     }
     if mode == "deep":
-        # 前端显式给了就用，否则回落运行时配置 deep_harvest_dips
+        # 前端显式给了就用该值，否则在运行时配置 [min,max] 区间内随机取
         if body.harvest_dips is not None:
-            dips = max(0, min(int(body.harvest_dips), 5))
+            dips = max(0, min(int(body.harvest_dips), 8))
         else:
-            dips = max(0, min(int(cfg.get("deep_harvest_dips") or 0), 5))
+            dlo = max(0, min(int(cfg.get("deep_harvest_dips_min") or 0), 8))
+            dhi = max(0, min(int(cfg.get("deep_harvest_dips_max") or 0), 8))
+            if dlo > dhi:
+                dlo, dhi = dhi, dlo
+            dips = random.randint(dlo, dhi)
         if dips > 0:
             dispatch_payload["harvest_dips"] = dips
     task = PddAppTask(
