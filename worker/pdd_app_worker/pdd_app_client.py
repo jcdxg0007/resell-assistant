@@ -667,6 +667,21 @@ class PddAppClient:
                 return result
 
             await self._wait_search_results()
+
+            # 深度收割：结果页一加载就**从头部**边逛边点进 K 个详情页（与 smoke 一致，
+            # 头部连点最优的几个、1~2 屏内就点进第一个），再 _collect_items 顺势往下
+            # 收列表。先 dip 再 collect 的原因：若先 collect 滚 3 屏收够数，dip 只能从
+            # 第 3 屏往下接着逛 → 第一个详情落在四五屏外、点的还是中后段卡（实测"划
+            # 七八屏才点进第一个"）。dip 本身就是充分拟人浏览，故收割模式跳过 post_browse。
+            harvested: list[dict[str, Any]] = []
+            if harvest_dips and harvest_dips > 0:
+                try:
+                    harvested = await self.browse_results_with_dips(
+                        max_dips=int(harvest_dips)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[{self.serial}] harvest dips swallow: {exc}")
+
             items = await self._collect_items(
                 target_count, scroll_screens=scroll_screens_eff
             )
@@ -675,18 +690,11 @@ class PddAppClient:
             if not items:
                 result.risk_signals.append("empty_result")
                 result.error = "empty_result"
-            elif harvest_dips and harvest_dips > 0:
-                # 深度收割：在结果页边逛边点进 K 个详情页，被动收割详情字段并合并
-                # 进 items。dip 本身就是充分的拟人浏览，故跳过 _post_search_browse。
-                try:
-                    harvested = await self.browse_results_with_dips(
-                        max_dips=int(harvest_dips)
-                    )
-                    self._merge_harvest_into_items(result.items, harvested)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[{self.serial}] harvest dips swallow: {exc}")
-            else:
-                # 搜到东西后，按 profile 决定是否"搜完逛一下"再退（Fix E）
+            elif harvested:
+                # 把头部 dip 到的完整详情合并进列表（命中则补字段，未命中则追加）
+                self._merge_harvest_into_items(result.items, harvested)
+            elif not (harvest_dips and harvest_dips > 0):
+                # 非收割模式：按 profile 决定是否"搜完逛一下"再退（Fix E）
                 if random.random() < _POST_BROWSE_PROB.get(profile, 0.20):
                     try:
                         await self._post_search_browse()
