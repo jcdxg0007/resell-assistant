@@ -346,6 +346,8 @@ def _extract_specs(items: list[tuple[str, int, int, int]]) -> dict[str, str]:
                 continue
             if not _is_clean_spec_token(vt):  # 带标点的营销句不能当值
                 continue
+            if vt in _NAV_STOP:               # 导航/分区标题（商品详情/店铺保障…）
+                continue
             if abs(dy) < best_dy:
                 best_dy = abs(dy)
                 best = vt
