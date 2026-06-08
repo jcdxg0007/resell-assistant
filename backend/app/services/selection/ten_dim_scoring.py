@@ -402,6 +402,8 @@ def score_pdd_side(keyword: str, items: list[dict[str, Any]]) -> dict[str, Any]:
             "badges": badges,
             "image_url": _pdd_image_url(orig),
             "crawled_at": orig.get("crawled_at"),
+            # 深度收割商品才有；供 _attach_sighting_stats 按 goods_id 挂详情
+            "goods_id": orig.get("goods_id"),
             "relevance": cp.relevance_score,
             "risk_tags": cp.risk_tags,
             "total_score": total,

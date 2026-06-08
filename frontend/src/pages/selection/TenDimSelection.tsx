@@ -37,6 +37,19 @@ interface Dimension {
   has_data: boolean;
 }
 
+// PDD 深度收割的商品级详情（仅 deep 任务进过详情页的商品才有）
+interface PddDetail {
+  shop_name?: string | null;
+  comment_count?: number | null;
+  praise_rate?: number | null;
+  rank_badges?: string[] | null;
+  review_tags?: string[] | null;
+  specs?: Record<string, string> | null;
+  discount?: number | null;
+  thumb_url?: string | null;
+  detail_url?: string | null;
+}
+
 interface SideItem {
   product_id?: string;
   title: string;
@@ -45,6 +58,7 @@ interface SideItem {
   item_wants?: number;
   sales?: number;
   badges?: string[];
+  detail?: PddDetail | null;
   source_url?: string | null;
   seller_name?: string | null;
   published_at?: string | null;
@@ -199,6 +213,58 @@ const Sparkline: React.FC<{
   );
 };
 
+// 评论数等大数：≥1万显示「N.N万」
+const fmtCount = (n?: number | null): string => {
+  if (n == null) return '—';
+  if (n >= 10000) return `${(n / 10000).toFixed(n >= 100000 ? 0 : 1)}万`;
+  return n.toLocaleString('zh-CN');
+};
+
+// ── PDD 深度收割详情面板（展开行内展示店铺/规格/口碑等）────────────
+const PddDetailPanel: React.FC<{ d: PddDetail }> = ({ d }) => {
+  const specEntries = d.specs ? Object.entries(d.specs) : [];
+  const hasAny =
+    !!d.shop_name || d.comment_count != null || d.praise_rate != null ||
+    d.discount != null || !!d.rank_badges?.length || !!d.review_tags?.length ||
+    specEntries.length > 0;
+  if (!hasAny) {
+    return <Text type="secondary" style={{ fontSize: 12 }}>未进过详情页，暂无深度收割信息</Text>;
+  }
+  return (
+    <div style={{ background: '#fafafa', borderRadius: 6, padding: '8px 12px', marginBottom: 8 }}>
+      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+        <Space size={18} wrap>
+          {d.shop_name && <Text style={{ fontSize: 12 }}>店铺：<Text strong>{d.shop_name}</Text></Text>}
+          {d.comment_count != null && <Text style={{ fontSize: 12 }}>评论：<Text strong>{fmtCount(d.comment_count)}</Text></Text>}
+          {d.praise_rate != null && <Text style={{ fontSize: 12 }}>好评率：<Text strong>{d.praise_rate}%</Text></Text>}
+          {d.discount != null && <Text style={{ fontSize: 12 }}>立减：<Text strong style={{ color: '#cf1322' }}>¥{d.discount}</Text></Text>}
+          {d.detail_url && (
+            <a href={d.detail_url} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>详情页↗</a>
+          )}
+        </Space>
+        {!!d.rank_badges?.length && (
+          <Space size={4} wrap>
+            <Text type="secondary" style={{ fontSize: 12 }}>榜单</Text>
+            {d.rank_badges.map((b, i) => <Tag key={i} color="gold">{b}</Tag>)}
+          </Space>
+        )}
+        {!!d.review_tags?.length && (
+          <Space size={4} wrap>
+            <Text type="secondary" style={{ fontSize: 12 }}>口碑</Text>
+            {d.review_tags.map((b, i) => <Tag key={i} color="blue">{b}</Tag>)}
+          </Space>
+        )}
+        {specEntries.length > 0 && (
+          <Space size={4} wrap>
+            <Text type="secondary" style={{ fontSize: 12 }}>规格</Text>
+            {specEntries.map(([k, v]) => <Tag key={k}>{k}：{String(v)}</Tag>)}
+          </Space>
+        )}
+      </Space>
+    </div>
+  );
+};
+
 // ── 维度条 ─────────────────────────────────────────────────────
 const DimensionBars: React.FC<{ dims: Dimension[] }> = ({ dims }) => (
   <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -257,6 +323,11 @@ const SideTable: React.FC<{
               >{t || '—'}</a>
             : <Text ellipsis style={{ maxWidth: 220 }}>{t || '—'}</Text>}
           {(r.risk_tags || []).includes('suspicious_low') && <Tag color="volcano">极低价</Tag>}
+          {platform === 'pdd' && r.detail && (
+            <Tooltip title="已深度收割详情，展开行查看店铺/规格/口碑">
+              <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>详</Tag>
+            </Tooltip>
+          )}
         </Space>
       ),
     },
@@ -358,8 +429,13 @@ const SideTable: React.FC<{
       dataSource={side.items}
       pagination={{ pageSize: 8, size: 'small', showSizeChanger: false }}
       expandable={{
-        expandedRowRender: (r) => <DimensionBars dims={r.dimensions} />,
-        rowExpandable: (r) => !!r.dimensions?.length,
+        expandedRowRender: (r) => (
+          <>
+            {platform === 'pdd' && r.detail && <PddDetailPanel d={r.detail} />}
+            {!!r.dimensions?.length && <DimensionBars dims={r.dimensions} />}
+          </>
+        ),
+        rowExpandable: (r) => !!r.dimensions?.length || (platform === 'pdd' && !!r.detail),
       }}
     />
   );
