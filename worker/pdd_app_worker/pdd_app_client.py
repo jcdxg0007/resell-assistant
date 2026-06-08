@@ -1275,6 +1275,7 @@ class PddAppClient:
         max_screens: int = 6,
         capture_dir: Any = None,
         require_goods_id: bool = False,
+        extract_fields: bool = True,
     ) -> dict[str, Any]:
         """**假设当前已在某商品详情页**（调用方负责点卡片进入）：像真人一样通览
         整页并收割可被动获取的字段，**绝不"进去秒退"**。
@@ -1285,9 +1286,13 @@ class PddAppClient:
              模拟真人"翻图看详情看评价"
           3. 返回收割结果（不负责 press back，由调用方收尾）
 
-        :param capture_dir: 给定 Path 时，每屏存一张截图（screen_00.png ...）+ 首屏
-            dumpsys 文本，供 OCR 区域标定/调试。生产环境留空（不落盘）。
-        :return: {"goods_id", "thumb_url", "detail_url", "screens"(实际滑动屏数)}
+        :param capture_dir: 给定 Path 时，每屏额外存一张截图（screen_00.png ...）+
+            首屏 dumpsys 文本 + 每屏 OCR 文本块（screen_NN_ocr.txt），供标定/调试。
+            生产环境留空（不落盘）。
+        :param extract_fields: True（默认）时每屏在内存里跑 OCR、按屏偏移聚合，
+            通览结束后调 ``detail_fields.extract_detail_fields`` 抽店铺/评论/价/规格
+            等结构化字段，挂到结果 ``out["fields"]``。False 则跳过 OCR（快路径）。
+        :return: {"goods_id","thumb_url","detail_url","screens","fields"(字段字典)}
         """
         from pathlib import Path as _Path
 
@@ -1297,32 +1302,73 @@ class PddAppClient:
             out: dict[str, Any] = {
                 "goods_id": None, "thumb_url": None, "detail_url": None, "screens": 0,
             }
+            from pdd_app_worker import detail_fields as _df
+            agg_blocks: list[dict[str, Any]] = []  # 跨屏聚合（cy 已加屏偏移）
 
-            def _cap_screen(idx: int) -> None:
-                """仅 spike（capture_dir 给定）：存 PNG + dump 全屏 OCR 文本块，
-                供 Step 2 标定字段标签/位置。生产不传 capture_dir → 不执行、零开销。"""
-                if not capture_dir:
+            def _process_screen(idx: int) -> None:
+                """每屏：截图 → 全屏 OCR → （若见"进店"）店铺卡条带对比度增强补识
+                → 按屏偏移累加到 agg_blocks。spike(capture_dir) 时额外落盘 PNG/OCR。
+                extract_fields 与 capture_dir 都为假 → 跳过（零开销快路径）。"""
+                if not (extract_fields or capture_dir):
                     return
                 try:
-                    cap = _Path(capture_dir)
-                    cap.mkdir(parents=True, exist_ok=True)
                     img = d.screenshot(format="opencv")
-                    try:
-                        import cv2  # easyocr 依赖，必有
-                        cv2.imwrite(str(cap / f"screen_{idx:02d}.png"), img)
-                    except Exception:
-                        d.screenshot().save(str(cap / f"screen_{idx:02d}.png"))
-                    from pdd_app_worker import ocr as _ocr
-                    blocks = _ocr.extract_text_blocks(img, min_confidence=0.3)
-                    lines = [
-                        f"y={b['cy']:>5} x={b['cx']:>5} conf={b['conf']:.2f} | {b['text']}"
-                        for b in blocks
-                    ]
-                    (cap / f"screen_{idx:02d}_ocr.txt").write_text(
-                        "\n".join(lines), encoding="utf-8"
-                    )
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug(f"[{self.serial}] cap screen_{idx} failed: {exc!r}")
+                    logger.debug(f"[{self.serial}] screenshot s{idx} failed: {exc!r}")
+                    return
+                from pdd_app_worker import ocr as _ocr
+                try:
+                    blocks = _ocr.extract_text_blocks(img, min_confidence=0.3)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[{self.serial}] ocr s{idx} failed: {exc!r}")
+                    blocks = []
+                # 店铺卡：本屏若出现"进店"，对其上方条带（含 logo/店名行）做对比度
+                # 增强再 OCR——深色卡上的浅色店名（如"Truecolor真彩旗舰店"）全屏
+                # OCR 常整块漏识，增强后能补回。
+                try:
+                    jin = next((b for b in blocks if "进店" in b["text"]), None)
+                    if jin:
+                        jy = jin["cy"]
+                        band = (0, max(0, jy - 170), w, min(h, jy + 70))
+                        extra = _ocr.extract_text_blocks(
+                            img, region=band, min_confidence=0.3, enhance=True
+                        )
+                        for e in extra:
+                            dup = any(
+                                b["text"] == e["text"]
+                                and abs(b["cx"] - e["cx"]) <= 15
+                                and abs(b["cy"] - e["cy"]) <= 15
+                                for b in blocks
+                            )
+                            if not dup:
+                                blocks.append(e)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[{self.serial}] shopcard enhance s{idx}: {exc!r}")
+
+                for b in blocks:
+                    nb = dict(b)
+                    nb["cy"] = b["cy"] + idx * _df.SCREEN_CY_STRIDE
+                    agg_blocks.append(nb)
+
+                if capture_dir:
+                    try:
+                        cap = _Path(capture_dir)
+                        cap.mkdir(parents=True, exist_ok=True)
+                        try:
+                            import cv2  # easyocr 依赖，必有
+                            cv2.imwrite(str(cap / f"screen_{idx:02d}.png"), img)
+                        except Exception:
+                            d.screenshot().save(str(cap / f"screen_{idx:02d}.png"))
+                        lines = [
+                            f"y={b['cy']:>5} x={b['cx']:>5} conf={b['conf']:.2f}"
+                            f" | {b['text']}"
+                            for b in sorted(blocks, key=lambda b: (b["cy"], b["cx"]))
+                        ]
+                        (cap / f"screen_{idx:02d}_ocr.txt").write_text(
+                            "\n".join(lines), encoding="utf-8"
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(f"[{self.serial}] cap s{idx} failed: {exc!r}")
 
             # ── 首屏停留 + 抓 goods_id（dumpsys 被动读取）
             time.sleep(_pace_uniform(1.6, 2.8))
@@ -1345,7 +1391,6 @@ class PddAppClient:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(f"[{self.serial}] write dumpsys failed: {exc!r}")
-                _cap_screen(0)
 
             # 没抓到 goods_id 多半=根本没进商品详情页（误点/没跳转）。这时**不要**
             # 继续滚屏（会在错的页面上瞎滑），直接返回让调用方判定"未进入"。
@@ -1353,6 +1398,8 @@ class PddAppClient:
                 out["entered"] = False
                 return out
             out["entered"] = True
+
+            _process_screen(0)
 
             # ── 随机多屏下滑通览（真人翻图看详情/评价，不是滑一屏就走）
             n = random.randint(max(1, min_screens), max(min_screens, max_screens))
@@ -1368,14 +1415,25 @@ class PddAppClient:
                 # 偶尔连滑几乎不停），比固定 30/70 分档更自然
                 time.sleep(_human_secs(0.8, 1.8))
                 out["screens"] = i + 1
-                _cap_screen(i + 1)
+                _process_screen(i + 1)
+
+            # ── 通览结束 → 跨屏聚合 OCR 块抽结构化字段
+            if extract_fields and agg_blocks:
+                try:
+                    out["fields"] = _df.extract_detail_fields(agg_blocks)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[{self.serial}] extract_detail_fields: {exc!r}")
+                    out["fields"] = {}
             return out
 
         result = await asyncio.to_thread(_do_sync)
+        _f = result.get("fields") or {}
         logger.info(
             f"[{self.serial}] detail harvest: goods_id={result.get('goods_id')} "
             f"thumb={'y' if result.get('thumb_url') else 'n'} "
-            f"screens={result.get('screens')}"
+            f"screens={result.get('screens')} "
+            f"shop={_f.get('shop_name')} comments={_f.get('comment_count')} "
+            f"sold={_f.get('sold_count')}"
         )
         return result
 

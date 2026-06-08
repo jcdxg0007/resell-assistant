@@ -287,10 +287,55 @@ async def locate_texts_async(
     )
 
 
+def _blocks_from_results(
+    results: Any, ox: int, oy: int, min_confidence: float
+) -> list[dict[str, Any]]:
+    """把 ``reader.readtext(detail=1)`` 结果转成统一 block 字典列表。"""
+    blocks: list[dict[str, Any]] = []
+    for bbox, text, conf in results:
+        if conf < min_confidence:
+            continue
+        t = (text or "").strip()
+        if not t:
+            continue
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        bx1 = int(ox + min(xs)); by1 = int(oy + min(ys))
+        bx2 = int(ox + max(xs)); by2 = int(oy + max(ys))
+        blocks.append({
+            "text": t,
+            "conf": round(float(conf), 3),
+            "cx": (bx1 + bx2) // 2,
+            "cy": (by1 + by2) // 2,
+            "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
+        })
+    return blocks
+
+
+def _enhance_variants(crop: Any) -> list[Any]:
+    """低对比文本（如深色店铺卡上的浅色店名）OCR 召回增强：返回几张预处理图，
+    供分别 OCR 后合并。失败/无 cv2 时返回空列表（调用方自行降级）。
+
+    - CLAHE 自适应直方图均衡（拉高局部对比）
+    - 反相（浅字深底 → 深字浅底，EasyOCR 对后者更稳）
+    """
+    try:
+        import cv2  # easyocr 必带
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        eq = clahe.apply(gray)
+        inv = cv2.bitwise_not(eq)
+        return [eq, inv]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"_enhance_variants failed: {exc!r}")
+        return []
+
+
 def extract_text_blocks(
     image_bgr: Any,
     region: tuple[int, int, int, int] | None = None,
     min_confidence: float = 0.3,
+    enhance: bool = False,
 ) -> list[dict[str, Any]]:
     """通用文本块提取：OCR（全屏或指定 region）返回**所有**识别到的文本块。
 
@@ -301,6 +346,9 @@ def extract_text_blocks(
     :param image_bgr: numpy BGR 截图（``d.screenshot(format='opencv')``）
     :param region: (x1,y1,x2,y2) 像素裁剪窗口；None=全屏。坐标会换算回全屏绝对像素
     :param min_confidence: 置信阈值（默认 0.3，比定位用的略低，尽量多召回文本）
+    :param enhance: True 时额外对裁剪区做 CLAHE/反相预处理再 OCR，合并结果——
+        用于深色店铺卡浅色店名这类低对比文本。仅建议配合较小 region 用（全屏开
+        enhance 会显著变慢）。
     :return: ``[{"text", "conf", "cx", "cy", "x1","y1","x2","y2"}, ...]``，
              按 ``cy``（从上到下）升序——便于按版面顺序读
     """
@@ -327,30 +375,34 @@ def extract_text_blocks(
     except Exception as exc:
         logger.debug(f"extract_text_blocks: reader init failed: {exc!r}")
         return []
-    try:
-        results = reader.readtext(crop, detail=1, paragraph=False)
-    except Exception as exc:
-        logger.debug(f"extract_text_blocks: readtext failed: {exc!r}")
-        return []
+
+    imgs = [crop]
+    if enhance:
+        imgs.extend(_enhance_variants(crop))
 
     blocks: list[dict[str, Any]] = []
-    for bbox, text, conf in results:
-        if conf < min_confidence:
+    for im in imgs:
+        try:
+            results = reader.readtext(im, detail=1, paragraph=False)
+        except Exception as exc:
+            logger.debug(f"extract_text_blocks: readtext failed: {exc!r}")
             continue
-        t = (text or "").strip()
-        if not t:
-            continue
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        bx1 = int(ox + min(xs)); by1 = int(oy + min(ys))
-        bx2 = int(ox + max(xs)); by2 = int(oy + max(ys))
-        blocks.append({
-            "text": t,
-            "conf": round(float(conf), 3),
-            "cx": (bx1 + bx2) // 2,
-            "cy": (by1 + by2) // 2,
-            "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
-        })
+        blocks.extend(_blocks_from_results(results, ox, oy, min_confidence))
+
+    if enhance and len(imgs) > 1:
+        # 多变体合并：同位置（±12px）同文本只留置信度最高的，避免重复
+        blocks.sort(key=lambda b: -b["conf"])
+        kept: list[dict[str, Any]] = []
+        for b in blocks:
+            dup = any(
+                k["text"] == b["text"]
+                and abs(k["cx"] - b["cx"]) <= 12 and abs(k["cy"] - b["cy"]) <= 12
+                for k in kept
+            )
+            if not dup:
+                kept.append(b)
+        blocks = kept
+
     blocks.sort(key=lambda b: (b["cy"], b["cx"]))
     return blocks
 
@@ -359,8 +411,9 @@ async def extract_text_blocks_async(
     image_bgr: Any,
     region: tuple[int, int, int, int] | None = None,
     min_confidence: float = 0.3,
+    enhance: bool = False,
 ) -> list[dict[str, Any]]:
     """``extract_text_blocks`` 的 async 包装。"""
     return await asyncio.to_thread(
-        extract_text_blocks, image_bgr, region, min_confidence
+        extract_text_blocks, image_bgr, region, min_confidence, enhance
     )

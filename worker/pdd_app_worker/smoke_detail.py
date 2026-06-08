@@ -152,20 +152,27 @@ async def main() -> int:
             return 1
         print(f"\n收割到 {len(harvested)} 条详情：")
         for i, m in enumerate(harvested, 1):
+            f = m.get("fields") or {}
             print(f"  [{i}] {(m.get('title') or '')[:20]}")
             print(f"      goods_id   = {m.get('goods_id')}")
             print(f"      thumb_url  = {m.get('thumb_url')}")
             print(f"      detail_url = {m.get('detail_url')}")
             print(f"      通览屏数    = {m.get('screens')}")
+            print(f"      店铺名     = {f.get('shop_name')}")
+            print(f"      评价数     = {f.get('comment_count')}  已拼 = {f.get('sold_count')}")
+            print(f"      好评率     = {f.get('praise_rate')}  上榜 = {f.get('rank_badges')}")
+            print(f"      口碑标签   = {f.get('review_tags')}")
+            print(f"      规格       = {f.get('specs')}")
+            print(f"      券后价     = {f.get('coupon_price')}  立减 = {f.get('discount')}")
 
         print("→ 自动 grep goods_id / 链接线索 …")
         _write(out_dir / "99_grep_hits.txt", _grep_clues(out_dir))
 
     print("\n🎉 调研完成。请把整个文件夹发回：")
     print(f"   {out_dir}")
-    print("【Step 2 标定】重点看每个 dipNN/ 下的 screen_*_ocr.txt —— 那是详情页"
-          "每屏的全屏 OCR 文本（带 y/x 坐标），用来定位店铺名/评论数/历史价/"
-          "补贴价的真实标签与位置。把 dip01、dip02 两个文件夹整包发回即可。")
+    print("【Step 2c 已接入】上面每条详情已**实时**抽出店铺名/评价数/已拼/好评率/"
+          "上榜/口碑标签/规格/券后价等字段（生产同款 OCR 抽取路径）。如某字段为空，"
+          "看对应 dipNN/ 下的 screen_*_ocr.txt 核对 OCR 原文再校准。")
     return 0
 
 
