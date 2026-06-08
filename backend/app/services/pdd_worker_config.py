@@ -41,6 +41,8 @@ DEFAULT_RUNTIME_CONFIG: dict[str, Any] = {
     "humanize_pace": 1.0,
     "target_count_min": 8,
     "target_count_max": 20,
+    # ── 深度采集：deep 关键词搜完进 K 个详情页被动收割 goods_id/店铺/规格/券后价 ──
+    "deep_harvest_dips": 3,
     # ── 「查物流」拟人行为（worker 读，roadmap §11.4）──
     "logistics_browse_enabled": False,
     "logistics_browse_prob": 0.25,   # A：每个 burst 结尾触发概率
@@ -149,6 +151,15 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "label": "单词商品量上限", "group": "采集量",
         "pair_min": "target_count_min",
         "help": "每次采集一个关键词的目标商品数上限。",
+    },
+    "deep_harvest_dips": {
+        "type": "int", "min": 0, "max": 5,
+        "label": "深度词进详情数(K)", "group": "采集量",
+        "help": "仅对深度(list_deep)关键词生效：搜完在结果页『边逛边点』进 K 个"
+                "商品详情页，被动收割 goods_id / 店铺名 / 规格 / 券后价 / 评论数等，"
+                "合并回采集结果。0=不进详情(只采列表，行为同既往)。"
+                "⚠ 每进一个详情都直接增加详情页访问频次=风控暴露面，新号灰度建议"
+                "先 1-2、观察无异常再上 3。worker 端硬上限 5。",
     },
     "logistics_browse_enabled": {
         "type": "bool",

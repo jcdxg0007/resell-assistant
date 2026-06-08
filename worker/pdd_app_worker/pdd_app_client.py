@@ -591,12 +591,18 @@ class PddAppClient:
         mode: str = "fast",
         scroll_screens: int | None = None,
         is_first_in_burst: bool = True,
+        harvest_dips: int = 0,
     ) -> PddSearchResult:
         """主入口：搜索关键词并返回前 N 个商品卡片。
 
         mode:
         - "fast"：单屏，约 20 个商品，~30s
         - "deep"：滚动 3 屏，约 60 个商品，~90s，更适合做长尾分析
+
+        :param harvest_dips: K>0 时（仅 deep 任务由派单方下发）搜完在结果页"边逛边
+            点"进 K 个商品详情页，被动收割 goods_id/店铺/规格/券后价等，合并进
+            result.items。**由后端按关键词配置下发**（前端可调），不在此自动触发——
+            便于灰度（只给少量词开）。0=不进详情（默认，行为同既往）。
 
         :param scroll_screens: 显式指定滚动屏数（覆盖 mode 默认值）。None 走
             mode 派生：fast=1 屏 / deep=3 屏。屏数越多 = 越可能触发百亿补贴卡
@@ -669,6 +675,16 @@ class PddAppClient:
             if not items:
                 result.risk_signals.append("empty_result")
                 result.error = "empty_result"
+            elif harvest_dips and harvest_dips > 0:
+                # 深度收割：在结果页边逛边点进 K 个详情页，被动收割详情字段并合并
+                # 进 items。dip 本身就是充分的拟人浏览，故跳过 _post_search_browse。
+                try:
+                    harvested = await self.browse_results_with_dips(
+                        max_dips=int(harvest_dips)
+                    )
+                    self._merge_harvest_into_items(result.items, harvested)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[{self.serial}] harvest dips swallow: {exc}")
             else:
                 # 搜到东西后，按 profile 决定是否"搜完逛一下"再退（Fix E）
                 if random.random() < _POST_BROWSE_PROB.get(profile, 0.20):
@@ -685,12 +701,71 @@ class PddAppClient:
             elapsed = time.monotonic() - t0
             logger.info(
                 f"[{self.serial}] search('{keyword}', mode={mode}, "
-                f"scroll_screens={scroll_screens_eff}, "
+                f"scroll_screens={scroll_screens_eff}, dips={harvest_dips}, "
                 f"profile={profile}, intra_burst={'no' if is_first_in_burst else 'yes'}) "
                 f"→ items={len(result.items)} risks={result.risk_signals} "
                 f"elapsed={elapsed:.1f}s"
             )
         return result
+
+    @staticmethod
+    def _norm_title(title: str | None) -> str:
+        """标题归一化用于 dip 详情与列表卡片的匹配（去空白/标点，取前若干字）。"""
+        if not title:
+            return ""
+        cleaned = re.sub(r"[\s\W_]+", "", title)
+        return cleaned[:24]
+
+    def _merge_harvest_into_items(
+        self,
+        items: list[dict[str, Any]],
+        harvested: list[dict[str, Any]],
+    ) -> None:
+        """把 dip 收割到的详情合并进列表 items。
+
+        - 按归一化标题匹配到列表卡：就地补 goods_id/thumb_url/detail_url/detail；
+        - 匹配不到（dip 进的是更靠后、未被 _collect_items 收的卡）：作为新 item 追加，
+          供后端落库（批 1 的 goods_id/detail 管线已就绪）。
+        """
+        if not harvested:
+            return
+        index: dict[str, dict[str, Any]] = {}
+        for it in items:
+            key = self._norm_title(it.get("title"))
+            if key and key not in index:
+                index[key] = it
+
+        for meta in harvested:
+            if not meta or not meta.get("entered"):
+                continue
+            fields = meta.get("fields") or {}
+            goods_id = meta.get("goods_id")
+            title = meta.get("title") or fields.get("title")
+            key = self._norm_title(title)
+            target = index.get(key) if key else None
+            if target is None:
+                # dip 进的卡不在列表里：追加为新 item
+                target = {
+                    "title": title or "",
+                    "price": fields.get("price") or fields.get("subsidy_price") or 0.0,
+                    "sales": fields.get("sold_count"),
+                    "is_ad": False,
+                    "badges": fields.get("rank_badges") or [],
+                    "bounds": None,
+                    "card_bounds": None,
+                    "image_bounds": None,
+                }
+                items.append(target)
+                if key:
+                    index[key] = target
+            if goods_id:
+                target["goods_id"] = goods_id
+            if meta.get("thumb_url"):
+                target["thumb_url"] = meta["thumb_url"]
+            if meta.get("detail_url"):
+                target["detail_url"] = meta["detail_url"]
+            if fields:
+                target["detail"] = fields
 
     async def _post_search_browse(self) -> None:
         """搜完后逛一下首页再退（真人最常见的收尾模式之一）。

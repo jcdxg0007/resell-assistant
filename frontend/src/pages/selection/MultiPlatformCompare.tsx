@@ -367,7 +367,7 @@ const MultiPlatformCompare: React.FC = () => {
 
   // 搜索动作
   const searchXianyu = async (kw?: string) => { await api.post('/products/search', { keyword: (kw ?? keyword).trim(), platform: 'xianyu' }); };
-  const searchPdd = async (kw: string) => { await api.post('/pdd-runs/dispatch', { keyword: kw, mode: 'fast' }); };
+  const searchPdd = async (kw: string, mode: 'fast' | 'deep' = 'fast') => { await api.post('/pdd-runs/dispatch', { keyword: kw, mode }); };
 
   // 失败的词重回「待采集池」：删掉今日该词 PDD 记录，交给自动跑批按正常节奏重采
   const retryPdd = async (kw: string) => {
@@ -398,6 +398,19 @@ const MultiPlatformCompare: React.FC = () => {
     } catch (err) {
       const e = err as { response?: { status?: number } };
       message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法派发' : 'PDD 搜索派发失败');
+    } finally { setSearchingPdd(false); }
+  };
+
+  const handlePddDeep = async () => {
+    if (!keyword.trim()) { message.warning('请输入搜索关键词'); return; }
+    setSearchingPdd(true);
+    try {
+      await searchPdd(keyword.trim(), 'deep');
+      message.success('PDD 深度搜已派发（搜完进若干详情页收割详情），结果生成后自动刷新');
+      startAutoRefresh(keyword.trim());
+    } catch (err) {
+      const e = err as { response?: { status?: number } };
+      message.error(e.response?.status === 503 ? 'PDD Worker 离线，无法派发' : 'PDD 深度搜派发失败');
     } finally { setSearchingPdd(false); }
   };
 
@@ -670,6 +683,7 @@ const MultiPlatformCompare: React.FC = () => {
           />
           <Button onClick={handleXianyu} loading={searchingXianyu}>闲鱼搜索</Button>
           <Button onClick={handlePdd} loading={searchingPdd}>PDD搜索</Button>
+          <Button onClick={handlePddDeep} loading={searchingPdd}>PDD深度搜</Button>
           <Button type="primary" onClick={handleBoth} loading={searchingXianyu || searchingPdd}>同时搜</Button>
         </Space.Compact>
         {autoRefreshing && (

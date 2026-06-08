@@ -636,6 +636,9 @@ async def _handle_search(
     # 任一为 None / 缺失就走 PddAppClient.search() 的默认行为。
     override_target_count = payload.get("target_count")
     override_scroll_screens = payload.get("scroll_screens")
+    # 深度收割：K>0 时搜完进 K 个详情页被动收割 goods_id/店铺/规格/券后价（仅 deep
+    # 任务由后端按关键词配置下发，便于灰度）。缺失 / 0 = 不进详情（行为同既往）。
+    override_harvest_dips = payload.get("harvest_dips")
     if not keyword:
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         return {
@@ -692,6 +695,9 @@ async def _handle_search(
     if isinstance(override_scroll_screens, int) and override_scroll_screens > 0:
         # search() 内部会 clamp 到 [1, 5]
         search_kwargs["scroll_screens"] = override_scroll_screens
+    if isinstance(override_harvest_dips, int) and override_harvest_dips > 0:
+        # 安全上限：单 session 最多进 5 个详情，避免暴露面失控
+        search_kwargs["harvest_dips"] = min(override_harvest_dips, 5)
     # burst 位置：first 走完整 cold-start + warmup；intra 跳过冷启动 + 强制 direct profile
     is_first = _scheduler.is_first_in_burst
     search_kwargs["is_first_in_burst"] = is_first

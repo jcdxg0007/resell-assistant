@@ -302,7 +302,7 @@ async def _record_pdd_sightings(items: list[dict], keyword: str | None) -> None:
             if not key:
                 continue
             price = float(it["price"]) if it.get("price") else None
-            # detail = worker 深度收割的 out["fields"]（批 2 接入后才有；现全 None）
+            # detail = worker 深度收割的 out["fields"]（deep 任务 K>0 时才有；fast 为空）
             detail = it.get("detail") or {}
             goods_id = it.get("goods_id")
             recs.append({
@@ -380,6 +380,8 @@ async def dispatch_auto_batch(
         tc_hi = int(cfg.get("target_count_max") or 20)
         if tc_lo > tc_hi:
             tc_lo, tc_hi = tc_hi, tc_lo
+        # 深度词进详情数（K）。仅对 worker_mode=="deep" 的任务下发，0=不进详情。
+        deep_dips = max(0, min(int(cfg.get("deep_harvest_dips") or 0), 5))
         # 单任务超时给足：worker 最坏要先等满一个 inter-burst 静默才开新 burst
         per_task_timeout = int(float(cfg.get("inter_burst_gap_minutes_max", 30)) * 60) + 600
 
@@ -391,14 +393,17 @@ async def dispatch_auto_batch(
             tc = random.randint(tc_lo, tc_hi)
             # fast 模式按 target_count 推导滚屏数（够数即停），深抓模式沿用 MODE_MAP
             eff_scroll = scroll_screens_for(tc) if worker_mode == "fast" else scroll
+            task_payload = {
+                "keyword": k.text,
+                "target_count": tc,
+                "scroll_screens": eff_scroll,
+                "mode": worker_mode,
+            }
+            if worker_mode == "deep" and deep_dips > 0:
+                task_payload["harvest_dips"] = deep_dips
             task = PddAppTask(
                 kind="search",
-                payload={
-                    "keyword": k.text,
-                    "target_count": tc,
-                    "scroll_screens": eff_scroll,
-                    "mode": worker_mode,
-                },
+                payload=task_payload,
                 account_id=account_id,
                 priority=priority,
                 timeout_s=per_task_timeout,

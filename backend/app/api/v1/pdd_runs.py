@@ -62,6 +62,10 @@ class DispatchBody(BaseModel):
 
     keyword: str = Field(..., min_length=1, max_length=128)
     mode: str = Field("fast", description="fast / deep")
+    harvest_dips: int | None = Field(
+        None, ge=0, le=5,
+        description="仅 deep 生效：进 K 个详情页收割详情。留空=用运行时配置默认值。",
+    )
 
 
 async def _lookup_keyword(
@@ -176,12 +180,21 @@ async def dispatch_search(
     if lo > hi:
         lo, hi = hi, lo
     target_count = random.randint(lo, hi)
+    dispatch_payload: dict[str, Any] = {
+        "keyword": body.keyword.strip(), "mode": mode, "target_count": target_count,
+        "scroll_screens": scroll_screens_for(target_count),
+    }
+    if mode == "deep":
+        # 前端显式给了就用，否则回落运行时配置 deep_harvest_dips
+        if body.harvest_dips is not None:
+            dips = max(0, min(int(body.harvest_dips), 5))
+        else:
+            dips = max(0, min(int(cfg.get("deep_harvest_dips") or 0), 5))
+        if dips > 0:
+            dispatch_payload["harvest_dips"] = dips
     task = PddAppTask(
         kind="search",
-        payload={
-            "keyword": body.keyword.strip(), "mode": mode, "target_count": target_count,
-            "scroll_screens": scroll_screens_for(target_count),
-        },
+        payload=dispatch_payload,
         priority=_DISPATCH_PRIORITY,
         timeout_s=task_timeout,
     )
