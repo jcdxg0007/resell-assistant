@@ -83,10 +83,25 @@ def _dedup_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # 规格栅格的标签判定（PDD"商品详情"下的属性表）
+def _strip_shop_noise(t: str) -> str:
+    """剥掉店名尾部的评分/计数数字与标点（"猛少家的网店6127"→"猛少家的网店"）
+    及首尾空白。店铺卡里店名常紧跟粉丝数/评分被 OCR 连成一块。"""
+    return re.sub(r"[\s\d,，.。·•]+$", "", (t or "").strip())
+
+
 _SPEC_LABEL_RE = re.compile(
-    r"^(是否.+|.+地$|品牌$|风格$|材质$|颜色$|笔头.*|适用.*|净含量$|规格$|"
-    r"容量$|尺寸$|产地$|型号$|货号$|分类$|类型$|功能$)"
+    r"^(是否.+|.+地$|品牌$|风格$|材质$|颜色$|笔头(材质|形状|类型|粗细)?$|"
+    r"适用.{0,4}$|净含量$|规格$|容量$|尺寸$|产地$|型号$|货号$|分类$|"
+    r"类型$|功能$)"
 )
+
+# 规格标签/值必须是"干净短词"：含逗号/句号/空格等标点的多半是营销文案
+# （如"笔头耐用 ,"/"油墨清晰 ,"），不是规格项——一律排除。
+_SPEC_DIRTY_RE = re.compile(r"[，,。、；;：:\s\u2026!！?？]")
+
+
+def _is_clean_spec_token(t: str) -> bool:
+    return bool(t) and not _SPEC_DIRTY_RE.search(t)
 
 
 def extract_detail_fields(blocks: list[dict[str, Any]]) -> dict[str, Any]:
@@ -152,15 +167,20 @@ def extract_detail_fields(blocks: list[dict[str, Any]]) -> dict[str, Any]:
     shop_mkt_re = re.compile(
         r"(好店|潜力|入选|授权|正品|回头客|飙升|隔日达|条好评|新增.*好评)"
     )
-    shop_suffix_re = re.compile(r"(旗舰店|专营店|专卖店|官方旗舰|百货|商行|商城)")
-    suffix_cands = [
-        (t, c) for t, _cx, _cy, c in items
-        if shop_suffix_re.search(t)
-        and t not in badge_stop
-        and not _looks_like_stat(t)
-        and not shop_mkt_re.search(t)
-        and 3 <= len(t) <= 24
-    ]
+    # 后缀含通用"店/网店"——很多店名是"XX的网店""XX专卖店"，不只旗舰店。
+    shop_suffix_re = re.compile(r"(店|百货|商行|商城|官方旗舰)$")
+    suffix_cands: list[tuple[str, float]] = []
+    for t, _cx, _cy, c in items:
+        # 先剥尾部评分/计数数字（"猛少家的网店6127"→"猛少家的网店"），否则完整
+        # 店名块会被 _looks_like_stat 的 \d{2,} 误杀。
+        s = _strip_shop_noise(t)
+        if not (3 <= len(s) <= 24):
+            continue
+        if not shop_suffix_re.search(s):
+            continue
+        if s in badge_stop or _looks_like_stat(s) or shop_mkt_re.search(s):
+            continue
+        suffix_cands.append((s, c))
     if suffix_cands:
         # 多个候选：取最长（最完整店名）→ 同长取置信度最高
         out["shop_name"] = max(suffix_cands, key=lambda x: (len(x[0]), x[1]))[0]
@@ -305,7 +325,10 @@ def _extract_specs(items: list[tuple[str, int, int, int]]) -> dict[str, str]:
     的块当值。
     """
     specs: dict[str, str] = {}
-    labels = [it for it in items if _SPEC_LABEL_RE.match(it[0])]
+    labels = [
+        it for it in items
+        if _SPEC_LABEL_RE.match(it[0]) and _is_clean_spec_token(it[0])
+    ]
     for lt, lx, ly, _lc in labels:
         best = None
         best_dy = 999
@@ -320,6 +343,8 @@ def _extract_specs(items: list[tuple[str, int, int, int]]) -> dict[str, str]:
             if _SPEC_LABEL_RE.match(vt):    # 别把另一个标签当值
                 continue
             if _looks_like_stat(vt) or len(vt) > 16:
+                continue
+            if not _is_clean_spec_token(vt):  # 带标点的营销句不能当值
                 continue
             if abs(dy) < best_dy:
                 best_dy = abs(dy)
