@@ -149,13 +149,19 @@ def extract_detail_fields(blocks: list[dict[str, Any]]) -> dict[str, Any]:
         # 裸徽章/营销词不能当店名（旗舰店常是独立小徽章块）
         badge_stop = {"旗舰店", "专营店", "专卖店", "官方旗舰", "旗舰",
                       "品牌", "自营", "认证", "好店"}
+        # 店铺卡里的营销话术（潜力好店/连续N个月入选/官方授权/正品…），不含
+        # 统计数字、躲过 _looks_like_stat，但绝不会是店名——单独黑名单兜掉。
+        shop_mkt_re = re.compile(
+            r"(好店|潜力|入选|授权|正品|回头客|飙升|隔日达|条好评|新增.*好评)"
+        )
         cands: list[tuple[str, int, float]] = []
         for t, cx, cy, c in items:
             if "进店" in t:
                 continue
-            if abs(cy - jy) > 140 or cx >= jx - 60:
+            # 店名与"进店"基本同一行；营销/统计行都在其下方 100+px，收窄窗口排除
+            if abs(cy - jy) > 90 or cx >= jx - 60:
                 continue
-            if _looks_like_stat(t) or t in badge_stop:
+            if _looks_like_stat(t) or t in badge_stop or shop_mkt_re.search(t):
                 continue
             if len(t) < 2 or len(t) > 24:
                 continue

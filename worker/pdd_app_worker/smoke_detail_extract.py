@@ -5,10 +5,11 @@
 用于快速迭代抽取规则。
 
 用法：
-    python -m pdd_app_worker.smoke_detail_extract <dip 文件夹 或 其父目录>
+    python -m pdd_app_worker.smoke_detail_extract <dip 文件夹 或 其父目录> [--debug]
 
 - 给某个 dipNN 文件夹 → 只跑那一条
 - 给父目录（含多个 dipNN）→ 逐条跑
+- 加 --debug → 额外打印"进店"附近的原始 OCR 块（文字/坐标/置信度），用于校准店铺名
 """
 from __future__ import annotations
 
@@ -18,7 +19,23 @@ from pathlib import Path
 from pdd_app_worker import detail_fields as df
 
 
-def _run_one(dip_dir: Path) -> None:
+def _dump_shopcard(blocks: list[dict]) -> None:
+    """打印『进店』锚点上下 ±220px 的原始 OCR 块，校准店铺名规则用。"""
+    jin = next((b for b in blocks if "进店" in b.get("text", "")), None)
+    if not jin:
+        print("  [debug] 未找到含『进店』的块")
+        return
+    jy = jin["cy"]
+    near = [b for b in blocks if abs(b["cy"] - jy) <= 220]
+    near.sort(key=lambda b: (b["cy"], b["cx"]))
+    print(f"  [debug] 进店 锚点 cy={jy}，附近 ±220px 共 {len(near)} 块：")
+    for b in near:
+        flag = " <-进店" if "进店" in b["text"] else ""
+        print(f"    cy={b['cy']:>5} cx={b['cx']:>5} conf={b.get('conf', 0):.2f}"
+              f"  {b['text']!r}{flag}")
+
+
+def _run_one(dip_dir: Path, debug: bool = False) -> None:
     ocr_files = sorted(dip_dir.glob("screen_*_ocr.txt"))
     if not ocr_files:
         return
@@ -46,20 +63,24 @@ def _run_one(dip_dir: Path) -> None:
     print(f"  规格         specs              = {fields['specs']}")
     print(f"  券后价       coupon_price       = {fields['coupon_price']}")
     print(f"  优惠/立减    discount           = {fields['discount']}")
+    if debug:
+        _dump_shopcard(blocks)
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        print("用法: python -m pdd_app_worker.smoke_detail_extract <dip 文件夹 或 父目录>")
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    debug = "--debug" in sys.argv
+    if not args:
+        print("用法: python -m pdd_app_worker.smoke_detail_extract <dip 文件夹 或 父目录> [--debug]")
         return 2
-    root = Path(sys.argv[1])
+    root = Path(args[0])
     if not root.exists():
         print(f"路径不存在: {root}")
         return 2
 
     # 自身就是 dip 文件夹（含 screen_*_ocr.txt）
     if list(root.glob("screen_*_ocr.txt")):
-        _run_one(root)
+        _run_one(root, debug)
         return 0
     # 否则当父目录，逐个 dipNN 跑
     dips = sorted(p for p in root.glob("dip*") if p.is_dir())
@@ -67,7 +88,7 @@ def main() -> int:
         print(f"{root} 下没找到 dipNN 文件夹或 screen_*_ocr.txt")
         return 1
     for d in dips:
-        _run_one(d)
+        _run_one(d, debug)
     return 0
 
 
