@@ -173,6 +173,9 @@ async def main() -> int:
     print("【Step 2c 已接入】上面每条详情已**实时**抽出店铺名/评价数/已拼/好评率/"
           "上榜/口碑标签/规格/券后价等字段（生产同款 OCR 抽取路径）。如某字段为空，"
           "看对应 dipNN/ 下的 screen_*_ocr.txt 核对 OCR 原文再校准。")
+    print("【视图层探针】dipNN/ 下还落了 screen_NN_hier.xml（原生视图树）。若店名"
+          "OCR 不稳，可在该 dip 目录里跑下面命令，看店名是否在原生 text 属性里：")
+    print('   findstr /I /C:"进店" /C:"店" screen_*_hier.xml')
     return 0
 
 

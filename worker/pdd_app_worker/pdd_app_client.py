@@ -1367,6 +1367,15 @@ class PddAppClient:
                         (cap / f"screen_{idx:02d}_ocr.txt").write_text(
                             "\n".join(lines), encoding="utf-8"
                         )
+                        # 视图层探针：店名跑马灯/漏识时，原生 TextView 的 text 属性
+                        # 往往是完整店名（不被裁切）。落盘视图树供评估原生提取可行性。
+                        try:
+                            xml = d.dump_hierarchy()
+                            (cap / f"screen_{idx:02d}_hier.xml").write_text(
+                                xml or "", encoding="utf-8"
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(f"[{self.serial}] hier s{idx}: {exc!r}")
                     except Exception as exc:  # noqa: BLE001
                         logger.debug(f"[{self.serial}] cap s{idx} failed: {exc!r}")
 
