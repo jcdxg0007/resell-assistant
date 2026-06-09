@@ -2341,6 +2341,12 @@ class PddAppClient:
         except Exception:  # noqa: BLE001
             return items
 
+        # 顶部安全区：状态栏 + 吸顶搜索/筛选条，约屏高 17%。结果页最上面那张卡的
+        # 商品图常被吸顶栏遮住一截，其 image_bounds 上沿会伸进顶栏甚至 y<0；若直接
+        # clamp 到 0 裁，裁出来的是手机状态栏而非商品图。这里不让裁剪侵入顶栏，
+        # 且若图被顶栏遮挡过多（剩不到原高一半）就跳过——宁可没图，不要顶栏图。
+        safe_top = int(h * 0.17)
+
         n_ok = 0
         for it in targets:
             ib = it["image_bounds"]
@@ -2348,11 +2354,15 @@ class PddAppClient:
                 x1, y1, x2, y2 = int(ib[0]), int(ib[1]), int(ib[2]), int(ib[3])
             except Exception:  # noqa: BLE001
                 continue
+            intended_h = max(1, min(h, y2) - y1)  # 用原始上沿算意图高度
             x1 = max(0, x1)
-            y1 = max(0, y1)
+            y1 = max(safe_top, y1)
             x2 = min(w, x2)
             y2 = min(h, y2)
             if x2 - x1 < 60 or y2 - y1 < 60:
+                continue
+            # 被顶栏吃掉过多 → 这张图不可靠（多半是顶栏/吸顶条），跳过不出图
+            if (y2 - y1) < 0.5 * intended_h:
                 continue
             try:
                 crop = screenshot[y1:y2, x1:x2]
