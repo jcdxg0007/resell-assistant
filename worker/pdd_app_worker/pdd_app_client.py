@@ -2158,6 +2158,15 @@ class PddAppClient:
                                 existing[opt_k] = card[opt_k]
                     if not existing.get("sales") and card.get("sales"):
                         existing["sales"] = card["sales"]
+                    # 主图择优：同一卡在不同屏会处于不同高度，越靠下(image_bounds 上沿
+                    # y 越大)越不会被吸顶栏遮挡、裁得越完整。缺图就补，更完整就替。
+                    new_img = card.get("image")
+                    if new_img:
+                        ex_top = (existing.get("image_bounds") or [0, -(10 ** 9)])[1]
+                        new_top = (card.get("image_bounds") or [0, -(10 ** 9)])[1]
+                        if not existing.get("image") or new_top > ex_top:
+                            existing["image"] = new_img
+                            existing["image_bounds"] = card.get("image_bounds")
                     continue
                 seen_titles[title] = card
                 new_this_screen += 1
@@ -2343,51 +2352,123 @@ class PddAppClient:
 
         # 顶部安全区：状态栏 + 吸顶搜索/筛选条，约屏高 17%。结果页最上面那张卡的
         # 商品图常被吸顶栏遮住一截，其 image_bounds 上沿会伸进顶栏甚至 y<0；若直接
-        # clamp 到 0 裁，裁出来的是手机状态栏而非商品图。这里不让裁剪侵入顶栏，
-        # 且若图被顶栏遮挡过多（剩不到原高一半）就跳过——宁可没图，不要顶栏图。
+        # clamp 到 0 裁，裁出来的是手机状态栏而非商品图。这里把裁剪起点压到安全区
+        # 下沿——只裁顶栏以下的可见部分（部分商品图也认得出，且不会是状态栏）。
+        # 这张卡在后续屏往下滚到完整位置时，会被 _collect_items 的去重逻辑用更
+        # 完整的那张图补/替（见该处 image 回填）。
         safe_top = int(h * 0.17)
 
         n_ok = 0
         for it in targets:
-            ib = it["image_bounds"]
-            try:
-                x1, y1, x2, y2 = int(ib[0]), int(ib[1]), int(ib[2]), int(ib[3])
-            except Exception:  # noqa: BLE001
-                continue
-            intended_h = max(1, min(h, y2) - y1)  # 用原始上沿算意图高度
-            x1 = max(0, x1)
-            y1 = max(safe_top, y1)
-            x2 = min(w, x2)
-            y2 = min(h, y2)
-            if x2 - x1 < 60 or y2 - y1 < 60:
-                continue
-            # 被顶栏吃掉过多 → 这张图不可靠（多半是顶栏/吸顶条），跳过不出图
-            if (y2 - y1) < 0.5 * intended_h:
-                continue
-            try:
-                crop = screenshot[y1:y2, x1:x2]
-                ch, cw = crop.shape[:2]
-                scale = _THUMB_MAX_PX / float(max(ch, cw))
-                if scale < 1.0:
-                    crop = cv2.resize(
-                        crop,
-                        (max(1, int(cw * scale)), max(1, int(ch * scale))),
-                        interpolation=cv2.INTER_AREA,
-                    )
-                ok, buf = cv2.imencode(
-                    ".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, _THUMB_JPEG_Q]
-                )
-                if not ok:
-                    continue
-                b64 = base64.b64encode(buf.tobytes()).decode("ascii")
-                it["image"] = f"data:image/jpeg;base64,{b64}"
+            url = self._crop_thumb(screenshot, cv2, it["image_bounds"], safe_top)
+            if url:
+                it["image"] = url
                 n_ok += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"[{self.serial}] crop image failed: {exc}")
-                continue
+
+        # 微划回看补全：上沿伸进安全区的卡（image_bounds 上沿 < safe_top），上面只
+        # 裁到了顶栏以下的残图。真人遇到这种会往回轻划一下把整张图露出来再看——
+        # 这里复刻该动作：把内容往下推到最被遮的那张整图落到安全区下方，重 dump 拿
+        # 新坐标、重新截图裁完整图，再划回原位保持后续滚动节奏。只在确有遮挡卡时
+        # 触发（多是首屏顶卡），所以绝大多数屏不产生额外开销。
+        occluded = [
+            it for it in targets
+            if it.get("image_bounds") and int(it["image_bounds"][1]) < safe_top
+        ]
+        if occluded:
+            await self._reveal_and_recrop(occluded, cv2, safe_top, h)
 
         logger.info(f"[{self.serial}] 主图裁剪 {n_ok}/{len(targets)}")
         return items
+
+    def _crop_thumb(
+        self, screenshot: Any, cv2: Any, bounds: Any, top_floor: int
+    ) -> str | None:
+        """按 ``bounds`` 从截图裁一张缩略图并编码成 data URL；失败/太小返回 None。
+
+        ``top_floor`` 是裁剪上沿下限（安全区下沿），低于它的部分（状态栏/吸顶栏）
+        不会被裁进来——回看复裁时整图已在安全区下方，传 0 即可裁完整图。
+        """
+        try:
+            sh, sw = screenshot.shape[:2]
+            x1, y1, x2, y2 = (
+                int(bounds[0]), int(bounds[1]), int(bounds[2]), int(bounds[3])
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        x1 = max(0, x1)
+        y1 = max(top_floor, y1)
+        x2 = min(sw, x2)
+        y2 = min(sh, y2)
+        if x2 - x1 < 60 or y2 - y1 < 60:
+            return None
+        try:
+            crop = screenshot[y1:y2, x1:x2]
+            ch, cw = crop.shape[:2]
+            scale = _THUMB_MAX_PX / float(max(ch, cw))
+            if scale < 1.0:
+                crop = cv2.resize(
+                    crop,
+                    (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, buf = cv2.imencode(
+                ".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, _THUMB_JPEG_Q]
+            )
+            if not ok:
+                return None
+            b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+            return f"data:image/jpeg;base64,{b64}"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[{self.serial}] crop thumb failed: {exc}")
+            return None
+
+    async def _reveal_and_recrop(
+        self, occluded: list[dict[str, Any]], cv2: Any, safe_top: int, h: int
+    ) -> None:
+        """被吸顶栏裁掉上沿的卡：往回轻划把整图露出安全区下方，重 dump+截图裁完整图。
+
+        裁完把屏幕划回原位，保持 ``_collect_items`` 的滚动节奏/屏计数一致。任何
+        异常都 swallow——回看是锦上添花，残图已在主流程裁好兜底。
+        """
+        worst_top = min(int(it["image_bounds"][1]) for it in occluded)
+        # 把最被遮那张图的上沿推到安全区下方，多给 8% 屏高余量确保整图落下
+        push = min(0.35, (safe_top - worst_top) / float(h) + 0.08)
+        if push <= 0.02:
+            return
+        await self._nudge(frac=push)  # 内容下移，露出被遮的卡
+        try:
+            fresh = await self._dump_visible_cards()
+            shot = await asyncio.to_thread(
+                lambda: self._d.screenshot(format="opencv")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[{self.serial}] 回看复裁 重抓失败: {exc}")
+            shot, fresh = None, []
+        if shot is not None and fresh:
+            for it in occluded:
+                title = it.get("title", "").strip()
+                match = next(
+                    (
+                        c for c in fresh
+                        if c.get("image_bounds")
+                        and self._match_title(c.get("title", "").strip(), title)
+                    ),
+                    None,
+                )
+                if not match:
+                    continue
+                # 划下来后整图应已落到安全区下；仍越界就略过，宁可保留残图
+                # 也别再截进顶栏（top_floor=0 裁完整图，下面先校验上沿安全）
+                try:
+                    if int(match["image_bounds"][1]) < safe_top:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                url = self._crop_thumb(shot, cv2, match["image_bounds"], 0)
+                if url:
+                    it["image"] = url
+        # 划回原位
+        await self._nudge(frac=-push)
 
     async def _dump_with_lazy_recovery(self) -> list[dict[str, Any]]:
         """dump 一次；如果 ≥ 50% 卡片缺价，做微滚动 + 再 dump，按 title 合并。
