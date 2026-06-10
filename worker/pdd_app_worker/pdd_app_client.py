@@ -772,6 +772,9 @@ class PddAppClient:
                 target["thumb_url"] = meta["thumb_url"]
             if meta.get("detail_url"):
                 target["detail_url"] = meta["detail_url"]
+            # 列表卡没图（或本就是追加的新条目）时，用详情页裁到的主图兜底
+            if meta.get("image") and not target.get("image"):
+                target["image"] = meta["image"]
             if fields:
                 target["detail"] = fields
 
@@ -1490,6 +1493,37 @@ class PddAppClient:
                 out["entered"] = False
                 return out
             out["entered"] = True
+
+            # 顺手裁详情页主图：详情页顶部就是商品大图轮播（near-full-width、约见方）。
+            # dip 进的商品若没匹配上列表卡（_merge 追加为新 item），列表那边没缩略图，
+            # 这张详情主图就是它唯一的图来源。首屏已停留 1.6~2.8s，图基本加载完。
+            # 失败 swallow，绝不影响字段收割主流程。
+            if _CAPTURE_IMAGES:
+                try:
+                    import cv2  # noqa: PLC0415 — easyocr 依赖，必有
+                    shot = d.screenshot(format="opencv")
+                    sh, sw = shot.shape[:2]
+                    y1 = int(sh * 0.06)          # 避开状态栏
+                    y2 = min(sh, y1 + sw)        # 取见方一块（商品主图近正方形）
+                    crop = shot[y1:y2, 0:sw]
+                    ch, cw = crop.shape[:2]
+                    scale = _THUMB_MAX_PX / float(max(ch, cw))
+                    if scale < 1.0:
+                        crop = cv2.resize(
+                            crop,
+                            (max(1, int(cw * scale)), max(1, int(ch * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                    ok, buf = cv2.imencode(
+                        ".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, _THUMB_JPEG_Q]
+                    )
+                    if ok:
+                        b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+                        out["image"] = f"data:image/jpeg;base64,{b64}"
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        f"[{self.serial}] detail main image crop failed: {exc!r}"
+                    )
 
             _process_screen(0)
 
