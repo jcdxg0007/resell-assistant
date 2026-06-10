@@ -2700,7 +2700,12 @@ class PddAppClient:
                 if col_w >= 120:
                     g_y2 = ty1 - 8
                     g_y1 = g_y2 - col_w
-                    if g_y1 >= 0:
+                    # g_y1<0 表示方图上沿伸到屏顶以外（最顶部那张被吸顶栏遮住的卡）。
+                    # 仍然给出 bounds（上沿可能为负）——别像以前那样直接丢掉，否则这张
+                    # 卡 image_bounds=None，既没图也进不了回看。给了负上沿后，
+                    # _attach_card_images 会把它判为"被遮"触发回看微划：往回推一截后
+                    # 卡下移、重 dump 时 g_y1 就 ≥0，能裁到完整图。只要图底边在屏内即可。
+                    if g_y2 > 0:
                         image_bounds = [tx1, g_y1, tx2, g_y2]
 
             # 拼接价格：把卡片范围内所有"价格 token"按 x 排序后拼字符串
