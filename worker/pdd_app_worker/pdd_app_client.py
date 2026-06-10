@@ -2137,7 +2137,7 @@ class PddAppClient:
             # OCR 兜底必须用当前屏的实时截图，所以放在跨屏合并之前
             cards = await self._ocr_missing_prices(cards)
             # 主图裁剪同理：必须在滚走之前，用当前屏截图按 image_bounds 裁
-            cards = await self._attach_card_images(cards)
+            cards = await self._attach_card_images(cards, seen_titles)
 
             new_this_screen = 0
             for card in cards:
@@ -2311,7 +2311,9 @@ class PddAppClient:
         return items
 
     async def _attach_card_images(
-        self, items: list[dict[str, Any]]
+        self,
+        items: list[dict[str, Any]],
+        already_seen: dict[str, dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """给每张卡片裁一张主图缩略图（base64 data URL）塞进 ``item["image"]``。
 
@@ -2365,15 +2367,27 @@ class PddAppClient:
                 it["image"] = url
                 n_ok += 1
 
-        # 微划回看补全：上沿伸进安全区的卡（image_bounds 上沿 < safe_top），上面只
-        # 裁到了顶栏以下的残图。真人遇到这种会往回轻划一下把整张图露出来再看——
-        # 这里复刻该动作：把内容往下推到最被遮的那张整图落到安全区下方，重 dump 拿
-        # 新坐标、重新截图裁完整图，再划回原位保持后续滚动节奏。只在确有遮挡卡时
-        # 触发（多是首屏顶卡），所以绝大多数屏不产生额外开销。
-        occluded = [
-            it for it in targets
-            if it.get("image_bounds") and int(it["image_bounds"][1]) < safe_top
-        ]
+        # 微划回看补全：上沿伸进安全区的卡（image_bounds 上沿 < safe_top）上面只裁到
+        # 顶栏以下的残图。但**只对"还没被干净抓到过"的卡回看**——往下滚时新卡都从
+        # 屏底（不被遮）冒出、第一次就拍得最干净，到下一屏才上移被顶栏遮住；所以非
+        # 首屏顶部那张被遮卡，上一屏底部早已拍好，去重会择优保留，无需再回看。只有
+        # 首屏顶卡 / dip 退出后首次收集的卡是真没干净拍过的，才值得微划回看。这样回看
+        # 基本只在一两屏触发，不再每屏都往回滑。
+        def _needs_reveal(it: dict[str, Any]) -> bool:
+            ib = it.get("image_bounds")
+            if not ib or int(ib[1]) >= safe_top:
+                return False
+            prev = (already_seen or {}).get(it.get("title", "").strip())
+            if prev and prev.get("image"):
+                pib = prev.get("image_bounds")
+                try:
+                    if pib and int(pib[1]) >= safe_top:
+                        return False  # 上一屏已干净抓到，去重会保留那张
+                except Exception:  # noqa: BLE001
+                    pass
+            return True
+
+        occluded = [it for it in targets if _needs_reveal(it)]
         if occluded:
             await self._reveal_and_recrop(occluded, cv2, safe_top, h)
 
