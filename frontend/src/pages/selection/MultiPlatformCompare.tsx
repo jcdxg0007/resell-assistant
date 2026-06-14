@@ -1174,6 +1174,10 @@ const MultiPlatformCompare: React.FC = () => {
           const bindings = wc?.bindings || {};
           const wByserial: Record<string, NonNullable<WorkerControl['workers']>[number]> = {};
           workers.forEach((w) => { wByserial[w.serial] = w; });
+          // 心跳口径（顶栏「在线」同源）：判断某机是否真有 worker 在跑——可能是旧
+          // .bat 手动起的、管家没接管的「外部 worker」。用来跟管家自己的子进程口径对账。
+          const hbAccounts = new Set((worker?.accounts || []).filter(Boolean));
+          const hbDevices = new Set(worker?.devices || []);
           return (
             <Space direction="vertical" size="middle" style={{ width: '100%' }}>
               <Alert
@@ -1217,18 +1221,27 @@ const MultiPlatformCompare: React.FC = () => {
                       const acct = bindings[d.serial];
                       const running = !!w?.running;
                       const ready = d.state === 'device';
+                      // 管家没在跑它，但心跳显示有 worker（账号或 serial 在线）→ 外部启动
+                      const externalRunning = !running && (
+                        (!!acct && hbAccounts.has(acct)) || hbDevices.has(d.serial)
+                      );
                       return (
                         <Row key={d.serial} align="middle" gutter={8} wrap={false}>
                           <Col flex="auto">
                             <Space direction="vertical" size={0}>
                               <Space size={6}>
-                                <Badge status={running ? 'success' : ready ? 'default' : 'error'} />
+                                <Badge status={running ? 'success' : externalRunning ? 'processing' : ready ? 'default' : 'error'} />
                                 <Text strong style={{ fontSize: 13 }}>{d.serial}</Text>
                                 {d.state !== 'device' && <Tag color="red">{d.state}</Tag>}
+                                {externalRunning && <Tag color="orange">外部启动</Tag>}
                               </Space>
                               <Text type="secondary" style={{ fontSize: 12 }}>
                                 {acct ? `账号 ${acct}` : '未绑号（去词库管理绑定）'}
-                                {running ? ` · 运行中 pid=${w?.pid}` : ' · 已停止'}
+                                {running
+                                  ? ` · 运行中 pid=${w?.pid}`
+                                  : externalRunning
+                                    ? ' · 运行中（非管家启动，建议关掉旧 .bat 后用管家纳管）'
+                                    : ' · 已停止'}
                                 {w?.crash_count ? ` · 崩溃${w.crash_count}次` : ''}
                               </Text>
                             </Space>
@@ -1240,6 +1253,10 @@ const MultiPlatformCompare: React.FC = () => {
                                   <Button size="small" loading={wcBusy === `restart:${d.serial}`} onClick={() => sendWcCmd('restart', d.serial)}>重启</Button>
                                   <Button size="small" danger loading={wcBusy === `stop:${d.serial}`} onClick={() => sendWcCmd('stop', d.serial)}>停止</Button>
                                 </>
+                              ) : externalRunning ? (
+                                <Tooltip title="该机已有 worker 在跑（多半是旧 start_phone_N.bat 起的）。管家管不到它——请到那台 PC 关掉对应 .bat 窗口，再点这里的启动统一纳管，避免两个 worker 抢同一台手机。">
+                                  <Button size="small" disabled>待纳管</Button>
+                                </Tooltip>
                               ) : (
                                 <Button size="small" type="primary" disabled={!online || !ready || !acct} loading={wcBusy === `start:${d.serial}`} onClick={() => sendWcCmd('start', d.serial)}>启动</Button>
                               )}
