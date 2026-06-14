@@ -6,6 +6,7 @@ import {
 import {
   ReloadOutlined, ControlOutlined, SyncOutlined, ThunderboltOutlined, DeleteOutlined,
   PlayCircleOutlined, PauseCircleOutlined, ProfileOutlined, DownOutlined, UpOutlined,
+  DesktopOutlined, CloudDownloadOutlined, PoweroffOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import api from '../../services/api';
@@ -77,6 +78,31 @@ interface Console {
       next_auto_at: string | null;
     }>;
   };
+}
+
+// 管家(supervisor)状态快照（GET /pdd-runs/worker-control/status）
+interface WorkerControl {
+  online: boolean;
+  host?: string;
+  git_commit?: string;
+  git_branch?: string;
+  ts?: string;
+  devices?: Array<{ serial: string; state: string }>;
+  workers?: Array<{
+    serial: string;
+    account: string | null;
+    name?: string;
+    running: boolean;
+    pid?: number | null;
+    started_at?: string | null;
+    crash_count?: number;
+  }>;
+  bindings?: Record<string, string>;
+  desired?: string[];
+  last_results?: Array<{
+    id?: string; action?: string; serial?: string | null;
+    ok?: boolean; msg?: string; ts?: string;
+  }>;
 }
 
 interface AutoConfig {
@@ -235,6 +261,47 @@ const MultiPlatformCompare: React.FC = () => {
     setTaskLogOpen(true);
     fetchTaskLog(1, taskLogStatus, taskLogSource, taskLogPlatform);
   };
+
+  // ── Worker 机器管理（管家 supervisor：检测/启停/一键更新）─────────
+  const [wcOpen, setWcOpen] = useState(false);
+  const [wc, setWc] = useState<WorkerControl | null>(null);
+  const [wcLoading, setWcLoading] = useState(false);
+  const [wcBusy, setWcBusy] = useState<string | null>(null);  // 正在执行的命令标识
+
+  const fetchWc = useCallback(async () => {
+    setWcLoading(true);
+    try {
+      const res = await api.get('/pdd-runs/worker-control/status');
+      setWc(res.data || null);
+    } catch {
+      setWc(null);
+    }
+    setWcLoading(false);
+  }, []);
+
+  const sendWcCmd = useCallback(async (action: string, serial?: string) => {
+    const busyKey = serial ? `${action}:${serial}` : action;
+    setWcBusy(busyKey);
+    try {
+      await api.post('/pdd-runs/worker-control/command', { action, serial });
+      message.success('命令已下发，管家数秒内执行');
+      // 给管家一点执行时间再拉状态（命令是异步的）
+      setTimeout(fetchWc, 2500);
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '命令下发失败');
+    } finally {
+      setTimeout(() => setWcBusy(null), 2500);
+    }
+  }, [message, fetchWc]);
+
+  const openWorkerMgr = () => { setWcOpen(true); fetchWc(); };
+
+  // 管家面板打开时每 5s 自动刷新状态
+  useEffect(() => {
+    if (!wcOpen) return;
+    const id = window.setInterval(fetchWc, 5000);
+    return () => window.clearInterval(id);
+  }, [wcOpen, fetchWc]);
 
   // 全自动跑批配置
   const [auto, setAuto] = useState<AutoConfig | null>(null);
@@ -632,6 +699,7 @@ const MultiPlatformCompare: React.FC = () => {
               );
             })()}
             <Button icon={<ProfileOutlined />} onClick={openTaskLog}>任务记录</Button>
+            <Button icon={<DesktopOutlined />} onClick={openWorkerMgr}>Worker机器</Button>
             <Button icon={<ControlOutlined />} onClick={() => setRhythmOpen(true)}>采集节奏</Button>
             <Button icon={<ReloadOutlined />} onClick={refreshAll}>刷新</Button>
           </Space>
@@ -1088,6 +1156,119 @@ const MultiPlatformCompare: React.FC = () => {
       {/* 采集节奏控制窗口 */}
       <Drawer title="PDD 采集节奏控制" width={560} open={rhythmOpen} onClose={() => setRhythmOpen(false)} destroyOnHidden>
         <PddRhythmConfig embedded />
+      </Drawer>
+
+      {/* Worker 机器管理：检测设备 / 一键启停 / 一键更新（家里管家进程执行）*/}
+      <Drawer
+        title="Worker 机器管理"
+        width={640}
+        open={wcOpen}
+        onClose={() => setWcOpen(false)}
+        destroyOnHidden
+        extra={<Button size="small" icon={<ReloadOutlined />} loading={wcLoading} onClick={fetchWc}>刷新</Button>}
+      >
+        {(() => {
+          const online = !!wc?.online;
+          const devices = wc?.devices || [];
+          const workers = wc?.workers || [];
+          const bindings = wc?.bindings || {};
+          const wByserial: Record<string, NonNullable<WorkerControl['workers']>[number]> = {};
+          workers.forEach((w) => { wByserial[w.serial] = w; });
+          return (
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <Alert
+                type={online ? 'success' : 'warning'}
+                showIcon
+                message={online ? '管家在线' : '管家离线'}
+                description={
+                  online ? (
+                    <Space size="small" wrap>
+                      <Tag>{wc?.host || '主机'}</Tag>
+                      <Tag color="blue">代码 {wc?.git_commit || '?'} ({wc?.git_branch || '?'})</Tag>
+                      {wc?.ts && <Text type="secondary" style={{ fontSize: 12 }}>更新于 {new Date(wc.ts).toLocaleTimeString('zh-CN', { hour12: false })}</Text>}
+                    </Space>
+                  ) : (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      家里 PC 上没检测到常驻的管家进程。请在 worker 机器上启动一次：
+                      <Text code>python -m pdd_app_worker.supervisor</Text>
+                    </Text>
+                  )
+                }
+              />
+
+              {/* 全局操作 */}
+              <Space wrap>
+                <Button icon={<SyncOutlined />} disabled={!online} loading={wcBusy === 'scan'} onClick={() => sendWcCmd('scan')}>扫描设备</Button>
+                <Button type="primary" icon={<PlayCircleOutlined />} disabled={!online} loading={wcBusy === 'start_all'} onClick={() => sendWcCmd('start_all')}>启动全部</Button>
+                <Button icon={<PoweroffOutlined />} disabled={!online} loading={wcBusy === 'stop_all'} onClick={() => sendWcCmd('stop_all')}>停止全部</Button>
+                <Popconfirm title="git pull 最新代码并重启所有在跑的 worker？" onConfirm={() => sendWcCmd('update')} okText="更新" cancelText="取消" disabled={!online}>
+                  <Button icon={<CloudDownloadOutlined />} disabled={!online} loading={wcBusy === 'update'}>一键更新</Button>
+                </Popconfirm>
+              </Space>
+
+              {/* 设备列表 */}
+              <Card size="small" title={`连接的手机（${devices.length}）`} styles={{ body: { padding: 8 } }}>
+                {devices.length === 0 ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>未检测到手机（adb devices 为空 / 管家离线）</Text>
+                ) : (
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    {devices.map((d) => {
+                      const w = wByserial[d.serial];
+                      const acct = bindings[d.serial];
+                      const running = !!w?.running;
+                      const ready = d.state === 'device';
+                      return (
+                        <Row key={d.serial} align="middle" gutter={8} wrap={false}>
+                          <Col flex="auto">
+                            <Space direction="vertical" size={0}>
+                              <Space size={6}>
+                                <Badge status={running ? 'success' : ready ? 'default' : 'error'} />
+                                <Text strong style={{ fontSize: 13 }}>{d.serial}</Text>
+                                {d.state !== 'device' && <Tag color="red">{d.state}</Tag>}
+                              </Space>
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {acct ? `账号 ${acct}` : '未绑号（去词库管理绑定）'}
+                                {running ? ` · 运行中 pid=${w?.pid}` : ' · 已停止'}
+                                {w?.crash_count ? ` · 崩溃${w.crash_count}次` : ''}
+                              </Text>
+                            </Space>
+                          </Col>
+                          <Col flex="none">
+                            <Space size={4}>
+                              {running ? (
+                                <>
+                                  <Button size="small" loading={wcBusy === `restart:${d.serial}`} onClick={() => sendWcCmd('restart', d.serial)}>重启</Button>
+                                  <Button size="small" danger loading={wcBusy === `stop:${d.serial}`} onClick={() => sendWcCmd('stop', d.serial)}>停止</Button>
+                                </>
+                              ) : (
+                                <Button size="small" type="primary" disabled={!online || !ready || !acct} loading={wcBusy === `start:${d.serial}`} onClick={() => sendWcCmd('start', d.serial)}>启动</Button>
+                              )}
+                            </Space>
+                          </Col>
+                        </Row>
+                      );
+                    })}
+                  </Space>
+                )}
+              </Card>
+
+              {/* 最近命令结果 */}
+              {(wc?.last_results?.length ?? 0) > 0 && (
+                <Card size="small" title="最近命令结果" styles={{ body: { padding: 8 } }}>
+                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                    {wc!.last_results!.map((r, i) => (
+                      <Text key={r.id || i} style={{ fontSize: 12 }} type={r.ok ? undefined : 'danger'}>
+                        {r.ts ? new Date(r.ts).toLocaleTimeString('zh-CN', { hour12: false }) : ''}
+                        {' · '}{r.action}{r.serial ? `(${r.serial})` : ''}
+                        {' · '}{r.ok ? '✓' : '✗'} {r.msg}
+                      </Text>
+                    ))}
+                  </Space>
+                </Card>
+              )}
+            </Space>
+          );
+        })()}
       </Drawer>
 
       {/* 任务记录：派发过的搜索任务流水 */}

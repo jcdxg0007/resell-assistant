@@ -192,3 +192,42 @@ async def get_runtime_config_for_worker(
     DB 里从没改过 → 返回纯默认值，worker 行为与改造前一致。
     """
     return await get_runtime_config(db)
+
+
+# ── 管家(supervisor)控制面 ───────────────────────────────────────
+# 家里那个常驻的管家进程用这两个口：拉命令 + 上报状态。前端侧的「下命令 / 读状态」
+# 在 pdd_runs.py（登录用户鉴权），两边经 Redis 命令队列 + 状态快照解耦。
+@router.get(
+    "/control/poll",
+    summary="管家拉控制命令 + serial↔账号映射",
+    response_model=None,
+)
+async def supervisor_poll(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_worker_token),
+):
+    """管家每隔几秒拉一次：返回待执行命令 + 每台手机该绑的采集号。
+
+    bindings 让管家「启动某台手机」时自动带上正确账号，免去本地编辑 .bat。
+    """
+    from app.services.pdd_worker_control import (
+        get_pdd_device_bindings, pop_supervisor_commands,
+    )
+    commands = await pop_supervisor_commands()
+    bindings = await get_pdd_device_bindings(db)
+    return {"commands": commands, "bindings": bindings}
+
+
+@router.post(
+    "/control/status",
+    summary="管家上报状态快照",
+    response_model=None,
+)
+async def supervisor_status(
+    body: dict[str, Any],
+    _: None = Depends(verify_worker_token),
+):
+    """管家把最新状态（设备/子进程/git commit/最近命令结果）POST 回来存 Redis。"""
+    from app.services.pdd_worker_control import set_supervisor_status
+    await set_supervisor_status(body)
+    return {"ok": True}

@@ -548,3 +548,37 @@ async def read_runs(
         "total": total,
         "items": merged[offset:offset + limit],
     }
+
+
+# ── Worker 机器管理（前端「一键启停 / 更新」面板）────────────────
+# 前端在这里下命令 + 读状态；家里那个常驻「管家」进程经 /pdd-worker/control/*
+# 拉命令、上报状态。两侧经 Redis 命令队列 + 状态快照解耦（见 pdd_worker_control）。
+@router.get("/worker-control/status", summary="管家状态（设备/worker 子进程/git commit）")
+async def read_worker_control_status(
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """读家里管家上报的最新快照。管家离线（>90s 没上报）→ online=False。"""
+    from app.services.pdd_worker_control import get_supervisor_status
+    return await get_supervisor_status()
+
+
+class WorkerControlBody(BaseModel):
+    action: str = Field(..., description="scan/start/stop/restart/start_all/stop_all/update")
+    serial: str | None = Field(None, description="start/stop/restart 必填：目标手机 serial")
+
+
+@router.post("/worker-control/command", summary="给管家下发一条控制命令")
+async def post_worker_control_command(
+    body: WorkerControlBody,
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """下发命令进 Redis 队列，管家下次轮询（数秒内）拉走执行。
+
+    命令是异步的：这里只负责入队，执行结果到管家下次上报的 status.last_results 里看。
+    """
+    from app.services.pdd_worker_control import enqueue_supervisor_command
+    try:
+        cmd = await enqueue_supervisor_command(body.action.strip(), body.serial)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "command": cmd}
